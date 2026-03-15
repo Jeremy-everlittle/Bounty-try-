@@ -983,31 +983,17 @@
             return [];
         }
 
-        // ── Get 24h change ──
-        async function fetch24hChange(currentPrice) {
-            try {
-                const res = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
-                if (res.ok) {
-                    const data = await res.json();
-                    return parseFloat(data.priceChangePercent);
-                }
-            } catch(e) {}
-            return 0;
-        }
-
         // ── Main data fetcher ──
         async function fetchPriceData() {
             // Run all fetches in parallel
-            const [brtiResult, kStrike, periodOpen, history, change24h_unused] = await Promise.all([
+            const [brtiResult, kStrike, periodOpen, history] = await Promise.all([
                 fetchBRTIApprox(),
                 fetchKalshiStrike(),
                 fetchPeriodOpen(),
-                fetchAnalysisHistory(),
-                Promise.resolve(0)
+                fetchAnalysisHistory()
             ]);
 
             const currentPrice = brtiResult.price;
-            const change24h = await fetch24hChange(currentPrice);
 
             // For period open: prefer Kalshi strike, then kline open, then BRTI approx
             let periodOpenPrice;
@@ -1028,7 +1014,6 @@
             return {
                 currentPrice,
                 periodOpenPrice,
-                change24h,
                 history: history.length > 0 ? history : [{ time: Date.now(), price: currentPrice }],
                 source: dataSourceName
             };
@@ -1239,10 +1224,16 @@
         function updateUI(data, periodEnd) {
             // Current price (always live)
             document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
-            const change24h = data.change24h;
+            // Show current price vs strike (how far above/below the strike)
             const changeEl = document.getElementById('price-change-24h');
-            changeEl.textContent = `24h: ${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}%`;
-            changeEl.style.color = change24h >= 0 ? '#3fb950' : '#f85149';
+            if (periodStartPrice !== null) {
+                const strikeDelta = data.currentPrice - periodStartPrice;
+                const direction = strikeDelta >= 0 ? 'Up' : 'Down';
+                changeEl.textContent = `${direction} ${formatPrice(Math.abs(strikeDelta))} vs strike`;
+                changeEl.style.color = strikeDelta >= 0 ? '#3fb950' : '#f85149';
+            } else {
+                changeEl.textContent = '';
+            }
 
             // Period open price
             if (periodStartPrice !== null) {
@@ -1340,8 +1331,13 @@
             transitionRetries = 0;
             lastKalshiTicker = kalshiMarketTicker;
 
-            // Grade the outgoing prediction before clearing
-            if (currentPeriodKey !== null && latestData) {
+            // Move currentPeriodKey to the NEW period BEFORE grading,
+            // so the just-completed period's entry won't be skipped
+            const completedPeriodKey = currentPeriodKey;
+            currentPeriodKey = getPeriodKey();
+
+            // Grade the outgoing prediction
+            if (completedPeriodKey !== null && latestData) {
                 gradePreviousPrediction(latestData.currentPrice);
                 renderPredictionHistory();
             }
@@ -1377,11 +1373,17 @@
                 const data = await fetchPriceData();
                 latestData = data;
 
-                // Check if we actually got a new Kalshi market (not the old one)
+                // Only accept data if the Kalshi market ticker has ACTUALLY changed.
+                // The local clock period key always changes at the boundary, so it's
+                // not reliable for detecting fresh API data.
                 const gotNewKalshiMarket = kalshiMarketTicker && kalshiMarketTicker !== lastKalshiTicker;
-                const periodChanged = newPeriodKey !== currentPeriodKey;
 
-                if (periodChanged || gotNewKalshiMarket) {
+                // If Kalshi is unavailable (no ticker at all), accept after enough
+                // retries (give API ~10s to update) so we don't hang forever
+                const kalshiUnavailable = !kalshiMarketTicker;
+                const enoughRetries = transitionRetries >= 4;
+
+                if (gotNewKalshiMarket || (kalshiUnavailable && enoughRetries)) {
                     // New period confirmed
                     isTransitioning = false;
                     currentPeriodKey = newPeriodKey;
@@ -1398,7 +1400,7 @@
                     return;
                 }
 
-                // Still got old data — show status and retry
+                // Still got old Kalshi ticker — show status and retry
                 document.getElementById('status-bar').innerHTML =
                     '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026 (attempt ' + transitionRetries + ')';
                 document.getElementById('current-price').textContent = 'Waiting for new ticker\u2026';
