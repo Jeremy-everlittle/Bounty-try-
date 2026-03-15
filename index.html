@@ -628,30 +628,65 @@
 
         // ── Kalshi public API (no auth needed) ──
         // Extract the resolution threshold from a Kalshi market object
+        // The strike is the exact price threshold Kalshi uses for settlement
         function extractStrikeFromMarket(m) {
             let strike = null;
+            let source = 'none';
 
-            // 1. yes_sub_title (most reliable — e.g. "$71,497.22 or above")
-            if (m.yes_sub_title) {
-                const match = m.yes_sub_title.match(/\$?([\d,]+\.?\d*)/);
-                if (match) strike = parseFloat(match[1].replace(/,/g, ''));
+            // Priority 1: Parse from text fields that contain the exact threshold
+            // These fields contain human-readable text like "$71,497.22 or above"
+            // or "at least 71497.23"
+            const textFields = [
+                'yes_sub_title', 'subtitle', 'no_sub_title',
+                'rules_primary', 'rules_secondary',
+                'strike_description', 'settlement_sources_description'
+            ];
+
+            for (const field of textFields) {
+                if (!strike && m[field] && typeof m[field] === 'string') {
+                    // Try "at least XXXXX.XX" pattern first (most precise)
+                    let match = m[field].match(/at least ([\d,]+\.?\d*)/i);
+                    if (match) {
+                        strike = parseFloat(match[1].replace(/,/g, ''));
+                        source = field + ' (at least)';
+                        break;
+                    }
+                    // Try "$XX,XXX.XX or above" pattern
+                    match = m[field].match(/\$?([\d,]+\.?\d*)\s*(or above|or more|or higher)/i);
+                    if (match) {
+                        strike = parseFloat(match[1].replace(/,/g, ''));
+                        source = field + ' (or above)';
+                        break;
+                    }
+                    // Try generic dollar amount in BTC range ($50k-$150k)
+                    match = m[field].match(/\$?([\d,]+\.?\d*)/);
+                    if (match) {
+                        const val = parseFloat(match[1].replace(/,/g, ''));
+                        if (val > 50000 && val < 150000) {
+                            strike = val;
+                            source = field + ' (dollar)';
+                            break;
+                        }
+                    }
+                }
             }
-            // 2. subtitle
-            if (!strike && m.subtitle) {
-                const match = m.subtitle.match(/\$?([\d,]+\.?\d*)/);
-                if (match) strike = parseFloat(match[1].replace(/,/g, ''));
+
+            // Priority 2: Try custom_strike field (some Kalshi markets use this)
+            if (!strike && m.custom_strike !== undefined && m.custom_strike !== null) {
+                const raw = parseFloat(m.custom_strike);
+                if (raw > 50000 && raw < 150000) { strike = raw; source = 'custom_strike'; }
+                else if (raw > 5000000) { strike = raw / 100; source = 'custom_strike/100'; }
             }
-            // 3. rules_primary (market rules text, e.g. "at least 71497.23")
-            if (!strike && m.rules_primary) {
-                const match = m.rules_primary.match(/at least ([\d,]+\.?\d*)/i);
-                if (match) strike = parseFloat(match[1].replace(/,/g, ''));
-            }
-            // 4. Last resort: floor_strike (may be in cents)
+
+            // Priority 3: floor_strike (may be in cents — last resort)
             if (!strike && m.floor_strike !== undefined && m.floor_strike !== null) {
                 const raw = parseFloat(m.floor_strike);
                 strike = raw > 200000 ? raw / 100 : raw;
+                source = raw > 200000 ? 'floor_strike/100' : 'floor_strike';
             }
-            return strike;
+
+            console.log('Strike extraction:', source, '=', strike);
+            return { value: strike, source };
         }
 
         async function fetchKalshiStrike() {
@@ -735,10 +770,17 @@
                     }
                 } catch(e) { console.warn('Detail fetch failed:', e); }
 
-                const strike = extractStrikeFromMarket(detailedMarket);
+                const strikeResult = extractStrikeFromMarket(detailedMarket);
+                const strike = strikeResult.value;
 
-                const debugInfo = `Strike: $${strike} | yes_sub: ${detailedMarket.yes_sub_title || 'N/A'} | sub: ${detailedMarket.subtitle || 'N/A'} | floor: ${detailedMarket.floor_strike} | rules: ${(detailedMarket.rules_primary||'').substring(0,80)} | ticker: ${best.ticker}`;
+                const debugInfo = `Strike: $${strike} via ${strikeResult.source} | floor: ${detailedMarket.floor_strike} | ticker: ${best.ticker}`;
                 console.log('Kalshi strike debug:', debugInfo);
+                // Dump ALL keys to find which fields exist
+                console.log('Kalshi market keys:', Object.keys(detailedMarket).join(', '));
+                console.log('Kalshi market string values:', Object.entries(detailedMarket)
+                    .filter(([k,v]) => typeof v === 'string' && v.length > 0)
+                    .map(([k,v]) => `${k}=${v}`)
+                    .join(' | '));
                 const dbgEl = document.getElementById('debug-strike');
                 if (dbgEl) dbgEl.textContent = debugInfo;
                 return strike;
