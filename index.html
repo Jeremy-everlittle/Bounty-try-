@@ -695,15 +695,37 @@
             console.log('DEBUG:', msg);
         }
 
+        // Fetch with CORS proxy fallback for APIs that block cross-origin
+        async function fetchWithCors(url) {
+            // Try direct first
+            try {
+                const res = await fetch(url);
+                if (res.ok) return res;
+            } catch(e) { /* CORS blocked */ }
+
+            // Try CORS proxies
+            const proxies = [
+                'https://corsproxy.io/?' + encodeURIComponent(url),
+                'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+                'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url)
+            ];
+            for (const proxyUrl of proxies) {
+                try {
+                    const res = await fetch(proxyUrl);
+                    if (res.ok) return res;
+                } catch(e) { continue; }
+            }
+            return null;
+        }
+
         async function fetchKalshiStrike() {
             writeDebug('Fetching Kalshi...');
             try {
-                const openRes = await fetch(
-                    'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC&status=open&limit=50'
-                );
+                const kalshiUrl = 'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC&status=open&limit=50';
+                const openRes = await fetchWithCors(kalshiUrl);
 
-                if (!openRes.ok) {
-                    writeDebug('Kalshi API error: ' + openRes.status);
+                if (!openRes) {
+                    writeDebug('Kalshi: all fetch methods failed (CORS)');
                     return null;
                 }
                 const openData = await openRes.json();
@@ -714,7 +736,7 @@
                     return null;
                 }
 
-                writeDebug('Found ' + markets.length + ' markets');
+                writeDebug('Found ' + markets.length + ' Kalshi markets');
 
                 // Filter to 15-minute markets only
                 const filtered15m = markets.filter(m =>
@@ -743,38 +765,30 @@
 
                 kalshiMarketTicker = best.ticker;
 
-                // Dump ALL fields from the market object for debugging
-                const allFields = Object.entries(best)
-                    .map(([k,v]) => k + '=' + JSON.stringify(v))
-                    .join(' | ');
-                console.log('Kalshi ALL fields:', allFields);
+                // Dump ALL fields for debugging
+                console.log('Kalshi ALL fields:', JSON.stringify(best));
 
                 // Try fetching individual market for more detailed fields
                 let detailedMarket = best;
                 try {
                     const detailUrl = 'https://api.elections.kalshi.com/trade-api/v2/markets/' + best.ticker;
-                    const detailRes = await fetch(detailUrl);
-                    if (detailRes.ok) {
+                    const detailRes = await fetchWithCors(detailUrl);
+                    if (detailRes) {
                         const detailData = await detailRes.json();
                         if (detailData.market) {
                             detailedMarket = detailData.market;
-                            const detailFields = Object.entries(detailedMarket)
-                                .map(([k,v]) => k + '=' + JSON.stringify(v))
-                                .join(' | ');
-                            console.log('Kalshi DETAIL fields:', detailFields);
+                            console.log('Kalshi DETAIL fields:', JSON.stringify(detailedMarket));
                         }
                     }
                 } catch(e) {
-                    writeDebug('Detail fetch failed: ' + e.message);
+                    console.warn('Detail fetch failed:', e);
                 }
 
                 const strikeResult = extractStrikeFromMarket(detailedMarket);
                 const strike = strikeResult.value;
 
                 writeDebug('Strike: $' + strike + ' via ' + strikeResult.source +
-                    ' | floor_strike: ' + detailedMarket.floor_strike +
-                    ' | yes_sub: ' + (detailedMarket.yes_sub_title || 'N/A') +
-                    ' | sub: ' + (detailedMarket.subtitle || 'N/A') +
+                    ' | floor: ' + detailedMarket.floor_strike +
                     ' | ticker: ' + best.ticker);
                 return strike;
             } catch (err) {
