@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#0d1117">
+    <title>BTC Price Predictor</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            overflow-x: hidden;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 24px;
+            margin-top: 20px;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #f7931a, #ffb347);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 4px;
+        }
+
+        .header p {
+            font-size: 13px;
+            color: #8b949e;
+        }
+
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 16px;
+            padding: 24px;
+            width: 100%;
+            max-width: 400px;
+            margin-bottom: 16px;
+        }
+
+        .card-label {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #8b949e;
+            margin-bottom: 8px;
+        }
+
+        .price {
+            font-size: 42px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .price-sub {
+            font-size: 14px;
+            color: #8b949e;
+            margin-top: 4px;
+        }
+
+        .predicted-price {
+            color: #58a6ff;
+        }
+
+        .change {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 16px;
+            font-weight: 600;
+            padding: 4px 12px;
+            border-radius: 20px;
+            margin-top: 8px;
+        }
+
+        .change.up { background: rgba(63, 185, 80, 0.15); color: #3fb950; }
+        .change.down { background: rgba(248, 81, 73, 0.15); color: #f85149; }
+        .change.neutral { background: rgba(139, 148, 158, 0.15); color: #8b949e; }
+
+        .confidence {
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid #30363d;
+        }
+
+        .confidence-label {
+            font-size: 12px;
+            color: #8b949e;
+            margin-bottom: 6px;
+        }
+
+        .confidence-bar {
+            height: 6px;
+            background: #21262d;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .confidence-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.5s ease;
+            background: linear-gradient(90deg, #f85149, #d29922, #3fb950);
+        }
+
+        .confidence-value {
+            font-size: 13px;
+            color: #8b949e;
+            margin-top: 4px;
+            text-align: right;
+        }
+
+        .chart-container {
+            position: relative;
+            width: 100%;
+            height: 200px;
+            margin-top: 12px;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        .signals {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .signal {
+            background: #21262d;
+            border-radius: 10px;
+            padding: 12px;
+            text-align: center;
+        }
+
+        .signal-name {
+            font-size: 11px;
+            color: #8b949e;
+            margin-bottom: 4px;
+        }
+
+        .signal-value {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .signal-value.bullish { color: #3fb950; }
+        .signal-value.bearish { color: #f85149; }
+        .signal-value.neutral { color: #d29922; }
+
+        .refresh-btn {
+            background: linear-gradient(135deg, #f7931a, #e8850f);
+            color: #fff;
+            border: none;
+            border-radius: 12px;
+            padding: 14px 32px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            max-width: 400px;
+            margin-top: 8px;
+            transition: opacity 0.2s;
+        }
+
+        .refresh-btn:active { opacity: 0.7; }
+        .refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .last-updated {
+            font-size: 11px;
+            color: #484f58;
+            margin-top: 12px;
+            text-align: center;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            border: 2px solid #30363d;
+            border-top-color: #f7931a;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+            margin-right: 6px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .disclaimer {
+            font-size: 10px;
+            color: #484f58;
+            text-align: center;
+            max-width: 400px;
+            margin-top: 20px;
+            line-height: 1.5;
+        }
+
+        .loading-state .price {
+            color: #484f58;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>BTC Predictor</h1>
+        <p>15-Minute Price Prediction</p>
+    </div>
+
+    <div class="card" id="current-card">
+        <div class="card-label">Current Price</div>
+        <div class="price" id="current-price">--</div>
+        <div class="price-sub" id="price-change-24h"></div>
+    </div>
+
+    <div class="card" id="prediction-card">
+        <div class="card-label">Predicted Price in 15 min</div>
+        <div class="price predicted-price" id="predicted-price">--</div>
+        <div id="predicted-change"></div>
+
+        <div class="confidence">
+            <div class="confidence-label">Prediction Confidence</div>
+            <div class="confidence-bar">
+                <div class="confidence-fill" id="confidence-fill" style="width: 0%"></div>
+            </div>
+            <div class="confidence-value" id="confidence-value">--</div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-label">Price History & Prediction</div>
+        <div class="chart-container">
+            <canvas id="chart"></canvas>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-label">Technical Signals</div>
+        <div class="signals">
+            <div class="signal">
+                <div class="signal-name">Momentum</div>
+                <div class="signal-value" id="sig-momentum">--</div>
+            </div>
+            <div class="signal">
+                <div class="signal-name">Volatility</div>
+                <div class="signal-value" id="sig-volatility">--</div>
+            </div>
+            <div class="signal">
+                <div class="signal-name">Trend</div>
+                <div class="signal-value" id="sig-trend">--</div>
+            </div>
+            <div class="signal">
+                <div class="signal-name">RSI Signal</div>
+                <div class="signal-value" id="sig-rsi">--</div>
+            </div>
+        </div>
+    </div>
+
+    <button class="refresh-btn" id="refresh-btn" onclick="fetchAndPredict()">Refresh</button>
+    <div class="last-updated" id="last-updated"></div>
+
+    <p class="disclaimer">
+        This prediction uses simple technical analysis (moving averages, RSI, momentum)
+        on recent price data. It is for entertainment only and should NOT be used for
+        financial decisions. Crypto is highly volatile and unpredictable.
+    </p>
+
+    <script>
+        const API_URL = 'https://api.coingecko.com/api/v3';
+        let priceHistory = [];
+        let predictionPoint = null;
+        let autoRefreshTimer = null;
+
+        async function fetchPriceData() {
+            // Fetch current price
+            const tickerRes = await fetch(`${API_URL}/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true`);
+            const tickerData = await tickerRes.json();
+
+            // Fetch recent price history (last 1 hour, 1-min candles via market_chart)
+            const chartRes = await fetch(`${API_URL}/coins/bitcoin/market_chart?vs_currency=usd&days=1`);
+            const chartData = await chartRes.json();
+
+            return {
+                currentPrice: tickerData.bitcoin.usd,
+                change24h: tickerData.bitcoin.usd_24h_change,
+                // Get last ~60 data points (roughly last hour)
+                history: chartData.prices.slice(-60).map(p => ({ time: p[0], price: p[1] }))
+            };
+        }
+
+        function computeRSI(prices, period = 14) {
+            if (prices.length < period + 1) return 50;
+            let gains = 0, losses = 0;
+            for (let i = prices.length - period; i < prices.length; i++) {
+                const diff = prices[i] - prices[i - 1];
+                if (diff > 0) gains += diff;
+                else losses -= diff;
+            }
+            if (losses === 0) return 100;
+            const rs = (gains / period) / (losses / period);
+            return 100 - (100 / (1 + rs));
+        }
+
+        function computeEMA(prices, period) {
+            const k = 2 / (period + 1);
+            let ema = prices[0];
+            for (let i = 1; i < prices.length; i++) {
+                ema = prices[i] * k + ema * (1 - k);
+            }
+            return ema;
+        }
+
+        function predictPrice(data) {
+            const prices = data.history.map(h => h.price);
+            const current = data.currentPrice;
+
+            // 1. Momentum (rate of change over last 10 points)
+            const lookback = Math.min(10, prices.length - 1);
+            const oldPrice = prices[prices.length - 1 - lookback];
+            const momentum = (current - oldPrice) / oldPrice;
+
+            // 2. EMA crossover signal
+            const ema5 = computeEMA(prices, 5);
+            const ema20 = computeEMA(prices, 20);
+            const emaCrossSignal = (ema5 - ema20) / current;
+
+            // 3. RSI
+            const rsi = computeRSI(prices);
+            let rsiSignal = 0;
+            if (rsi > 70) rsiSignal = -0.002; // overbought - bearish
+            else if (rsi < 30) rsiSignal = 0.002; // oversold - bullish
+
+            // 4. Volatility (std dev of recent returns)
+            const returns = [];
+            for (let i = 1; i < prices.length; i++) {
+                returns.push((prices[i] - prices[i - 1]) / prices[i - 1]);
+            }
+            const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
+            const volatility = Math.sqrt(
+                returns.reduce((sum, r) => sum + (r - avgReturn) ** 2, 0) / returns.length
+            );
+
+            // Combine signals with weights
+            const momentumWeight = 0.4;
+            const emaWeight = 0.35;
+            const rsiWeight = 0.25;
+
+            const predictedChange =
+                momentum * momentumWeight +
+                emaCrossSignal * emaWeight * 10 +
+                rsiSignal * rsiWeight;
+
+            // Scale for 15-minute window (dampen the signal)
+            const scaledChange = predictedChange * 0.3;
+            const predictedPrice = current * (1 + scaledChange);
+
+            // Confidence: lower when volatility is high
+            const baseConfidence = 0.65;
+            const volPenalty = Math.min(volatility * 50, 0.4);
+            const confidence = Math.max(0.15, Math.min(0.85, baseConfidence - volPenalty));
+
+            // Determine signal labels
+            const trendLabel = ema5 > ema20 ? 'Bullish' : ema5 < ema20 ? 'Bearish' : 'Neutral';
+            const momentumLabel = momentum > 0.001 ? 'Bullish' : momentum < -0.001 ? 'Bearish' : 'Neutral';
+            const rsiLabel = rsi > 70 ? 'Overbought' : rsi < 30 ? 'Oversold' : 'Neutral';
+            const volLabel = volatility > 0.005 ? 'High' : volatility > 0.002 ? 'Medium' : 'Low';
+
+            return {
+                predictedPrice,
+                changePercent: scaledChange * 100,
+                confidence,
+                signals: {
+                    momentum: momentumLabel,
+                    volatility: volLabel,
+                    trend: trendLabel,
+                    rsi: rsiLabel
+                }
+            };
+        }
+
+        function formatPrice(price) {
+            return '$' + price.toLocaleString('en-US', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
+        }
+
+        function drawChart(history, currentPrice, predictedPrice) {
+            const canvas = document.getElementById('chart');
+            const ctx = canvas.getContext('2d');
+            const dpr = window.devicePixelRatio || 1;
+
+            canvas.width = canvas.offsetWidth * dpr;
+            canvas.height = canvas.offsetHeight * dpr;
+            ctx.scale(dpr, dpr);
+
+            const w = canvas.offsetWidth;
+            const h = canvas.offsetHeight;
+            const pad = { top: 15, right: 10, bottom: 25, left: 60 };
+
+            ctx.clearRect(0, 0, w, h);
+
+            const prices = history.map(p => p.price);
+            const allPrices = [...prices, predictedPrice];
+            const minP = Math.min(...allPrices) * 0.9999;
+            const maxP = Math.max(...allPrices) * 1.0001;
+            const range = maxP - minP;
+
+            const totalPoints = prices.length + 3; // extra space for prediction
+            const xStep = (w - pad.left - pad.right) / (totalPoints - 1);
+
+            function toX(i) { return pad.left + i * xStep; }
+            function toY(p) { return pad.top + (1 - (p - minP) / range) * (h - pad.top - pad.bottom); }
+
+            // Grid lines
+            ctx.strokeStyle = '#21262d';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < 4; i++) {
+                const y = pad.top + (i / 3) * (h - pad.top - pad.bottom);
+                ctx.beginPath();
+                ctx.moveTo(pad.left, y);
+                ctx.lineTo(w - pad.right, y);
+                ctx.stroke();
+
+                const priceLabel = maxP - (i / 3) * range;
+                ctx.fillStyle = '#484f58';
+                ctx.font = '10px -apple-system, sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText(formatPrice(priceLabel), pad.left - 6, y + 3);
+            }
+
+            // Price line gradient fill
+            ctx.beginPath();
+            ctx.moveTo(toX(0), toY(prices[0]));
+            for (let i = 1; i < prices.length; i++) {
+                ctx.lineTo(toX(i), toY(prices[i]));
+            }
+            ctx.lineTo(toX(prices.length - 1), h - pad.bottom);
+            ctx.lineTo(toX(0), h - pad.bottom);
+            ctx.closePath();
+            const gradient = ctx.createLinearGradient(0, pad.top, 0, h - pad.bottom);
+            gradient.addColorStop(0, 'rgba(247, 147, 26, 0.15)');
+            gradient.addColorStop(1, 'rgba(247, 147, 26, 0)');
+            ctx.fillStyle = gradient;
+            ctx.fill();
+
+            // Price line
+            ctx.beginPath();
+            ctx.moveTo(toX(0), toY(prices[0]));
+            for (let i = 1; i < prices.length; i++) {
+                ctx.lineTo(toX(i), toY(prices[i]));
+            }
+            ctx.strokeStyle = '#f7931a';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Prediction dashed line
+            const lastIdx = prices.length - 1;
+            const predIdx = prices.length + 2;
+            ctx.beginPath();
+            ctx.moveTo(toX(lastIdx), toY(prices[lastIdx]));
+            ctx.lineTo(toX(predIdx), toY(predictedPrice));
+            ctx.strokeStyle = predictedPrice >= currentPrice ? '#3fb950' : '#f85149';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Current price dot
+            ctx.beginPath();
+            ctx.arc(toX(lastIdx), toY(prices[lastIdx]), 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#f7931a';
+            ctx.fill();
+
+            // Predicted price dot
+            ctx.beginPath();
+            ctx.arc(toX(predIdx), toY(predictedPrice), 5, 0, Math.PI * 2);
+            ctx.fillStyle = predictedPrice >= currentPrice ? '#3fb950' : '#f85149';
+            ctx.fill();
+
+            // Labels
+            ctx.font = '10px -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#8b949e';
+            ctx.fillText('Now', toX(lastIdx), h - 6);
+            ctx.fillText('+15m', toX(predIdx), h - 6);
+        }
+
+        async function fetchAndPredict() {
+            const btn = document.getElementById('refresh-btn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span>Loading...';
+
+            try {
+                const data = await fetchPriceData();
+                const prediction = predictPrice(data);
+
+                // Update current price
+                document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
+                const change24h = data.change24h;
+                const changeEl = document.getElementById('price-change-24h');
+                changeEl.textContent = `24h: ${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}%`;
+                changeEl.style.color = change24h >= 0 ? '#3fb950' : '#f85149';
+
+                // Update prediction
+                document.getElementById('predicted-price').textContent = formatPrice(prediction.predictedPrice);
+
+                const predChangeEl = document.getElementById('predicted-change');
+                const changeClass = prediction.changePercent > 0.01 ? 'up' : prediction.changePercent < -0.01 ? 'down' : 'neutral';
+                const arrow = prediction.changePercent > 0.01 ? '&#9650;' : prediction.changePercent < -0.01 ? '&#9660;' : '&#9654;';
+                predChangeEl.innerHTML = `<span class="change ${changeClass}">${arrow} ${prediction.changePercent >= 0 ? '+' : ''}${prediction.changePercent.toFixed(3)}%</span>`;
+
+                // Update confidence
+                const confPercent = Math.round(prediction.confidence * 100);
+                document.getElementById('confidence-fill').style.width = confPercent + '%';
+                document.getElementById('confidence-value').textContent = confPercent + '%';
+
+                // Update signals
+                const sigClasses = { Bullish: 'bullish', Bearish: 'bearish', Neutral: 'neutral',
+                    Overbought: 'bearish', Oversold: 'bullish', High: 'bearish', Medium: 'neutral', Low: 'bullish' };
+
+                for (const [key, val] of Object.entries(prediction.signals)) {
+                    const el = document.getElementById('sig-' + key);
+                    el.textContent = val;
+                    el.className = 'signal-value ' + (sigClasses[val] || 'neutral');
+                }
+
+                // Draw chart
+                drawChart(data.history, data.currentPrice, prediction.predictedPrice);
+
+                // Update timestamp
+                document.getElementById('last-updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+
+                priceHistory = data.history;
+                predictionPoint = prediction.predictedPrice;
+
+            } catch (err) {
+                console.error('Error:', err);
+                document.getElementById('current-price').textContent = 'Error loading';
+                document.getElementById('current-price').style.fontSize = '20px';
+            }
+
+            btn.disabled = false;
+            btn.textContent = 'Refresh';
+        }
+
+        // Auto-refresh every 60 seconds
+        function startAutoRefresh() {
+            if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+            autoRefreshTimer = setInterval(fetchAndPredict, 60000);
+        }
+
+        // Handle resize
+        window.addEventListener('resize', () => {
+            if (priceHistory.length && predictionPoint) {
+                drawChart(priceHistory, priceHistory[priceHistory.length - 1].price, predictionPoint);
+            }
+        });
+
+        // Initial load
+        fetchAndPredict();
+        startAutoRefresh();
+    </script>
+</body>
+</html>

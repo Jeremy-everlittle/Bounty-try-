@@ -1,0 +1,11 @@
+{
+    "name": "BTC Price Predictor",
+    "short_name": "BTC Predict",
+    "description": "Bitcoin 15-minute price prediction using technical analysis",
+    "start_url": "/index.html",
+    "display": "standalone",
+    "background_color": "#0d1117",
+    "theme_color": "#0d1117",
+    "orientation": "portrait",
+    "icons": []
+}
