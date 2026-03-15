@@ -298,6 +298,10 @@
             font-size: 34px;
         }
 
+        .pred-row.updated .price {
+            font-size: 22px;
+        }
+
         .updated-color {
             color: #d2a8ff !important;
         }
@@ -545,7 +549,8 @@
             }
 
             let html = '';
-            const toShow = [...predictionLog].reverse();
+            // Only show completed cycles (not the current open period)
+            const toShow = [...predictionLog].filter(p => p.correct !== null).reverse();
             for (const p of toShow) {
                 const icon = p.correct === true ? '\u2713' : p.correct === false ? '\u2717' : '\u25CF';
                 const cls = p.correct === true ? 'correct' : p.correct === false ? 'wrong' : 'pending';
@@ -621,19 +626,73 @@
         let kalshiMarketTicker = null;
 
         // ── Kalshi public API (no auth needed) ──
+        // Extract the resolution threshold from a Kalshi market object
+        function extractStrikeFromMarket(m) {
+            let strike = null;
+
+            // 1. yes_sub_title (most reliable — e.g. "$71,497.22 or above")
+            if (m.yes_sub_title) {
+                const match = m.yes_sub_title.match(/\$?([\d,]+\.?\d*)/);
+                if (match) strike = parseFloat(match[1].replace(/,/g, ''));
+            }
+            // 2. subtitle
+            if (!strike && m.subtitle) {
+                const match = m.subtitle.match(/\$?([\d,]+\.?\d*)/);
+                if (match) strike = parseFloat(match[1].replace(/,/g, ''));
+            }
+            // 3. rules_primary (market rules text, e.g. "at least 71497.23")
+            if (!strike && m.rules_primary) {
+                const match = m.rules_primary.match(/at least ([\d,]+\.?\d*)/i);
+                if (match) strike = parseFloat(match[1].replace(/,/g, ''));
+            }
+            // 4. Last resort: floor_strike (may be in cents)
+            if (!strike && m.floor_strike !== undefined && m.floor_strike !== null) {
+                const raw = parseFloat(m.floor_strike);
+                strike = raw > 200000 ? raw / 100 : raw;
+            }
+            return strike;
+        }
+
         async function fetchKalshiStrike() {
             try {
-                const res = await fetch(
-                    'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC&status=open&limit=50'
-                );
-                if (!res.ok) throw new Error('Kalshi API ' + res.status);
-                const data = await res.json();
-                const markets = data.markets || [];
+                // Fetch both open and recently settled markets
+                const [openRes, settledRes] = await Promise.all([
+                    fetch('https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC&status=open&limit=50'),
+                    fetch('https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC&status=settled&limit=10')
+                        .catch(() => null)
+                ]);
+
+                if (!openRes.ok) throw new Error('Kalshi API ' + openRes.status);
+                const openData = await openRes.json();
+                const markets = openData.markets || [];
+
+                // Also parse settled markets for settlement_value cross-reference
+                let lastSettlement = null;
+                if (settledRes && settledRes.ok) {
+                    try {
+                        const settledData = await settledRes.json();
+                        const settled15m = (settledData.markets || []).filter(m =>
+                            (m.ticker && m.ticker.includes('15M')) ||
+                            (m.title && m.title.toLowerCase().includes('15 min'))
+                        );
+                        if (settled15m.length > 0) {
+                            // Most recently settled
+                            settled15m.sort((a, b) =>
+                                new Date(b.close_time || b.expiration_time) - new Date(a.close_time || a.expiration_time));
+                            const last = settled15m[0];
+                            if (last.settlement_value !== undefined) {
+                                lastSettlement = parseFloat(last.settlement_value);
+                            }
+                            console.log('Kalshi last settled:', last.ticker,
+                                'settlement_value:', last.settlement_value,
+                                'result:', last.result);
+                        }
+                    } catch(e) { console.warn('Settled parse error:', e); }
+                }
 
                 if (markets.length === 0) return null;
 
                 // Filter to 15-minute markets only
-                // Ticker pattern: KXBTC15M-... or title contains "15 min"
                 const filtered15m = markets.filter(m =>
                     (m.ticker && m.ticker.includes('15M')) ||
                     (m.title && m.title.toLowerCase().includes('15 min')) ||
@@ -657,29 +716,14 @@
 
                 kalshiMarketTicker = best.ticker;
 
-                // Extract strike from the market subtitle or floor_strike
-                // Kalshi market subtitle format: "Bitcoin price at or above $71,543.27"
-                // or use floor_strike field
-                let strike = null;
-                if (best.floor_strike !== undefined && best.floor_strike !== null) {
-                    // floor_strike may be in cents (>1M) or dollars (<200k)
-                    const raw = parseFloat(best.floor_strike);
-                    strike = raw > 200000 ? raw / 100 : raw;
-                }
-                if (!strike && best.subtitle) {
-                    const match = best.subtitle.match(/\$?([\d,]+\.?\d*)/);
-                    if (match) {
-                        strike = parseFloat(match[1].replace(/,/g, ''));
-                    }
-                }
-                if (!strike && best.yes_sub_title) {
-                    const match = best.yes_sub_title.match(/\$?([\d,]+\.?\d*)/);
-                    if (match) {
-                        strike = parseFloat(match[1].replace(/,/g, ''));
-                    }
-                }
+                const strike = extractStrikeFromMarket(best);
 
-                console.log('Kalshi market:', best.ticker, 'strike:', strike, 'closes:', best.close_time);
+                console.log('Kalshi market:', best.ticker, 'strike:', strike,
+                    'closes:', best.close_time,
+                    'yes_sub_title:', best.yes_sub_title,
+                    'subtitle:', best.subtitle,
+                    'floor_strike:', best.floor_strike,
+                    'lastSettlement:', lastSettlement);
                 return strike;
             } catch (err) {
                 console.warn('Kalshi API failed:', err.message);
