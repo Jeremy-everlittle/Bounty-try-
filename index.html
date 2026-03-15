@@ -397,7 +397,7 @@
 <body>
     <div class="header">
         <h1>BTC Predictor</h1>
-        <p><span class="live-dot"></span>Live Price &amp; Next Prediction</p>
+        <p><span class="live-dot"></span>Kalshi BTC Up or Down &middot; 15 min</p>
     </div>
 
     <div class="card" id="current-card">
@@ -405,7 +405,7 @@
         <div class="price" id="current-price">--</div>
         <div class="price-sub" id="price-change-24h"></div>
         <div class="period-info" id="period-start-row">
-            <span class="period-label">Period open</span>
+            <span class="period-label">Period open (strike)</span>
             <span class="period-value" id="period-start-price">--</span>
             <span class="period-delta" id="period-delta"></span>
         </div>
@@ -483,9 +483,10 @@
     <div class="status-bar" id="status-bar"></div>
 
     <p class="disclaimer">
-        This prediction uses simple technical analysis (moving averages, RSI, momentum)
-        on recent price data. It is for entertainment only and should NOT be used for
-        financial decisions. Crypto is highly volatile and unpredictable.
+        Aligned with Kalshi "BTC Up or Down - 15 minutes" markets.
+        Period open price sourced from exchange 15-min kline open (Kraken/Coinbase/Binance).
+        Kalshi resolves using CF Benchmarks BRTI — prices may differ slightly.
+        For entertainment only. NOT financial advice.
     </p>
 
     <script>
@@ -495,20 +496,17 @@
         let latestData = null;
 
         // ── Prediction history (persisted in localStorage) ──────────
-        // Each entry: { time, periodKey, predictedPrice, startPrice, actualPrice, direction, actualDirection, correct }
         let predictionLog = [];
         try {
             predictionLog = JSON.parse(localStorage.getItem('btcPredLog') || '[]');
         } catch(e) { predictionLog = []; }
 
         function savePredictionLog() {
-            // Keep last 10 only
             predictionLog = predictionLog.slice(-10);
             localStorage.setItem('btcPredLog', JSON.stringify(predictionLog));
         }
 
         function recordPrediction(periodKey, startPrice, predictedPrice, targetTimeStr) {
-            // Don't double-record for the same period
             if (predictionLog.length && predictionLog[predictionLog.length - 1].periodKey === periodKey) return;
             predictionLog.push({
                 time: targetTimeStr,
@@ -524,8 +522,6 @@
         }
 
         function gradePreviousPrediction(currentPrice) {
-            // Grade the second-to-last entry (the one whose period just ended)
-            // The last entry is the CURRENT period (still open)
             for (let i = predictionLog.length - 1; i >= 0; i--) {
                 if (predictionLog[i].actualPrice === null && predictionLog[i].periodKey !== currentPeriodKey) {
                     predictionLog[i].actualPrice = currentPrice;
@@ -548,7 +544,6 @@
             }
 
             let html = '';
-            // Show most recent first
             const toShow = [...predictionLog].reverse();
             for (const p of toShow) {
                 const icon = p.correct === true ? '\u2713' : p.correct === false ? '\u2717' : '\u25CF';
@@ -567,7 +562,6 @@
             }
             container.innerHTML = html;
 
-            // Stats
             if (graded.length > 0) {
                 const correct = graded.filter(p => p.correct).length;
                 const wrong = graded.length - correct;
@@ -581,17 +575,20 @@
 
         // ── Time helpers ──────────────────────────────────────────────
 
-        function getNextQuarterTime() {
+        // Get the START of the current 15-min Kalshi period
+        function getPeriodStartTime() {
             const now = new Date();
             const mins = now.getMinutes();
-            const nextQuarter = Math.ceil((mins + 1) / 15) * 15;
-            const target = new Date(now);
-            target.setMinutes(nextQuarter, 0, 0);
-            if (nextQuarter >= 60) {
-                target.setMinutes(0, 0, 0);
-                target.setHours(target.getHours() + 1);
-            }
-            return target;
+            const periodStart = Math.floor(mins / 15) * 15;
+            const t = new Date(now);
+            t.setMinutes(periodStart, 0, 0);
+            return t;
+        }
+
+        // Get the END of the current 15-min Kalshi period (= next quarter)
+        function getPeriodEndTime() {
+            const start = getPeriodStartTime();
+            return new Date(start.getTime() + 15 * 60 * 1000);
         }
 
         function getSecondsUntilTarget(target) {
@@ -608,87 +605,166 @@
             return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
         }
 
-        // ── Data fetching (multi-API with fallbacks) ──────────────────
+        // ── Data fetching ─────────────────────────────────────────────
+        // Kalshi uses CF Benchmarks BRTI which aggregates from:
+        // Bitstamp, Coinbase, Gemini, itBit/Paxos, Kraken, LMAX Digital
+        // We fetch from Kraken (BRTI constituent) as primary,
+        // with Coinbase and Binance as fallbacks.
+        // We always fetch the 15-minute kline to get the exact period open price.
 
-        // Primary: Binance (no API key needed, very reliable)
+        let dataSourceName = '';
+
+        // ── Kraken (BRTI constituent) ──
+        async function fetchFromKraken() {
+            // Kraken OHLC — interval=15 gives 15-min candles
+            const ohlcRes = await fetch('https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=15');
+            if (!ohlcRes.ok) throw new Error('Kraken OHLC failed');
+            const ohlcData = await ohlcRes.json();
+            if (ohlcData.error && ohlcData.error.length) throw new Error(ohlcData.error[0]);
+
+            // Kraken returns { result: { XXBTZUSD: [[time, open, high, low, close, vwap, volume, count], ...] } }
+            const pairKey = Object.keys(ohlcData.result).find(k => k !== 'last');
+            const candles = ohlcData.result[pairKey];
+
+            // Current 15m candle is the last one
+            const current15m = candles[candles.length - 1];
+            const periodOpenPrice = parseFloat(current15m[1]); // open price
+            const currentPrice = parseFloat(current15m[4]);     // close = latest price
+
+            // Use last 60 candles (15 hours) for analysis, map to 1-min-like points
+            const history = candles.slice(-60).map(c => ({
+                time: c[0] * 1000,
+                price: parseFloat(c[4])
+            }));
+
+            // Also get ticker for 24h change
+            const tickerRes = await fetch('https://api.kraken.com/0/public/Ticker?pair=XBTUSD');
+            let change24h = 0;
+            if (tickerRes.ok) {
+                const tickerData = await tickerRes.json();
+                const tk = Object.keys(tickerData.result)[0];
+                const openPrice24h = parseFloat(tickerData.result[tk].o);
+                change24h = ((currentPrice - openPrice24h) / openPrice24h) * 100;
+            }
+
+            // Fetch 1-minute klines for better analysis granularity
+            const ohlc1mRes = await fetch('https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=1');
+            let history1m = history;
+            if (ohlc1mRes.ok) {
+                const ohlc1mData = await ohlc1mRes.json();
+                const pairKey1m = Object.keys(ohlc1mData.result).find(k => k !== 'last');
+                const candles1m = ohlc1mData.result[pairKey1m];
+                history1m = candles1m.slice(-60).map(c => ({
+                    time: c[0] * 1000,
+                    price: parseFloat(c[4])
+                }));
+            }
+
+            return {
+                currentPrice,
+                periodOpenPrice,
+                change24h,
+                history: history1m,
+                source: 'Kraken'
+            };
+        }
+
+        // ── Coinbase (BRTI constituent) ──
+        async function fetchFromCoinbase() {
+            // Coinbase candles: granularity=900 = 15min
+            const now = new Date();
+            const periodStart = getPeriodStartTime();
+            const start = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+            const end = now.toISOString();
+
+            const candleRes = await fetch(
+                `https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=900&start=${start}&end=${end}`
+            );
+            if (!candleRes.ok) throw new Error('Coinbase candles failed');
+            const candles = await candleRes.json();
+            // Coinbase candles: [time, low, high, open, close, volume], newest first
+            candles.sort((a, b) => a[0] - b[0]);
+
+            // Find the candle matching the current period start
+            const periodStartUnix = Math.floor(periodStart.getTime() / 1000);
+            const currentCandle = candles.find(c => c[0] === periodStartUnix) || candles[candles.length - 1];
+            const periodOpenPrice = currentCandle[3]; // open
+            const currentPrice = candles[candles.length - 1][4]; // latest close
+
+            // 1-minute candles for analysis
+            const candle1mRes = await fetch(
+                `https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60&start=${start}&end=${end}`
+            );
+            let history = candles.map(c => ({ time: c[0] * 1000, price: c[4] }));
+            if (candle1mRes.ok) {
+                const candles1m = await candle1mRes.json();
+                candles1m.sort((a, b) => a[0] - b[0]);
+                history = candles1m.slice(-60).map(c => ({ time: c[0] * 1000, price: c[4] }));
+            }
+
+            // 24h change from spot
+            let change24h = 0;
+            try {
+                const statsRes = await fetch('https://api.exchange.coinbase.com/products/BTC-USD/stats');
+                if (statsRes.ok) {
+                    const stats = await statsRes.json();
+                    change24h = ((currentPrice - parseFloat(stats.open)) / parseFloat(stats.open)) * 100;
+                }
+            } catch(e) {}
+
+            return {
+                currentPrice,
+                periodOpenPrice,
+                change24h,
+                history,
+                source: 'Coinbase'
+            };
+        }
+
+        // ── Binance (fallback, not a BRTI constituent but very liquid) ──
         async function fetchFromBinance() {
-            // Current price
+            // 15-min kline to get period open price
+            const kline15Res = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=2');
+            if (!kline15Res.ok) throw new Error('Binance 15m klines failed');
+            const klines15 = await kline15Res.json();
+            // Last candle is the current (open) one
+            const current15 = klines15[klines15.length - 1];
+            const periodOpenPrice = parseFloat(current15[1]); // open price of current 15m candle
+
+            // Current price from ticker
             const tickerRes = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
             if (!tickerRes.ok) throw new Error('Binance ticker failed');
             const ticker = await tickerRes.json();
 
-            // 1-minute klines for last hour (60 candles)
+            // 1-minute klines for analysis
             const klinesRes = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=60');
             if (!klinesRes.ok) throw new Error('Binance klines failed');
             const klines = await klinesRes.json();
 
             return {
                 currentPrice: parseFloat(ticker.lastPrice),
+                periodOpenPrice,
                 change24h: parseFloat(ticker.priceChangePercent),
                 history: klines.map(k => ({
                     time: k[0],
-                    price: parseFloat(k[4]) // close price
-                }))
-            };
-        }
-
-        // Fallback 1: CoinGecko
-        async function fetchFromCoinGecko() {
-            const tickerRes = await fetch(
-                'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true'
-            );
-            if (!tickerRes.ok) throw new Error('CoinGecko ticker failed');
-            const tickerData = await tickerRes.json();
-
-            const chartRes = await fetch(
-                'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1'
-            );
-            if (!chartRes.ok) throw new Error('CoinGecko chart failed');
-            const chartData = await chartRes.json();
-
-            return {
-                currentPrice: tickerData.bitcoin.usd,
-                change24h: tickerData.bitcoin.usd_24h_change,
-                history: chartData.prices.slice(-60).map(p => ({ time: p[0], price: p[1] }))
-            };
-        }
-
-        // Fallback 2: Coinbase (simple, just current price)
-        async function fetchFromCoinbase() {
-            const spotRes = await fetch('https://api.coinbase.com/v2/prices/BTC-USD/spot');
-            if (!spotRes.ok) throw new Error('Coinbase failed');
-            const spotData = await spotRes.json();
-            const price = parseFloat(spotData.data.amount);
-
-            // Coinbase doesn't give history, so synthesize from what we have
-            // or create a minimal set from the current price
-            const history = [];
-            const now = Date.now();
-            for (let i = 59; i >= 0; i--) {
-                // Small random walk to give the model something to work with
-                const noise = (Math.random() - 0.5) * price * 0.0002;
-                history.push({ time: now - i * 60000, price: price + noise * (i / 60) });
-            }
-            history.push({ time: now, price });
-
-            return {
-                currentPrice: price,
-                change24h: 0, // Coinbase spot doesn't include 24h change
-                history
+                    price: parseFloat(k[4])
+                })),
+                source: 'Binance'
             };
         }
 
         async function fetchPriceData() {
             const sources = [
-                { name: 'Binance', fn: fetchFromBinance },
-                { name: 'CoinGecko', fn: fetchFromCoinGecko },
-                { name: 'Coinbase', fn: fetchFromCoinbase }
+                { name: 'Kraken', fn: fetchFromKraken },
+                { name: 'Coinbase', fn: fetchFromCoinbase },
+                { name: 'Binance', fn: fetchFromBinance }
             ];
 
             for (const source of sources) {
                 try {
                     const data = await source.fn();
-                    console.log(`Price loaded from ${source.name}`);
+                    dataSourceName = data.source;
+                    console.log(`Price loaded from ${source.name}: current=${data.currentPrice}, periodOpen=${data.periodOpenPrice}`);
                     return data;
                 } catch (err) {
                     console.warn(`${source.name} failed:`, err.message);
@@ -753,7 +829,6 @@
                 emaCrossSignal * 0.35 * 10 +
                 rsiSignal * 0.25;
 
-            // Scale proportionally to minutes ahead (base is 15 min)
             const timeScale = minutesAhead / 15;
             const scaledChange = predictedChange * 0.3 * timeScale;
             const predictedPrice = current * (1 + scaledChange);
@@ -901,7 +976,7 @@
             el.innerHTML = `<span class="change ${changeClass}">${arrow} ${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(3)}%</span>`;
         }
 
-        function updateUI(data, targetTime) {
+        function updateUI(data, periodEnd) {
             // Current price (always live)
             document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
             const change24h = data.change24h;
@@ -909,7 +984,7 @@
             changeEl.textContent = `24h: ${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}%`;
             changeEl.style.color = change24h >= 0 ? '#3fb950' : '#f85149';
 
-            // Period start price
+            // Period open price (from the 15m kline, matches Kalshi strike)
             if (periodStartPrice !== null) {
                 document.getElementById('period-start-price').textContent = formatPrice(periodStartPrice);
                 const delta = ((data.currentPrice - periodStartPrice) / periodStartPrice) * 100;
@@ -918,10 +993,10 @@
                 deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
             }
 
-            // Target time
-            document.getElementById('target-time').textContent = formatTargetTime(targetTime);
+            // Target time (period end)
+            document.getElementById('target-time').textContent = formatTargetTime(periodEnd);
 
-            // Bet badge — based on original prediction vs period start price
+            // Bet badge — based on original prediction vs period open (Kalshi strike)
             if (originalPrediction && periodStartPrice !== null) {
                 const betEl = document.getElementById('bet-badge');
                 const isUp = originalPrediction.predictedPrice >= periodStartPrice;
@@ -932,7 +1007,8 @@
             // Original prediction (locked for the period)
             if (originalPrediction) {
                 document.getElementById('original-predicted-price').textContent = formatPrice(originalPrediction.predictedPrice);
-                renderChangeTag(originalPrediction.changePercent, 'original-predicted-change');
+                const origChangePct = ((originalPrediction.predictedPrice - periodStartPrice) / periodStartPrice) * 100;
+                renderChangeTag(origChangePct, 'original-predicted-change');
             }
 
             // Updated prediction (recalculated, shown only after first refresh)
@@ -940,7 +1016,8 @@
                 updatedPrediction.predictedPrice !== originalPrediction.predictedPrice) {
                 document.getElementById('updated-row').style.display = 'block';
                 document.getElementById('updated-predicted-price').textContent = formatPrice(updatedPrediction.predictedPrice);
-                renderChangeTag(updatedPrediction.changePercent, 'updated-predicted-change');
+                const updChangePct = ((updatedPrediction.predictedPrice - periodStartPrice) / periodStartPrice) * 100;
+                renderChangeTag(updChangePct, 'updated-predicted-change');
             } else {
                 document.getElementById('updated-row').style.display = 'none';
             }
@@ -952,7 +1029,6 @@
                 document.getElementById('confidence-fill').style.width = confPercent + '%';
                 document.getElementById('confidence-value').textContent = confPercent + '%';
 
-                // Signals
                 const sigClasses = {
                     Bullish: 'bullish', Bearish: 'bearish', Neutral: 'neutral',
                     Overbought: 'bearish', Oversold: 'bullish',
@@ -965,14 +1041,15 @@
                 }
             }
 
-            // Chart — show the original prediction line
+            // Chart
             const chartPred = originalPrediction ? originalPrediction.predictedPrice : data.currentPrice;
-            const targetLabel = formatTargetTime(targetTime);
+            const targetLabel = formatTargetTime(periodEnd);
             drawChart(data.history, data.currentPrice, chartPred, targetLabel);
 
-            // Status
+            // Status — show data source
             document.getElementById('status-bar').innerHTML =
-                '<span class="spinner-inline"></span>Live &middot; Updated ' + new Date().toLocaleTimeString();
+                '<span class="spinner-inline"></span>Live via ' + dataSourceName +
+                ' &middot; Updated ' + new Date().toLocaleTimeString();
 
             priceHistory = data.history;
             predictionPoint = chartPred;
@@ -981,13 +1058,14 @@
         // ── Main loop ─────────────────────────────────────────────────
 
         let currentTarget = null;
-        let periodStartPrice = null;      // price when 15-min period began
+        let periodStartPrice = null;      // 15m kline open price (= Kalshi strike)
         let originalPrediction = null;     // locked prediction for the period
         let updatedPrediction = null;      // recalculated on each refresh
-        let currentPeriodKey = null;       // e.g. "14:15" to detect period change
+        let currentPeriodKey = null;       // e.g. "14:30" to detect period change
 
-        function getPeriodKey(targetTime) {
-            return targetTime.getHours() + ':' + targetTime.getMinutes();
+        function getPeriodKey() {
+            const start = getPeriodStartTime();
+            return start.getHours() + ':' + start.getMinutes();
         }
 
         async function fetchAndPredict() {
@@ -995,10 +1073,10 @@
                 const data = await fetchPriceData();
                 latestData = data;
 
-                const targetTime = getNextQuarterTime();
-                currentTarget = targetTime;
-                const periodKey = getPeriodKey(targetTime);
-                const minutesAhead = Math.max(1, getSecondsUntilTarget(targetTime) / 60);
+                const periodEnd = getPeriodEndTime();
+                currentTarget = periodEnd;
+                const periodKey = getPeriodKey();
+                const minutesAhead = Math.max(1, getSecondsUntilTarget(periodEnd) / 60);
 
                 // Detect new 15-min period
                 if (periodKey !== currentPeriodKey) {
@@ -1007,19 +1085,22 @@
                         gradePreviousPrediction(data.currentPrice);
                     }
                     currentPeriodKey = periodKey;
-                    periodStartPrice = data.currentPrice;
+
+                    // Use the 15m kline open price as the Kalshi-aligned period open
+                    periodStartPrice = data.periodOpenPrice;
+
                     originalPrediction = predictPrice(data, minutesAhead);
                     updatedPrediction = null;
 
                     // Record this new prediction
-                    recordPrediction(periodKey, periodStartPrice, originalPrediction.predictedPrice, formatTargetTime(targetTime));
+                    recordPrediction(periodKey, periodStartPrice, originalPrediction.predictedPrice, formatTargetTime(periodEnd));
                 } else {
                     // Same period — recalculate an updated prediction
                     updatedPrediction = predictPrice(data, minutesAhead);
                 }
 
                 currentPrediction = updatedPrediction || originalPrediction;
-                updateUI(data, targetTime);
+                updateUI(data, periodEnd);
                 renderPredictionHistory();
             } catch (err) {
                 console.error('Fetch error:', err);
@@ -1038,7 +1119,7 @@
 
                 // When we cross into a new quarter, immediately refresh
                 if (secs <= 0) {
-                    currentTarget = getNextQuarterTime();
+                    currentTarget = getPeriodEndTime();
                     fetchAndPredict();
                 }
             }, 1000);
@@ -1058,7 +1139,7 @@
         });
 
         // ── Boot ──────────────────────────────────────────────────────
-        renderPredictionHistory();   // show saved history immediately
+        renderPredictionHistory();
         fetchAndPredict();
         startCountdown();
         startLiveRefresh();
