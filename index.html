@@ -689,44 +689,32 @@
             return { value: strike, source };
         }
 
-        async function fetchKalshiStrike() {
-            try {
-                // Fetch both open and recently settled markets
-                const [openRes, settledRes] = await Promise.all([
-                    fetch('https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC&status=open&limit=50'),
-                    fetch('https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC&status=settled&limit=10')
-                        .catch(() => null)
-                ]);
+        function writeDebug(msg) {
+            const el = document.getElementById('debug-strike');
+            if (el) el.textContent = msg;
+            console.log('DEBUG:', msg);
+        }
 
-                if (!openRes.ok) throw new Error('Kalshi API ' + openRes.status);
+        async function fetchKalshiStrike() {
+            writeDebug('Fetching Kalshi...');
+            try {
+                const openRes = await fetch(
+                    'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC&status=open&limit=50'
+                );
+
+                if (!openRes.ok) {
+                    writeDebug('Kalshi API error: ' + openRes.status);
+                    return null;
+                }
                 const openData = await openRes.json();
                 const markets = openData.markets || [];
 
-                // Also parse settled markets for settlement_value cross-reference
-                let lastSettlement = null;
-                if (settledRes && settledRes.ok) {
-                    try {
-                        const settledData = await settledRes.json();
-                        const settled15m = (settledData.markets || []).filter(m =>
-                            (m.ticker && m.ticker.includes('15M')) ||
-                            (m.title && m.title.toLowerCase().includes('15 min'))
-                        );
-                        if (settled15m.length > 0) {
-                            // Most recently settled
-                            settled15m.sort((a, b) =>
-                                new Date(b.close_time || b.expiration_time) - new Date(a.close_time || a.expiration_time));
-                            const last = settled15m[0];
-                            if (last.settlement_value !== undefined) {
-                                lastSettlement = parseFloat(last.settlement_value);
-                            }
-                            console.log('Kalshi last settled:', last.ticker,
-                                'settlement_value:', last.settlement_value,
-                                'result:', last.result);
-                        }
-                    } catch(e) { console.warn('Settled parse error:', e); }
+                if (markets.length === 0) {
+                    writeDebug('No Kalshi markets found');
+                    return null;
                 }
 
-                if (markets.length === 0) return null;
+                writeDebug('Found ' + markets.length + ' markets');
 
                 // Filter to 15-minute markets only
                 const filtered15m = markets.filter(m =>
@@ -748,44 +736,49 @@
                     }
                 }
 
-                if (!best) return null;
+                if (!best) {
+                    writeDebug('No future market found in ' + pool.length + ' candidates');
+                    return null;
+                }
 
                 kalshiMarketTicker = best.ticker;
 
-                // Log full market object for debugging strike extraction
-                console.log('Kalshi full market object:', JSON.stringify(best, null, 2));
+                // Dump ALL fields from the market object for debugging
+                const allFields = Object.entries(best)
+                    .map(([k,v]) => k + '=' + JSON.stringify(v))
+                    .join(' | ');
+                console.log('Kalshi ALL fields:', allFields);
 
                 // Try fetching individual market for more detailed fields
                 let detailedMarket = best;
                 try {
-                    const detailRes = await fetch(
-                        `https://api.elections.kalshi.com/trade-api/v2/markets/${best.ticker}`
-                    );
+                    const detailUrl = 'https://api.elections.kalshi.com/trade-api/v2/markets/' + best.ticker;
+                    const detailRes = await fetch(detailUrl);
                     if (detailRes.ok) {
                         const detailData = await detailRes.json();
                         if (detailData.market) {
                             detailedMarket = detailData.market;
-                            console.log('Kalshi detailed market:', JSON.stringify(detailedMarket, null, 2));
+                            const detailFields = Object.entries(detailedMarket)
+                                .map(([k,v]) => k + '=' + JSON.stringify(v))
+                                .join(' | ');
+                            console.log('Kalshi DETAIL fields:', detailFields);
                         }
                     }
-                } catch(e) { console.warn('Detail fetch failed:', e); }
+                } catch(e) {
+                    writeDebug('Detail fetch failed: ' + e.message);
+                }
 
                 const strikeResult = extractStrikeFromMarket(detailedMarket);
                 const strike = strikeResult.value;
 
-                const debugInfo = `Strike: $${strike} via ${strikeResult.source} | floor: ${detailedMarket.floor_strike} | ticker: ${best.ticker}`;
-                console.log('Kalshi strike debug:', debugInfo);
-                // Dump ALL keys to find which fields exist
-                console.log('Kalshi market keys:', Object.keys(detailedMarket).join(', '));
-                console.log('Kalshi market string values:', Object.entries(detailedMarket)
-                    .filter(([k,v]) => typeof v === 'string' && v.length > 0)
-                    .map(([k,v]) => `${k}=${v}`)
-                    .join(' | '));
-                const dbgEl = document.getElementById('debug-strike');
-                if (dbgEl) dbgEl.textContent = debugInfo;
+                writeDebug('Strike: $' + strike + ' via ' + strikeResult.source +
+                    ' | floor_strike: ' + detailedMarket.floor_strike +
+                    ' | yes_sub: ' + (detailedMarket.yes_sub_title || 'N/A') +
+                    ' | sub: ' + (detailedMarket.subtitle || 'N/A') +
+                    ' | ticker: ' + best.ticker);
                 return strike;
             } catch (err) {
-                console.warn('Kalshi API failed:', err.message);
+                writeDebug('Kalshi FAILED: ' + err.message);
                 return null;
             }
         }
