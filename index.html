@@ -738,28 +738,35 @@
 
                 writeDebug('Found ' + markets.length + ' Kalshi markets');
 
-                // Filter to 15-minute markets only
-                const filtered15m = markets.filter(m =>
-                    (m.ticker && m.ticker.includes('15M')) ||
-                    (m.title && m.title.toLowerCase().includes('15 min')) ||
-                    (m.event_ticker && m.event_ticker.includes('15M'))
-                );
-                const pool = filtered15m.length > 0 ? filtered15m : markets;
+                // Since we queried KXBTC15M, all results are 15-minute markets
+                const pool = markets;
 
-                // Find the market that ends soonest (current period)
+                // Find the market that ends soonest (current or most recent period)
                 const now = new Date();
                 let best = null;
+                let mostRecent = null;
                 for (const m of pool) {
                     const closeTime = new Date(m.close_time || m.expiration_time);
+                    // Future market (current period)
                     if (closeTime > now) {
                         if (!best || closeTime < new Date(best.close_time || best.expiration_time)) {
                             best = m;
                         }
                     }
+                    // Track the most recently closed market as fallback
+                    if (!mostRecent || closeTime > new Date(mostRecent.close_time || mostRecent.expiration_time)) {
+                        mostRecent = m;
+                    }
+                }
+
+                // Use future market if available, otherwise the most recently closed one
+                if (!best) {
+                    best = mostRecent;
+                    writeDebug('Using most recent market (at boundary)');
                 }
 
                 if (!best) {
-                    writeDebug('No future market found in ' + pool.length + ' candidates');
+                    writeDebug('No markets found in ' + pool.length + ' candidates');
                     return null;
                 }
 
