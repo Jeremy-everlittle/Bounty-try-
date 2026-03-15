@@ -1325,13 +1325,98 @@
         let originalPrediction = null;     // locked prediction for the period
         let updatedPrediction = null;      // recalculated on each refresh
         let currentPeriodKey = null;       // e.g. "14:30" to detect period change
+        let isTransitioning = false;       // true while waiting for new ticker
+        let transitionRetries = 0;
+        let lastKalshiTicker = null;       // track Kalshi market ticker to detect new period
 
         function getPeriodKey() {
             const start = getPeriodStartTime();
             return start.getHours() + ':' + start.getMinutes();
         }
 
+        // Clear stale data from UI and show transition message
+        function enterTransitionState() {
+            isTransitioning = true;
+            transitionRetries = 0;
+            lastKalshiTicker = kalshiMarketTicker;
+
+            // Grade the outgoing prediction before clearing
+            if (currentPeriodKey !== null && latestData) {
+                gradePreviousPrediction(latestData.currentPrice);
+                renderPredictionHistory();
+            }
+
+            // Clear prediction data so stale values never linger
+            originalPrediction = null;
+            updatedPrediction = null;
+            currentPrediction = null;
+            periodStartPrice = null;
+            kalshiStrike = null;
+
+            // Update UI to show transition
+            document.getElementById('current-price').textContent = '---';
+            document.getElementById('period-start-price').textContent = '---';
+            document.getElementById('period-delta').textContent = '';
+            document.getElementById('original-predicted-price').textContent = '---';
+            document.getElementById('updated-row').style.display = 'none';
+            document.getElementById('bet-badge').textContent = '';
+            document.getElementById('bet-badge').className = 'bet-badge';
+            document.getElementById('countdown-time').textContent = '0:00';
+            document.getElementById('confidence-fill').style.width = '0%';
+            document.getElementById('confidence-value').textContent = '--%';
+            document.getElementById('status-bar').innerHTML =
+                '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026';
+        }
+
+        // Keep retrying until fresh data for the new period arrives
+        async function retryForNewTicker() {
+            transitionRetries++;
+            const newPeriodKey = getPeriodKey();
+
+            try {
+                const data = await fetchPriceData();
+                latestData = data;
+
+                // Check if we actually got a new Kalshi market (not the old one)
+                const gotNewKalshiMarket = kalshiMarketTicker && kalshiMarketTicker !== lastKalshiTicker;
+                const periodChanged = newPeriodKey !== currentPeriodKey;
+
+                if (periodChanged || gotNewKalshiMarket) {
+                    // New period confirmed
+                    isTransitioning = false;
+                    currentPeriodKey = newPeriodKey;
+                    const periodEnd = getPeriodEndTime();
+                    currentTarget = periodEnd;
+                    periodStartPrice = data.periodOpenPrice;
+                    const minutesAhead = Math.max(1, getSecondsUntilTarget(periodEnd) / 60);
+                    originalPrediction = predictPrice(data, minutesAhead);
+                    updatedPrediction = null;
+                    currentPrediction = originalPrediction;
+                    recordPrediction(newPeriodKey, periodStartPrice, originalPrediction.predictedPrice, formatTargetTime(periodEnd));
+                    updateUI(data, periodEnd);
+                    renderPredictionHistory();
+                    return;
+                }
+
+                // Still got old data — show status and retry
+                document.getElementById('status-bar').innerHTML =
+                    '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026 (attempt ' + transitionRetries + ')';
+                document.getElementById('current-price').textContent = 'Waiting for new ticker\u2026';
+
+            } catch (err) {
+                document.getElementById('status-bar').innerHTML =
+                    '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026 (attempt ' + transitionRetries + ')';
+            }
+
+            // Retry with increasing delay (2s, 3s, 4s, max 5s)
+            const delay = Math.min(2000 + transitionRetries * 500, 5000);
+            setTimeout(retryForNewTicker, delay);
+        }
+
         async function fetchAndPredict() {
+            // Don't run normal refreshes during transition — retryForNewTicker handles it
+            if (isTransitioning) return;
+
             try {
                 const data = await fetchPriceData();
                 latestData = data;
@@ -1367,23 +1452,31 @@
                 renderPredictionHistory();
             } catch (err) {
                 console.error('Fetch error:', err);
-                document.getElementById('status-bar').innerHTML =
-                    '&#9888; ' + err.message + ' &middot; Retrying in 15s...';
+                // If we have no current prediction, show "not up to date" instead of old data
+                if (!originalPrediction) {
+                    document.getElementById('current-price').textContent = 'Data not available';
+                    document.getElementById('status-bar').innerHTML =
+                        '&#9888; Data not up to date &middot; ' + err.message + ' &middot; Retrying\u2026';
+                } else {
+                    document.getElementById('status-bar').innerHTML =
+                        '&#9888; ' + err.message + ' &middot; Retrying in 15s\u2026';
+                }
             }
         }
 
         // Countdown ticker — runs every second
         function startCountdown() {
             setInterval(() => {
+                if (isTransitioning) return; // don't tick during transition
                 if (!currentTarget) return;
 
                 const secs = getSecondsUntilTarget(currentTarget);
                 document.getElementById('countdown-time').textContent = formatCountdown(secs);
 
-                // When we cross into a new quarter, immediately refresh
+                // When we cross into a new quarter, enter transition state
                 if (secs <= 0) {
-                    currentTarget = getPeriodEndTime();
-                    fetchAndPredict();
+                    enterTransitionState();
+                    retryForNewTicker();
                 }
             }, 1000);
         }
