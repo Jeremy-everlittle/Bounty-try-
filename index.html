@@ -485,6 +485,7 @@
     </div>
 
     <div class="status-bar" id="status-bar"></div>
+    <div class="status-bar" id="debug-strike" style="font-size:9px;color:#6e7681;word-break:break-all;"></div>
 
     <p class="disclaimer">
         Aligned with Kalshi "BTC Up or Down - 15 minutes" (KXBTC15M).
@@ -716,14 +717,30 @@
 
                 kalshiMarketTicker = best.ticker;
 
-                const strike = extractStrikeFromMarket(best);
+                // Log full market object for debugging strike extraction
+                console.log('Kalshi full market object:', JSON.stringify(best, null, 2));
 
-                console.log('Kalshi market:', best.ticker, 'strike:', strike,
-                    'closes:', best.close_time,
-                    'yes_sub_title:', best.yes_sub_title,
-                    'subtitle:', best.subtitle,
-                    'floor_strike:', best.floor_strike,
-                    'lastSettlement:', lastSettlement);
+                // Try fetching individual market for more detailed fields
+                let detailedMarket = best;
+                try {
+                    const detailRes = await fetch(
+                        `https://api.elections.kalshi.com/trade-api/v2/markets/${best.ticker}`
+                    );
+                    if (detailRes.ok) {
+                        const detailData = await detailRes.json();
+                        if (detailData.market) {
+                            detailedMarket = detailData.market;
+                            console.log('Kalshi detailed market:', JSON.stringify(detailedMarket, null, 2));
+                        }
+                    }
+                } catch(e) { console.warn('Detail fetch failed:', e); }
+
+                const strike = extractStrikeFromMarket(detailedMarket);
+
+                const debugInfo = `Strike: $${strike} | yes_sub: ${detailedMarket.yes_sub_title || 'N/A'} | sub: ${detailedMarket.subtitle || 'N/A'} | floor: ${detailedMarket.floor_strike} | rules: ${(detailedMarket.rules_primary||'').substring(0,80)} | ticker: ${best.ticker}`;
+                console.log('Kalshi strike debug:', debugInfo);
+                const dbgEl = document.getElementById('debug-strike');
+                if (dbgEl) dbgEl.textContent = debugInfo;
                 return strike;
             } catch (err) {
                 console.warn('Kalshi API failed:', err.message);
