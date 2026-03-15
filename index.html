@@ -229,6 +229,119 @@
 
         @keyframes spin { to { transform: rotate(360deg); } }
 
+        .period-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #30363d;
+            font-size: 13px;
+        }
+
+        .period-label {
+            color: #8b949e;
+        }
+
+        .period-value {
+            font-weight: 600;
+            color: #e6edf3;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .period-delta {
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .pred-row {
+            padding: 10px 0;
+        }
+
+        .pred-row + .pred-row {
+            border-top: 1px solid #30363d;
+        }
+
+        .pred-row-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #8b949e;
+            margin-bottom: 2px;
+        }
+
+        .pred-row .price {
+            font-size: 34px;
+        }
+
+        .updated-color {
+            color: #d2a8ff !important;
+        }
+
+        .history-list {
+            margin-top: 10px;
+        }
+
+        .history-empty {
+            font-size: 12px;
+            color: #484f58;
+            text-align: center;
+            padding: 16px 0;
+        }
+
+        .history-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 10px;
+            border-radius: 8px;
+            margin-bottom: 4px;
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .history-item:nth-child(odd) {
+            background: #21262d;
+        }
+
+        .history-item .hi-time {
+            color: #8b949e;
+            min-width: 70px;
+        }
+
+        .history-item .hi-pred {
+            color: #e6edf3;
+            font-weight: 600;
+        }
+
+        .history-item .hi-actual {
+            color: #e6edf3;
+        }
+
+        .history-item .hi-result {
+            font-weight: 700;
+            min-width: 18px;
+            text-align: center;
+            font-size: 14px;
+        }
+
+        .hi-result.correct { color: #3fb950; }
+        .hi-result.wrong { color: #f85149; }
+        .hi-result.pending { color: #d29922; }
+
+        .history-stats {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #30363d;
+            font-size: 13px;
+            color: #8b949e;
+            text-align: center;
+            display: none;
+        }
+
+        .history-stats .stat-correct { color: #3fb950; font-weight: 600; }
+        .history-stats .stat-wrong { color: #f85149; font-weight: 600; }
+
         .disclaimer {
             font-size: 10px;
             color: #484f58;
@@ -249,15 +362,31 @@
         <div class="card-label"><span class="live-dot"></span> Current Price</div>
         <div class="price" id="current-price">--</div>
         <div class="price-sub" id="price-change-24h"></div>
+        <div class="period-info" id="period-start-row">
+            <span class="period-label">Period open</span>
+            <span class="period-value" id="period-start-price">--</span>
+            <span class="period-delta" id="period-delta"></span>
+        </div>
     </div>
 
     <div class="card" id="prediction-card">
-        <div class="card-label">Next Prediction</div>
+        <div class="card-label">Prediction for</div>
         <div class="target-time" id="target-time">--:--</div>
-        <div class="price predicted-price" id="predicted-price">--</div>
-        <div id="predicted-change"></div>
+
+        <div class="pred-row original">
+            <div class="pred-row-label">Original</div>
+            <div class="price predicted-price" id="original-predicted-price">--</div>
+            <div id="original-predicted-change"></div>
+        </div>
+
+        <div class="pred-row updated" id="updated-row" style="display:none;">
+            <div class="pred-row-label">Updated</div>
+            <div class="price predicted-price updated-color" id="updated-predicted-price">--</div>
+            <div id="updated-predicted-change"></div>
+        </div>
+
         <div class="countdown" id="countdown">
-            <span>Updates in</span>
+            <span>Next period in</span>
             <span class="countdown-time" id="countdown-time">--:--</span>
         </div>
 
@@ -299,6 +428,14 @@
         </div>
     </div>
 
+    <div class="card" id="history-card">
+        <div class="card-label">Prediction History</div>
+        <div class="history-list" id="prediction-history">
+            <div class="history-empty">No predictions yet. History will appear after the first period ends.</div>
+        </div>
+        <div class="history-stats" id="history-stats"></div>
+    </div>
+
     <div class="status-bar" id="status-bar"></div>
 
     <p class="disclaimer">
@@ -312,6 +449,88 @@
         let predictionPoint = null;
         let currentPrediction = null;
         let latestData = null;
+
+        // ── Prediction history (persisted in localStorage) ──────────
+        // Each entry: { time, periodKey, predictedPrice, startPrice, actualPrice, direction, actualDirection, correct }
+        let predictionLog = [];
+        try {
+            predictionLog = JSON.parse(localStorage.getItem('btcPredLog') || '[]');
+        } catch(e) { predictionLog = []; }
+
+        function savePredictionLog() {
+            // Keep last 10 only
+            predictionLog = predictionLog.slice(-10);
+            localStorage.setItem('btcPredLog', JSON.stringify(predictionLog));
+        }
+
+        function recordPrediction(periodKey, startPrice, predictedPrice, targetTimeStr) {
+            // Don't double-record for the same period
+            if (predictionLog.length && predictionLog[predictionLog.length - 1].periodKey === periodKey) return;
+            predictionLog.push({
+                time: targetTimeStr,
+                periodKey,
+                startPrice,
+                predictedPrice,
+                predictedDirection: predictedPrice >= startPrice ? 'up' : 'down',
+                actualPrice: null,
+                actualDirection: null,
+                correct: null
+            });
+            savePredictionLog();
+        }
+
+        function gradePreviousPrediction(currentPrice) {
+            // Grade the second-to-last entry (the one whose period just ended)
+            // The last entry is the CURRENT period (still open)
+            for (let i = predictionLog.length - 1; i >= 0; i--) {
+                if (predictionLog[i].actualPrice === null && predictionLog[i].periodKey !== currentPeriodKey) {
+                    predictionLog[i].actualPrice = currentPrice;
+                    predictionLog[i].actualDirection = currentPrice >= predictionLog[i].startPrice ? 'up' : 'down';
+                    predictionLog[i].correct = predictionLog[i].predictedDirection === predictionLog[i].actualDirection;
+                }
+            }
+            savePredictionLog();
+        }
+
+        function renderPredictionHistory() {
+            const container = document.getElementById('prediction-history');
+            const statsEl = document.getElementById('history-stats');
+            const graded = predictionLog.filter(p => p.correct !== null);
+
+            if (graded.length === 0 && predictionLog.length <= 1) {
+                container.innerHTML = '<div class="history-empty">No predictions yet. History will appear after the first period ends.</div>';
+                statsEl.style.display = 'none';
+                return;
+            }
+
+            let html = '';
+            // Show most recent first
+            const toShow = [...predictionLog].reverse();
+            for (const p of toShow) {
+                const icon = p.correct === true ? '&#10003;' : p.correct === false ? '&#10007;' : '&#9679;';
+                const cls = p.correct === true ? 'correct' : p.correct === false ? 'wrong' : 'pending';
+                const dir = p.predictedDirection === 'up' ? '&#9650;' : '&#9660;';
+                const actualStr = p.actualPrice !== null ? formatPrice(p.actualPrice) : 'pending';
+                html += `<div class="history-item">
+                    <span class="hi-time">${p.time}</span>
+                    <span class="hi-pred">${dir} ${formatPrice(p.predictedPrice)}</span>
+                    <span class="hi-actual">${actualStr}</span>
+                    <span class="hi-result ${cls}">${icon}</span>
+                </div>`;
+            }
+            container.innerHTML = html;
+
+            // Stats
+            if (graded.length > 0) {
+                const correct = graded.filter(p => p.correct).length;
+                const wrong = graded.length - correct;
+                const pct = Math.round((correct / graded.length) * 100);
+                statsEl.innerHTML = `<span class="stat-correct">${correct}</span> correct &middot; <span class="stat-wrong">${wrong}</span> wrong &middot; ${pct}% accuracy (last ${graded.length})`;
+                statsEl.style.display = 'block';
+            } else {
+                statsEl.style.display = 'none';
+            }
+        }
 
         // ── Time helpers ──────────────────────────────────────────────
 
@@ -628,57 +847,93 @@
 
         // ── UI update ─────────────────────────────────────────────────
 
-        function updateUI(data, prediction, targetTime) {
-            // Current price
+        function renderChangeTag(changePercent, containerId) {
+            const el = document.getElementById(containerId);
+            const changeClass = changePercent > 0.01 ? 'up' : changePercent < -0.01 ? 'down' : 'neutral';
+            const arrow = changePercent > 0.01 ? '&#9650;' : changePercent < -0.01 ? '&#9660;' : '&#9654;';
+            el.innerHTML = `<span class="change ${changeClass}">${arrow} ${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(3)}%</span>`;
+        }
+
+        function updateUI(data, targetTime) {
+            // Current price (always live)
             document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
             const change24h = data.change24h;
             const changeEl = document.getElementById('price-change-24h');
             changeEl.textContent = `24h: ${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}%`;
             changeEl.style.color = change24h >= 0 ? '#3fb950' : '#f85149';
 
+            // Period start price
+            if (periodStartPrice !== null) {
+                document.getElementById('period-start-price').textContent = formatPrice(periodStartPrice);
+                const delta = ((data.currentPrice - periodStartPrice) / periodStartPrice) * 100;
+                const deltaEl = document.getElementById('period-delta');
+                deltaEl.textContent = `${delta >= 0 ? '+' : ''}${delta.toFixed(3)}%`;
+                deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
+            }
+
             // Target time
             document.getElementById('target-time').textContent = formatTargetTime(targetTime);
 
-            // Predicted price
-            document.getElementById('predicted-price').textContent = formatPrice(prediction.predictedPrice);
-
-            const predChangeEl = document.getElementById('predicted-change');
-            const changeClass = prediction.changePercent > 0.01 ? 'up' : prediction.changePercent < -0.01 ? 'down' : 'neutral';
-            const arrow = prediction.changePercent > 0.01 ? '&#9650;' : prediction.changePercent < -0.01 ? '&#9660;' : '&#9654;';
-            predChangeEl.innerHTML = `<span class="change ${changeClass}">${arrow} ${prediction.changePercent >= 0 ? '+' : ''}${prediction.changePercent.toFixed(3)}%</span>`;
-
-            // Confidence
-            const confPercent = Math.round(prediction.confidence * 100);
-            document.getElementById('confidence-fill').style.width = confPercent + '%';
-            document.getElementById('confidence-value').textContent = confPercent + '%';
-
-            // Signals
-            const sigClasses = {
-                Bullish: 'bullish', Bearish: 'bearish', Neutral: 'neutral',
-                Overbought: 'bearish', Oversold: 'bullish',
-                High: 'bearish', Medium: 'neutral', Low: 'bullish'
-            };
-            for (const [key, val] of Object.entries(prediction.signals)) {
-                const el = document.getElementById('sig-' + key);
-                el.textContent = val;
-                el.className = 'signal-value ' + (sigClasses[val] || 'neutral');
+            // Original prediction (locked for the period)
+            if (originalPrediction) {
+                document.getElementById('original-predicted-price').textContent = formatPrice(originalPrediction.predictedPrice);
+                renderChangeTag(originalPrediction.changePercent, 'original-predicted-change');
             }
 
-            // Chart
+            // Updated prediction (recalculated, shown only after first refresh)
+            if (updatedPrediction && originalPrediction &&
+                updatedPrediction.predictedPrice !== originalPrediction.predictedPrice) {
+                document.getElementById('updated-row').style.display = 'block';
+                document.getElementById('updated-predicted-price').textContent = formatPrice(updatedPrediction.predictedPrice);
+                renderChangeTag(updatedPrediction.changePercent, 'updated-predicted-change');
+            } else {
+                document.getElementById('updated-row').style.display = 'none';
+            }
+
+            // Confidence (use latest prediction)
+            const activePred = updatedPrediction || originalPrediction;
+            if (activePred) {
+                const confPercent = Math.round(activePred.confidence * 100);
+                document.getElementById('confidence-fill').style.width = confPercent + '%';
+                document.getElementById('confidence-value').textContent = confPercent + '%';
+
+                // Signals
+                const sigClasses = {
+                    Bullish: 'bullish', Bearish: 'bearish', Neutral: 'neutral',
+                    Overbought: 'bearish', Oversold: 'bullish',
+                    High: 'bearish', Medium: 'neutral', Low: 'bullish'
+                };
+                for (const [key, val] of Object.entries(activePred.signals)) {
+                    const el = document.getElementById('sig-' + key);
+                    el.textContent = val;
+                    el.className = 'signal-value ' + (sigClasses[val] || 'neutral');
+                }
+            }
+
+            // Chart — show the original prediction line
+            const chartPred = originalPrediction ? originalPrediction.predictedPrice : data.currentPrice;
             const targetLabel = formatTargetTime(targetTime);
-            drawChart(data.history, data.currentPrice, prediction.predictedPrice, targetLabel);
+            drawChart(data.history, data.currentPrice, chartPred, targetLabel);
 
             // Status
             document.getElementById('status-bar').innerHTML =
                 '<span class="spinner-inline"></span>Live &middot; Updated ' + new Date().toLocaleTimeString();
 
             priceHistory = data.history;
-            predictionPoint = prediction.predictedPrice;
+            predictionPoint = chartPred;
         }
 
         // ── Main loop ─────────────────────────────────────────────────
 
         let currentTarget = null;
+        let periodStartPrice = null;      // price when 15-min period began
+        let originalPrediction = null;     // locked prediction for the period
+        let updatedPrediction = null;      // recalculated on each refresh
+        let currentPeriodKey = null;       // e.g. "14:15" to detect period change
+
+        function getPeriodKey(targetTime) {
+            return targetTime.getHours() + ':' + targetTime.getMinutes();
+        }
 
         async function fetchAndPredict() {
             try {
@@ -687,12 +942,30 @@
 
                 const targetTime = getNextQuarterTime();
                 currentTarget = targetTime;
+                const periodKey = getPeriodKey(targetTime);
                 const minutesAhead = Math.max(1, getSecondsUntilTarget(targetTime) / 60);
 
-                const prediction = predictPrice(data, minutesAhead);
-                currentPrediction = prediction;
+                // Detect new 15-min period
+                if (periodKey !== currentPeriodKey) {
+                    // Grade the previous period's prediction with current price
+                    if (currentPeriodKey !== null) {
+                        gradePreviousPrediction(data.currentPrice);
+                    }
+                    currentPeriodKey = periodKey;
+                    periodStartPrice = data.currentPrice;
+                    originalPrediction = predictPrice(data, minutesAhead);
+                    updatedPrediction = null;
 
-                updateUI(data, prediction, targetTime);
+                    // Record this new prediction
+                    recordPrediction(periodKey, periodStartPrice, originalPrediction.predictedPrice, formatTargetTime(targetTime));
+                } else {
+                    // Same period — recalculate an updated prediction
+                    updatedPrediction = predictPrice(data, minutesAhead);
+                }
+
+                currentPrediction = updatedPrediction || originalPrediction;
+                updateUI(data, targetTime);
+                renderPredictionHistory();
             } catch (err) {
                 console.error('Fetch error:', err);
                 document.getElementById('status-bar').innerHTML =
@@ -730,6 +1003,7 @@
         });
 
         // ── Boot ──────────────────────────────────────────────────────
+        renderPredictionHistory();   // show saved history immediately
         fetchAndPredict();
         startCountdown();
         startLiveRefresh();
