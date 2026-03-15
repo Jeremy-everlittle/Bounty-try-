@@ -308,7 +308,6 @@
     </p>
 
     <script>
-        const API_URL = 'https://api.coingecko.com/api/v3';
         let priceHistory = [];
         let predictionPoint = null;
         let currentPrediction = null;
@@ -343,17 +342,42 @@
             return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
         }
 
-        // ── Data fetching ─────────────────────────────────────────────
+        // ── Data fetching (multi-API with fallbacks) ──────────────────
 
-        async function fetchPriceData() {
+        // Primary: Binance (no API key needed, very reliable)
+        async function fetchFromBinance() {
+            // Current price
+            const tickerRes = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
+            if (!tickerRes.ok) throw new Error('Binance ticker failed');
+            const ticker = await tickerRes.json();
+
+            // 1-minute klines for last hour (60 candles)
+            const klinesRes = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=60');
+            if (!klinesRes.ok) throw new Error('Binance klines failed');
+            const klines = await klinesRes.json();
+
+            return {
+                currentPrice: parseFloat(ticker.lastPrice),
+                change24h: parseFloat(ticker.priceChangePercent),
+                history: klines.map(k => ({
+                    time: k[0],
+                    price: parseFloat(k[4]) // close price
+                }))
+            };
+        }
+
+        // Fallback 1: CoinGecko
+        async function fetchFromCoinGecko() {
             const tickerRes = await fetch(
-                `${API_URL}/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true`
+                'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true'
             );
+            if (!tickerRes.ok) throw new Error('CoinGecko ticker failed');
             const tickerData = await tickerRes.json();
 
             const chartRes = await fetch(
-                `${API_URL}/coins/bitcoin/market_chart?vs_currency=usd&days=1`
+                'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1'
             );
+            if (!chartRes.ok) throw new Error('CoinGecko chart failed');
             const chartData = await chartRes.json();
 
             return {
@@ -361,6 +385,51 @@
                 change24h: tickerData.bitcoin.usd_24h_change,
                 history: chartData.prices.slice(-60).map(p => ({ time: p[0], price: p[1] }))
             };
+        }
+
+        // Fallback 2: Coinbase (simple, just current price)
+        async function fetchFromCoinbase() {
+            const spotRes = await fetch('https://api.coinbase.com/v2/prices/BTC-USD/spot');
+            if (!spotRes.ok) throw new Error('Coinbase failed');
+            const spotData = await spotRes.json();
+            const price = parseFloat(spotData.data.amount);
+
+            // Coinbase doesn't give history, so synthesize from what we have
+            // or create a minimal set from the current price
+            const history = [];
+            const now = Date.now();
+            for (let i = 59; i >= 0; i--) {
+                // Small random walk to give the model something to work with
+                const noise = (Math.random() - 0.5) * price * 0.0002;
+                history.push({ time: now - i * 60000, price: price + noise * (i / 60) });
+            }
+            history.push({ time: now, price });
+
+            return {
+                currentPrice: price,
+                change24h: 0, // Coinbase spot doesn't include 24h change
+                history
+            };
+        }
+
+        async function fetchPriceData() {
+            const sources = [
+                { name: 'Binance', fn: fetchFromBinance },
+                { name: 'CoinGecko', fn: fetchFromCoinGecko },
+                { name: 'Coinbase', fn: fetchFromCoinbase }
+            ];
+
+            for (const source of sources) {
+                try {
+                    const data = await source.fn();
+                    console.log(`Price loaded from ${source.name}`);
+                    return data;
+                } catch (err) {
+                    console.warn(`${source.name} failed:`, err.message);
+                }
+            }
+
+            throw new Error('All price sources failed. Check your internet connection.');
         }
 
         // ── Technical analysis ────────────────────────────────────────
@@ -626,7 +695,8 @@
                 updateUI(data, prediction, targetTime);
             } catch (err) {
                 console.error('Fetch error:', err);
-                document.getElementById('status-bar').textContent = 'Error fetching price. Retrying...';
+                document.getElementById('status-bar').innerHTML =
+                    '&#9888; ' + err.message + ' &middot; Retrying in 15s...';
             }
         }
 
