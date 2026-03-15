@@ -485,7 +485,7 @@
     <p class="disclaimer">
         Aligned with Kalshi "BTC Up or Down - 15 minutes" (KXBTC15M).
         Strike price from Kalshi public API when available.
-        Current price approximates BRTI by averaging Bitstamp, Coinbase, Gemini, Kraken.
+        Current price approximates BRTI by averaging mid-prices from constituent exchanges.
         Kalshi resolves using CF Benchmarks BRTI (order-book based) — small differences possible.
         For entertainment only. NOT financial advice.
     </p>
@@ -746,6 +746,20 @@
                         const ask = parseFloat(d.bestAsk || d.ask);
                         if (bid > 0 && ask > 0) return (bid + ask) / 2;
                         return parseFloat(d.lastPrice || d.last || 0);
+                    }
+                ),
+                // Crypto.com (BRTI constituent since Mar 2025)
+                fetchExchangePrice('Crypto.com',
+                    'https://api.crypto.com/exchange/v1/public/get-tickers?instrument_name=BTC_USD',
+                    d => {
+                        const t = d.result && d.result.data && d.result.data[0];
+                        if (t) {
+                            const bid = parseFloat(t.b || t.best_bid || 0);
+                            const ask = parseFloat(t.k || t.best_ask || 0);
+                            if (bid > 0 && ask > 0) return (bid + ask) / 2;
+                            return parseFloat(t.a || t.last_trade_price || 0);
+                        }
+                        return null;
                     }
                 ),
                 // Binance (not BRTI but good fallback — use bookTicker for mid)
