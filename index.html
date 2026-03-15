@@ -334,7 +334,8 @@
 
         .history-item .hi-time {
             color: #8b949e;
-            min-width: 70px;
+            min-width: 105px;
+            font-size: 11px;
         }
 
         .history-item .hi-bet {
@@ -608,8 +609,18 @@
             return `${m}:${s.toString().padStart(2, '0')}`;
         }
 
+        function formatLocalTime(date) {
+            let h = date.getHours();
+            const m = date.getMinutes().toString().padStart(2, '0');
+            const ampm = h >= 12 ? 'PM' : 'AM';
+            h = h % 12 || 12;
+            return h + ':' + m + ' ' + ampm;
+        }
+
         function formatTargetTime(date) {
-            return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+            // Show period as start→end range for clarity
+            const start = new Date(date.getTime() - 15 * 60 * 1000);
+            return formatLocalTime(start) + '–' + formatLocalTime(date);
         }
 
         // ── Data fetching ─────────────────────────────────────────────
@@ -1292,7 +1303,7 @@
             // Status — show data source
             document.getElementById('status-bar').innerHTML =
                 '<span class="spinner-inline"></span>Live via ' + dataSourceName +
-                ' &middot; Updated ' + new Date().toLocaleTimeString();
+                ' &middot; Updated ' + formatLocalTime(new Date());
 
             priceHistory = data.history;
             predictionPoint = chartPred;
