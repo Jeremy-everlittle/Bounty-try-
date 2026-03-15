@@ -478,7 +478,10 @@
     </div>
 
     <div class="card" id="history-card">
-        <div class="card-label">Prediction History</div>
+        <div class="card-label" style="display:flex;justify-content:space-between;align-items:center;">
+            Prediction History
+            <span id="clear-history-btn" style="font-size:11px;color:#8b949e;cursor:pointer;padding:2px 8px;border:1px solid #3d3d3d;border-radius:4px;" onclick="clearHistory()">Clear</span>
+        </div>
         <div class="history-list" id="prediction-history">
             <div class="history-empty">No predictions yet. History will appear after the first period ends.</div>
         </div>
@@ -511,6 +514,12 @@
         function savePredictionLog() {
             predictionLog = predictionLog.slice(-10);
             localStorage.setItem('btcPredLog', JSON.stringify(predictionLog));
+        }
+
+        function clearHistory() {
+            predictionLog = [];
+            localStorage.removeItem('btcPredLog');
+            renderPredictionHistory();
         }
 
         function recordPrediction(periodKey, startPrice, predictedPrice, targetTimeStr) {
