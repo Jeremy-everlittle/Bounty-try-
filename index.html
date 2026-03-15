@@ -624,7 +624,7 @@
         async function fetchKalshiStrike() {
             try {
                 const res = await fetch(
-                    'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&status=open&limit=5'
+                    'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC&status=open&limit=50'
                 );
                 if (!res.ok) throw new Error('Kalshi API ' + res.status);
                 const data = await res.json();
@@ -632,12 +632,19 @@
 
                 if (markets.length === 0) return null;
 
+                // Filter to 15-minute markets only
+                // Ticker pattern: KXBTC15M-... or title contains "15 min"
+                const filtered15m = markets.filter(m =>
+                    (m.ticker && m.ticker.includes('15M')) ||
+                    (m.title && m.title.toLowerCase().includes('15 min')) ||
+                    (m.event_ticker && m.event_ticker.includes('15M'))
+                );
+                const pool = filtered15m.length > 0 ? filtered15m : markets;
+
                 // Find the market that ends soonest (current period)
-                // Markets have close_time, subtitle with the strike info
-                // The floor_strike or custom_strike field has the value
                 const now = new Date();
                 let best = null;
-                for (const m of markets) {
+                for (const m of pool) {
                     const closeTime = new Date(m.close_time || m.expiration_time);
                     if (closeTime > now) {
                         if (!best || closeTime < new Date(best.close_time || best.expiration_time)) {
@@ -655,8 +662,9 @@
                 // or use floor_strike field
                 let strike = null;
                 if (best.floor_strike !== undefined && best.floor_strike !== null) {
-                    // floor_strike is in cents on Kalshi
-                    strike = best.floor_strike / 100;
+                    // floor_strike may be in cents (>1M) or dollars (<200k)
+                    const raw = parseFloat(best.floor_strike);
+                    strike = raw > 200000 ? raw / 100 : raw;
                 }
                 if (!strike && best.subtitle) {
                     const match = best.subtitle.match(/\$?([\d,]+\.?\d*)/);
