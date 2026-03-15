@@ -709,35 +709,49 @@
         }
 
         async function fetchBRTIApprox() {
-            console.log('Fetching BRTI constituent exchange prices...');
+            // BRTI uses mid-price (avg of best bid + best ask) from each exchange,
+            // not last trade price. We use mid-prices where bid/ask available.
+            console.log('Fetching BRTI constituent exchange mid-prices...');
             const results = await Promise.allSettled([
-                // Bitstamp: last price
+                // Bitstamp: mid-price from bid/ask
                 fetchExchangePrice('Bitstamp',
                     'https://www.bitstamp.net/api/v2/ticker/btcusd/',
-                    d => parseFloat(d.last)
+                    d => (parseFloat(d.bid) + parseFloat(d.ask)) / 2
                 ),
-                // Coinbase: price from ticker
+                // Coinbase Exchange: mid-price from bid/ask
                 fetchExchangePrice('Coinbase',
                     'https://api.exchange.coinbase.com/products/BTC-USD/ticker',
-                    d => parseFloat(d.price)
+                    d => (parseFloat(d.bid) + parseFloat(d.ask)) / 2
                 ),
-                // Gemini: last price
+                // Gemini: mid-price from bid/ask
                 fetchExchangePrice('Gemini',
                     'https://api.gemini.com/v1/pubticker/btcusd',
-                    d => parseFloat(d.last)
+                    d => (parseFloat(d.bid) + parseFloat(d.ask)) / 2
                 ),
-                // Kraken: last trade price  (c[0] = last trade close price)
+                // Kraken: mid-price from a(ask)[0] and b(bid)[0]
                 fetchExchangePrice('Kraken',
                     'https://api.kraken.com/0/public/Ticker?pair=XBTUSD',
                     d => {
                         const key = Object.keys(d.result).find(k => k !== 'last');
-                        return parseFloat(d.result[key].c[0]);
+                        const bid = parseFloat(d.result[key].b[0]);
+                        const ask = parseFloat(d.result[key].a[0]);
+                        return (bid + ask) / 2;
                     }
                 ),
-                // Binance (not BRTI but good fallback reference)
+                // Bullish (BRTI constituent since Dec 2024)
+                fetchExchangePrice('Bullish',
+                    'https://api.exchange.bullish.com/trading-api/v1/markets/BTC-USD/tick',
+                    d => {
+                        const bid = parseFloat(d.bestBid || d.bid);
+                        const ask = parseFloat(d.bestAsk || d.ask);
+                        if (bid > 0 && ask > 0) return (bid + ask) / 2;
+                        return parseFloat(d.lastPrice || d.last || 0);
+                    }
+                ),
+                // Binance (not BRTI but good fallback — use bookTicker for mid)
                 fetchExchangePrice('Binance',
-                    'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
-                    d => parseFloat(d.price)
+                    'https://api.binance.com/api/v3/ticker/bookTicker?symbol=BTCUSDT',
+                    d => (parseFloat(d.bidPrice) + parseFloat(d.askPrice)) / 2
                 ),
                 // Coinbase simple price as extra fallback
                 fetchExchangePrice('Coinbase-simple',
@@ -752,10 +766,10 @@
 
             if (prices.length === 0) throw new Error('No exchange prices available');
 
-            // Filter outliers: remove prices > 0.5% from median (BRTI methodology)
+            // Filter outliers: remove prices > 25% from median (BRTI methodology)
             const sorted = [...prices].sort((a, b) => a.price - b.price);
             const median = sorted[Math.floor(sorted.length / 2)].price;
-            const filtered = prices.filter(p => Math.abs(p.price - median) / median < 0.005);
+            const filtered = prices.filter(p => Math.abs(p.price - median) / median < 0.25);
             const usePrices = filtered.length >= 2 ? filtered : prices;
 
             // Simple average of remaining
