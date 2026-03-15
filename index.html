@@ -254,6 +254,30 @@
             font-weight: 600;
         }
 
+        .bet-badge {
+            display: inline-block;
+            font-size: 22px;
+            font-weight: 800;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            padding: 10px 24px;
+            border-radius: 12px;
+            margin: 12px 0;
+            text-align: center;
+        }
+
+        .bet-badge.bet-up {
+            background: rgba(63, 185, 80, 0.15);
+            color: #3fb950;
+            border: 2px solid rgba(63, 185, 80, 0.3);
+        }
+
+        .bet-badge.bet-down {
+            background: rgba(248, 81, 73, 0.15);
+            color: #f85149;
+            border: 2px solid rgba(248, 81, 73, 0.3);
+        }
+
         .pred-row {
             padding: 10px 0;
         }
@@ -309,13 +333,31 @@
             min-width: 70px;
         }
 
-        .history-item .hi-pred {
-            color: #e6edf3;
-            font-weight: 600;
+        .history-item .hi-bet {
+            font-weight: 700;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 2px 8px;
+            border-radius: 6px;
         }
 
-        .history-item .hi-actual {
-            color: #e6edf3;
+        .hi-bet.bet-up {
+            background: rgba(63, 185, 80, 0.15);
+            color: #3fb950;
+        }
+
+        .hi-bet.bet-down {
+            background: rgba(248, 81, 73, 0.15);
+            color: #f85149;
+        }
+
+        .history-item .hi-prices {
+            color: #8b949e;
+            font-size: 11px;
+            text-align: center;
+            flex: 1;
+            min-width: 0;
         }
 
         .history-item .hi-result {
@@ -372,6 +414,8 @@
     <div class="card" id="prediction-card">
         <div class="card-label">Prediction for</div>
         <div class="target-time" id="target-time">--:--</div>
+
+        <div class="bet-badge" id="bet-badge">--</div>
 
         <div class="pred-row original">
             <div class="pred-row-label">Original</div>
@@ -507,14 +551,17 @@
             // Show most recent first
             const toShow = [...predictionLog].reverse();
             for (const p of toShow) {
-                const icon = p.correct === true ? '&#10003;' : p.correct === false ? '&#10007;' : '&#9679;';
+                const icon = p.correct === true ? '\u2713' : p.correct === false ? '\u2717' : '\u25CF';
                 const cls = p.correct === true ? 'correct' : p.correct === false ? 'wrong' : 'pending';
-                const dir = p.predictedDirection === 'up' ? '&#9650;' : '&#9660;';
-                const actualStr = p.actualPrice !== null ? formatPrice(p.actualPrice) : 'pending';
+                const betLabel = p.predictedDirection === 'up' ? 'Bet Up' : 'Bet Down';
+                const betCls = p.predictedDirection === 'up' ? 'bet-up' : 'bet-down';
+                const actualStr = p.actualPrice !== null
+                    ? `${formatPrice(p.startPrice)} \u2192 ${formatPrice(p.actualPrice)}`
+                    : 'open';
                 html += `<div class="history-item">
                     <span class="hi-time">${p.time}</span>
-                    <span class="hi-pred">${dir} ${formatPrice(p.predictedPrice)}</span>
-                    <span class="hi-actual">${actualStr}</span>
+                    <span class="hi-bet ${betCls}">${betLabel}</span>
+                    <span class="hi-prices">${actualStr}</span>
                     <span class="hi-result ${cls}">${icon}</span>
                 </div>`;
             }
@@ -873,6 +920,14 @@
 
             // Target time
             document.getElementById('target-time').textContent = formatTargetTime(targetTime);
+
+            // Bet badge — based on original prediction vs period start price
+            if (originalPrediction && periodStartPrice !== null) {
+                const betEl = document.getElementById('bet-badge');
+                const isUp = originalPrediction.predictedPrice >= periodStartPrice;
+                betEl.textContent = isUp ? '\u25B2 Bet Up' : '\u25BC Bet Down';
+                betEl.className = 'bet-badge ' + (isUp ? 'bet-up' : 'bet-down');
+            }
 
             // Original prediction (locked for the period)
             if (originalPrediction) {
