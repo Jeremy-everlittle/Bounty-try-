@@ -43,6 +43,22 @@
             color: #8b949e;
         }
 
+        .live-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #3fb950;
+            border-radius: 50%;
+            margin-right: 6px;
+            animation: pulse 2s ease-in-out infinite;
+            vertical-align: middle;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.4); }
+            50% { opacity: 0.6; box-shadow: 0 0 0 6px rgba(63, 185, 80, 0); }
+        }
+
         .card {
             background: #161b22;
             border: 1px solid #30363d;
@@ -75,6 +91,32 @@
 
         .predicted-price {
             color: #58a6ff;
+        }
+
+        .target-time {
+            font-size: 20px;
+            font-weight: 600;
+            color: #58a6ff;
+            margin-bottom: 4px;
+        }
+
+        .countdown {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 14px;
+            color: #8b949e;
+            margin-top: 6px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .countdown-time {
+            background: #21262d;
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-weight: 600;
+            color: #e6edf3;
+            font-size: 15px;
         }
 
         .change {
@@ -166,41 +208,23 @@
         .signal-value.bearish { color: #f85149; }
         .signal-value.neutral { color: #d29922; }
 
-        .refresh-btn {
-            background: linear-gradient(135deg, #f7931a, #e8850f);
-            color: #fff;
-            border: none;
-            border-radius: 12px;
-            padding: 14px 32px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            width: 100%;
-            max-width: 400px;
-            margin-top: 8px;
-            transition: opacity 0.2s;
-        }
-
-        .refresh-btn:active { opacity: 0.7; }
-        .refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-        .last-updated {
+        .status-bar {
             font-size: 11px;
             color: #484f58;
             margin-top: 12px;
             text-align: center;
         }
 
-        .spinner {
+        .spinner-inline {
             display: inline-block;
-            width: 18px;
-            height: 18px;
-            border: 2px solid #30363d;
+            width: 10px;
+            height: 10px;
+            border: 1.5px solid #30363d;
             border-top-color: #f7931a;
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
             vertical-align: middle;
-            margin-right: 6px;
+            margin-right: 4px;
         }
 
         @keyframes spin { to { transform: rotate(360deg); } }
@@ -213,28 +237,29 @@
             margin-top: 20px;
             line-height: 1.5;
         }
-
-        .loading-state .price {
-            color: #484f58;
-        }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>BTC Predictor</h1>
-        <p>15-Minute Price Prediction</p>
+        <p><span class="live-dot"></span>Live Price &amp; Next Prediction</p>
     </div>
 
     <div class="card" id="current-card">
-        <div class="card-label">Current Price</div>
+        <div class="card-label"><span class="live-dot"></span> Current Price</div>
         <div class="price" id="current-price">--</div>
         <div class="price-sub" id="price-change-24h"></div>
     </div>
 
     <div class="card" id="prediction-card">
-        <div class="card-label">Predicted Price in 15 min</div>
+        <div class="card-label">Next Prediction</div>
+        <div class="target-time" id="target-time">--:--</div>
         <div class="price predicted-price" id="predicted-price">--</div>
         <div id="predicted-change"></div>
+        <div class="countdown" id="countdown">
+            <span>Updates in</span>
+            <span class="countdown-time" id="countdown-time">--:--</span>
+        </div>
 
         <div class="confidence">
             <div class="confidence-label">Prediction Confidence</div>
@@ -246,7 +271,7 @@
     </div>
 
     <div class="card">
-        <div class="card-label">Price History & Prediction</div>
+        <div class="card-label">Price History &amp; Prediction</div>
         <div class="chart-container">
             <canvas id="chart"></canvas>
         </div>
@@ -274,8 +299,7 @@
         </div>
     </div>
 
-    <button class="refresh-btn" id="refresh-btn" onclick="fetchAndPredict()">Refresh</button>
-    <div class="last-updated" id="last-updated"></div>
+    <div class="status-bar" id="status-bar"></div>
 
     <p class="disclaimer">
         This prediction uses simple technical analysis (moving averages, RSI, momentum)
@@ -287,24 +311,59 @@
         const API_URL = 'https://api.coingecko.com/api/v3';
         let priceHistory = [];
         let predictionPoint = null;
-        let autoRefreshTimer = null;
+        let currentPrediction = null;
+        let latestData = null;
+
+        // ── Time helpers ──────────────────────────────────────────────
+
+        function getNextQuarterTime() {
+            const now = new Date();
+            const mins = now.getMinutes();
+            const nextQuarter = Math.ceil((mins + 1) / 15) * 15;
+            const target = new Date(now);
+            target.setMinutes(nextQuarter, 0, 0);
+            if (nextQuarter >= 60) {
+                target.setMinutes(0, 0, 0);
+                target.setHours(target.getHours() + 1);
+            }
+            return target;
+        }
+
+        function getSecondsUntilTarget(target) {
+            return Math.max(0, Math.floor((target - Date.now()) / 1000));
+        }
+
+        function formatCountdown(totalSeconds) {
+            const m = Math.floor(totalSeconds / 60);
+            const s = totalSeconds % 60;
+            return `${m}:${s.toString().padStart(2, '0')}`;
+        }
+
+        function formatTargetTime(date) {
+            return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        }
+
+        // ── Data fetching ─────────────────────────────────────────────
 
         async function fetchPriceData() {
-            // Fetch current price
-            const tickerRes = await fetch(`${API_URL}/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true`);
+            const tickerRes = await fetch(
+                `${API_URL}/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true`
+            );
             const tickerData = await tickerRes.json();
 
-            // Fetch recent price history (last 1 hour, 1-min candles via market_chart)
-            const chartRes = await fetch(`${API_URL}/coins/bitcoin/market_chart?vs_currency=usd&days=1`);
+            const chartRes = await fetch(
+                `${API_URL}/coins/bitcoin/market_chart?vs_currency=usd&days=1`
+            );
             const chartData = await chartRes.json();
 
             return {
                 currentPrice: tickerData.bitcoin.usd,
                 change24h: tickerData.bitcoin.usd_24h_change,
-                // Get last ~60 data points (roughly last hour)
                 history: chartData.prices.slice(-60).map(p => ({ time: p[0], price: p[1] }))
             };
         }
+
+        // ── Technical analysis ────────────────────────────────────────
 
         function computeRSI(prices, period = 14) {
             if (prices.length < period + 1) return 50;
@@ -328,27 +387,23 @@
             return ema;
         }
 
-        function predictPrice(data) {
+        function predictPrice(data, minutesAhead) {
             const prices = data.history.map(h => h.price);
             const current = data.currentPrice;
 
-            // 1. Momentum (rate of change over last 10 points)
             const lookback = Math.min(10, prices.length - 1);
             const oldPrice = prices[prices.length - 1 - lookback];
             const momentum = (current - oldPrice) / oldPrice;
 
-            // 2. EMA crossover signal
             const ema5 = computeEMA(prices, 5);
             const ema20 = computeEMA(prices, 20);
             const emaCrossSignal = (ema5 - ema20) / current;
 
-            // 3. RSI
             const rsi = computeRSI(prices);
             let rsiSignal = 0;
-            if (rsi > 70) rsiSignal = -0.002; // overbought - bearish
-            else if (rsi < 30) rsiSignal = 0.002; // oversold - bullish
+            if (rsi > 70) rsiSignal = -0.002;
+            else if (rsi < 30) rsiSignal = 0.002;
 
-            // 4. Volatility (std dev of recent returns)
             const returns = [];
             for (let i = 1; i < prices.length; i++) {
                 returns.push((prices[i] - prices[i - 1]) / prices[i - 1]);
@@ -358,26 +413,20 @@
                 returns.reduce((sum, r) => sum + (r - avgReturn) ** 2, 0) / returns.length
             );
 
-            // Combine signals with weights
-            const momentumWeight = 0.4;
-            const emaWeight = 0.35;
-            const rsiWeight = 0.25;
-
             const predictedChange =
-                momentum * momentumWeight +
-                emaCrossSignal * emaWeight * 10 +
-                rsiSignal * rsiWeight;
+                momentum * 0.4 +
+                emaCrossSignal * 0.35 * 10 +
+                rsiSignal * 0.25;
 
-            // Scale for 15-minute window (dampen the signal)
-            const scaledChange = predictedChange * 0.3;
+            // Scale proportionally to minutes ahead (base is 15 min)
+            const timeScale = minutesAhead / 15;
+            const scaledChange = predictedChange * 0.3 * timeScale;
             const predictedPrice = current * (1 + scaledChange);
 
-            // Confidence: lower when volatility is high
             const baseConfidence = 0.65;
             const volPenalty = Math.min(volatility * 50, 0.4);
             const confidence = Math.max(0.15, Math.min(0.85, baseConfidence - volPenalty));
 
-            // Determine signal labels
             const trendLabel = ema5 > ema20 ? 'Bullish' : ema5 < ema20 ? 'Bearish' : 'Neutral';
             const momentumLabel = momentum > 0.001 ? 'Bullish' : momentum < -0.001 ? 'Bearish' : 'Neutral';
             const rsiLabel = rsi > 70 ? 'Overbought' : rsi < 30 ? 'Oversold' : 'Neutral';
@@ -396,6 +445,8 @@
             };
         }
 
+        // ── Formatting ────────────────────────────────────────────────
+
         function formatPrice(price) {
             return '$' + price.toLocaleString('en-US', {
                 minimumFractionDigits: 2,
@@ -403,7 +454,9 @@
             });
         }
 
-        function drawChart(history, currentPrice, predictedPrice) {
+        // ── Chart ─────────────────────────────────────────────────────
+
+        function drawChart(history, currentPrice, predictedPrice, targetLabel) {
             const canvas = document.getElementById('chart');
             const ctx = canvas.getContext('2d');
             const dpr = window.devicePixelRatio || 1;
@@ -424,13 +477,13 @@
             const maxP = Math.max(...allPrices) * 1.0001;
             const range = maxP - minP;
 
-            const totalPoints = prices.length + 3; // extra space for prediction
+            const totalPoints = prices.length + 3;
             const xStep = (w - pad.left - pad.right) / (totalPoints - 1);
 
             function toX(i) { return pad.left + i * xStep; }
             function toY(p) { return pad.top + (1 - (p - minP) / range) * (h - pad.top - pad.bottom); }
 
-            // Grid lines
+            // Grid
             ctx.strokeStyle = '#21262d';
             ctx.lineWidth = 1;
             for (let i = 0; i < 4; i++) {
@@ -447,7 +500,7 @@
                 ctx.fillText(formatPrice(priceLabel), pad.left - 6, y + 3);
             }
 
-            // Price line gradient fill
+            // Gradient fill
             ctx.beginPath();
             ctx.moveTo(toX(0), toY(prices[0]));
             for (let i = 1; i < prices.length; i++) {
@@ -484,13 +537,13 @@
             ctx.stroke();
             ctx.setLineDash([]);
 
-            // Current price dot
+            // Current dot
             ctx.beginPath();
             ctx.arc(toX(lastIdx), toY(prices[lastIdx]), 5, 0, Math.PI * 2);
             ctx.fillStyle = '#f7931a';
             ctx.fill();
 
-            // Predicted price dot
+            // Predicted dot
             ctx.beginPath();
             ctx.arc(toX(predIdx), toY(predictedPrice), 5, 0, Math.PI * 2);
             ctx.fillStyle = predictedPrice >= currentPrice ? '#3fb950' : '#f85149';
@@ -501,83 +554,115 @@
             ctx.textAlign = 'center';
             ctx.fillStyle = '#8b949e';
             ctx.fillText('Now', toX(lastIdx), h - 6);
-            ctx.fillText('+15m', toX(predIdx), h - 6);
+            ctx.fillText(targetLabel, toX(predIdx), h - 6);
         }
 
-        async function fetchAndPredict() {
-            const btn = document.getElementById('refresh-btn');
-            btn.disabled = true;
-            btn.innerHTML = '<span class="spinner"></span>Loading...';
+        // ── UI update ─────────────────────────────────────────────────
 
-            try {
-                const data = await fetchPriceData();
-                const prediction = predictPrice(data);
+        function updateUI(data, prediction, targetTime) {
+            // Current price
+            document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
+            const change24h = data.change24h;
+            const changeEl = document.getElementById('price-change-24h');
+            changeEl.textContent = `24h: ${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}%`;
+            changeEl.style.color = change24h >= 0 ? '#3fb950' : '#f85149';
 
-                // Update current price
-                document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
-                const change24h = data.change24h;
-                const changeEl = document.getElementById('price-change-24h');
-                changeEl.textContent = `24h: ${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}%`;
-                changeEl.style.color = change24h >= 0 ? '#3fb950' : '#f85149';
+            // Target time
+            document.getElementById('target-time').textContent = formatTargetTime(targetTime);
 
-                // Update prediction
-                document.getElementById('predicted-price').textContent = formatPrice(prediction.predictedPrice);
+            // Predicted price
+            document.getElementById('predicted-price').textContent = formatPrice(prediction.predictedPrice);
 
-                const predChangeEl = document.getElementById('predicted-change');
-                const changeClass = prediction.changePercent > 0.01 ? 'up' : prediction.changePercent < -0.01 ? 'down' : 'neutral';
-                const arrow = prediction.changePercent > 0.01 ? '&#9650;' : prediction.changePercent < -0.01 ? '&#9660;' : '&#9654;';
-                predChangeEl.innerHTML = `<span class="change ${changeClass}">${arrow} ${prediction.changePercent >= 0 ? '+' : ''}${prediction.changePercent.toFixed(3)}%</span>`;
+            const predChangeEl = document.getElementById('predicted-change');
+            const changeClass = prediction.changePercent > 0.01 ? 'up' : prediction.changePercent < -0.01 ? 'down' : 'neutral';
+            const arrow = prediction.changePercent > 0.01 ? '&#9650;' : prediction.changePercent < -0.01 ? '&#9660;' : '&#9654;';
+            predChangeEl.innerHTML = `<span class="change ${changeClass}">${arrow} ${prediction.changePercent >= 0 ? '+' : ''}${prediction.changePercent.toFixed(3)}%</span>`;
 
-                // Update confidence
-                const confPercent = Math.round(prediction.confidence * 100);
-                document.getElementById('confidence-fill').style.width = confPercent + '%';
-                document.getElementById('confidence-value').textContent = confPercent + '%';
+            // Confidence
+            const confPercent = Math.round(prediction.confidence * 100);
+            document.getElementById('confidence-fill').style.width = confPercent + '%';
+            document.getElementById('confidence-value').textContent = confPercent + '%';
 
-                // Update signals
-                const sigClasses = { Bullish: 'bullish', Bearish: 'bearish', Neutral: 'neutral',
-                    Overbought: 'bearish', Oversold: 'bullish', High: 'bearish', Medium: 'neutral', Low: 'bullish' };
-
-                for (const [key, val] of Object.entries(prediction.signals)) {
-                    const el = document.getElementById('sig-' + key);
-                    el.textContent = val;
-                    el.className = 'signal-value ' + (sigClasses[val] || 'neutral');
-                }
-
-                // Draw chart
-                drawChart(data.history, data.currentPrice, prediction.predictedPrice);
-
-                // Update timestamp
-                document.getElementById('last-updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
-
-                priceHistory = data.history;
-                predictionPoint = prediction.predictedPrice;
-
-            } catch (err) {
-                console.error('Error:', err);
-                document.getElementById('current-price').textContent = 'Error loading';
-                document.getElementById('current-price').style.fontSize = '20px';
+            // Signals
+            const sigClasses = {
+                Bullish: 'bullish', Bearish: 'bearish', Neutral: 'neutral',
+                Overbought: 'bearish', Oversold: 'bullish',
+                High: 'bearish', Medium: 'neutral', Low: 'bullish'
+            };
+            for (const [key, val] of Object.entries(prediction.signals)) {
+                const el = document.getElementById('sig-' + key);
+                el.textContent = val;
+                el.className = 'signal-value ' + (sigClasses[val] || 'neutral');
             }
 
-            btn.disabled = false;
-            btn.textContent = 'Refresh';
+            // Chart
+            const targetLabel = formatTargetTime(targetTime);
+            drawChart(data.history, data.currentPrice, prediction.predictedPrice, targetLabel);
+
+            // Status
+            document.getElementById('status-bar').innerHTML =
+                '<span class="spinner-inline"></span>Live &middot; Updated ' + new Date().toLocaleTimeString();
+
+            priceHistory = data.history;
+            predictionPoint = prediction.predictedPrice;
         }
 
-        // Auto-refresh every 60 seconds
-        function startAutoRefresh() {
-            if (autoRefreshTimer) clearInterval(autoRefreshTimer);
-            autoRefreshTimer = setInterval(fetchAndPredict, 60000);
+        // ── Main loop ─────────────────────────────────────────────────
+
+        let currentTarget = null;
+
+        async function fetchAndPredict() {
+            try {
+                const data = await fetchPriceData();
+                latestData = data;
+
+                const targetTime = getNextQuarterTime();
+                currentTarget = targetTime;
+                const minutesAhead = Math.max(1, getSecondsUntilTarget(targetTime) / 60);
+
+                const prediction = predictPrice(data, minutesAhead);
+                currentPrediction = prediction;
+
+                updateUI(data, prediction, targetTime);
+            } catch (err) {
+                console.error('Fetch error:', err);
+                document.getElementById('status-bar').textContent = 'Error fetching price. Retrying...';
+            }
+        }
+
+        // Countdown ticker — runs every second
+        function startCountdown() {
+            setInterval(() => {
+                if (!currentTarget) return;
+
+                const secs = getSecondsUntilTarget(currentTarget);
+                document.getElementById('countdown-time').textContent = formatCountdown(secs);
+
+                // When we cross into a new quarter, immediately refresh
+                if (secs <= 0) {
+                    currentTarget = getNextQuarterTime();
+                    fetchAndPredict();
+                }
+            }, 1000);
+        }
+
+        // Price refresh — fetches new data every 15 seconds for a live feel
+        function startLiveRefresh() {
+            setInterval(fetchAndPredict, 15000);
         }
 
         // Handle resize
         window.addEventListener('resize', () => {
-            if (priceHistory.length && predictionPoint) {
-                drawChart(priceHistory, priceHistory[priceHistory.length - 1].price, predictionPoint);
+            if (priceHistory.length && predictionPoint && currentTarget) {
+                const targetLabel = formatTargetTime(currentTarget);
+                drawChart(priceHistory, priceHistory[priceHistory.length - 1].price, predictionPoint, targetLabel);
             }
         });
 
-        // Initial load
+        // ── Boot ──────────────────────────────────────────────────────
         fetchAndPredict();
-        startAutoRefresh();
+        startCountdown();
+        startLiveRefresh();
     </script>
 </body>
 </html>
