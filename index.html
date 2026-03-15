@@ -405,7 +405,7 @@
         <div class="price" id="current-price">--</div>
         <div class="price-sub" id="price-change-24h"></div>
         <div class="period-info" id="period-start-row">
-            <span class="period-label">Period open (strike)</span>
+            <span class="period-label" id="period-label">Period open (strike)</span>
             <span class="period-value" id="period-start-price">--</span>
             <span class="period-delta" id="period-delta"></span>
         </div>
@@ -483,9 +483,10 @@
     <div class="status-bar" id="status-bar"></div>
 
     <p class="disclaimer">
-        Aligned with Kalshi "BTC Up or Down - 15 minutes" markets.
-        Period open price sourced from exchange 15-min kline open (Kraken/Coinbase/Binance).
-        Kalshi resolves using CF Benchmarks BRTI — prices may differ slightly.
+        Aligned with Kalshi "BTC Up or Down - 15 minutes" (KXBTC15M).
+        Strike price from Kalshi public API when available.
+        Current price approximates BRTI by averaging Bitstamp, Coinbase, Gemini, Kraken.
+        Kalshi resolves using CF Benchmarks BRTI (order-book based) — small differences possible.
         For entertainment only. NOT financial advice.
     </p>
 
@@ -606,172 +607,258 @@
         }
 
         // ── Data fetching ─────────────────────────────────────────────
-        // Kalshi uses CF Benchmarks BRTI which aggregates from:
-        // Bitstamp, Coinbase, Gemini, itBit/Paxos, Kraken, LMAX Digital
-        // We fetch from Kraken (BRTI constituent) as primary,
-        // with Coinbase and Binance as fallbacks.
-        // We always fetch the 15-minute kline to get the exact period open price.
+        // Kalshi resolves using CF Benchmarks BRTI which is calculated
+        // from order books of: Bitstamp, Coinbase, Gemini, Kraken,
+        // itBit/Paxos, LMAX Digital, and Bullish.
+        //
+        // Strategy:
+        // 1. Get the exact Kalshi strike from their FREE public API
+        // 2. Approximate BRTI by averaging mid-prices from constituent exchanges
+        // 3. Use Binance 1m klines for prediction analysis (most granular free data)
 
         let dataSourceName = '';
+        let kalshiStrike = null;    // exact strike from Kalshi API
+        let kalshiMarketTicker = null;
 
-        // ── Kraken (BRTI constituent) ──
-        async function fetchFromKraken() {
-            // Kraken OHLC — interval=15 gives 15-min candles
-            const ohlcRes = await fetch('https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=15');
-            if (!ohlcRes.ok) throw new Error('Kraken OHLC failed');
-            const ohlcData = await ohlcRes.json();
-            if (ohlcData.error && ohlcData.error.length) throw new Error(ohlcData.error[0]);
+        // ── Kalshi public API (no auth needed) ──
+        async function fetchKalshiStrike() {
+            try {
+                const res = await fetch(
+                    'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&status=open&limit=5'
+                );
+                if (!res.ok) throw new Error('Kalshi API ' + res.status);
+                const data = await res.json();
+                const markets = data.markets || [];
 
-            // Kraken returns { result: { XXBTZUSD: [[time, open, high, low, close, vwap, volume, count], ...] } }
-            const pairKey = Object.keys(ohlcData.result).find(k => k !== 'last');
-            const candles = ohlcData.result[pairKey];
+                if (markets.length === 0) return null;
 
-            // Current 15m candle is the last one
-            const current15m = candles[candles.length - 1];
-            const periodOpenPrice = parseFloat(current15m[1]); // open price
-            const currentPrice = parseFloat(current15m[4]);     // close = latest price
+                // Find the market that ends soonest (current period)
+                // Markets have close_time, subtitle with the strike info
+                // The floor_strike or custom_strike field has the value
+                const now = new Date();
+                let best = null;
+                for (const m of markets) {
+                    const closeTime = new Date(m.close_time || m.expiration_time);
+                    if (closeTime > now) {
+                        if (!best || closeTime < new Date(best.close_time || best.expiration_time)) {
+                            best = m;
+                        }
+                    }
+                }
 
-            // Use last 60 candles (15 hours) for analysis, map to 1-min-like points
-            const history = candles.slice(-60).map(c => ({
-                time: c[0] * 1000,
-                price: parseFloat(c[4])
-            }));
+                if (!best) return null;
 
-            // Also get ticker for 24h change
-            const tickerRes = await fetch('https://api.kraken.com/0/public/Ticker?pair=XBTUSD');
-            let change24h = 0;
-            if (tickerRes.ok) {
-                const tickerData = await tickerRes.json();
-                const tk = Object.keys(tickerData.result)[0];
-                const openPrice24h = parseFloat(tickerData.result[tk].o);
-                change24h = ((currentPrice - openPrice24h) / openPrice24h) * 100;
+                kalshiMarketTicker = best.ticker;
+
+                // Extract strike from the market subtitle or floor_strike
+                // Kalshi market subtitle format: "Bitcoin price at or above $71,543.27"
+                // or use floor_strike field
+                let strike = null;
+                if (best.floor_strike !== undefined && best.floor_strike !== null) {
+                    // floor_strike is in cents on Kalshi
+                    strike = best.floor_strike / 100;
+                }
+                if (!strike && best.subtitle) {
+                    const match = best.subtitle.match(/\$?([\d,]+\.?\d*)/);
+                    if (match) {
+                        strike = parseFloat(match[1].replace(/,/g, ''));
+                    }
+                }
+                if (!strike && best.yes_sub_title) {
+                    const match = best.yes_sub_title.match(/\$?([\d,]+\.?\d*)/);
+                    if (match) {
+                        strike = parseFloat(match[1].replace(/,/g, ''));
+                    }
+                }
+
+                console.log('Kalshi market:', best.ticker, 'strike:', strike, 'closes:', best.close_time);
+                return strike;
+            } catch (err) {
+                console.warn('Kalshi API failed:', err.message);
+                return null;
             }
-
-            // Fetch 1-minute klines for better analysis granularity
-            const ohlc1mRes = await fetch('https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=1');
-            let history1m = history;
-            if (ohlc1mRes.ok) {
-                const ohlc1mData = await ohlc1mRes.json();
-                const pairKey1m = Object.keys(ohlc1mData.result).find(k => k !== 'last');
-                const candles1m = ohlc1mData.result[pairKey1m];
-                history1m = candles1m.slice(-60).map(c => ({
-                    time: c[0] * 1000,
-                    price: parseFloat(c[4])
-                }));
-            }
-
-            return {
-                currentPrice,
-                periodOpenPrice,
-                change24h,
-                history: history1m,
-                source: 'Kraken'
-            };
         }
 
-        // ── Coinbase (BRTI constituent) ──
-        async function fetchFromCoinbase() {
-            // Coinbase candles: granularity=900 = 15min
-            const now = new Date();
-            const periodStart = getPeriodStartTime();
-            const start = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
-            const end = now.toISOString();
+        // ── Multi-exchange BRTI approximation ──
+        // Fetch mid-price (avg of best bid+ask) from each BRTI constituent exchange
+        // and average them, filtering outliers > 0.5% from median
 
-            const candleRes = await fetch(
-                `https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=900&start=${start}&end=${end}`
-            );
-            if (!candleRes.ok) throw new Error('Coinbase candles failed');
-            const candles = await candleRes.json();
-            // Coinbase candles: [time, low, high, open, close, volume], newest first
-            candles.sort((a, b) => a[0] - b[0]);
-
-            // Find the candle matching the current period start
-            const periodStartUnix = Math.floor(periodStart.getTime() / 1000);
-            const currentCandle = candles.find(c => c[0] === periodStartUnix) || candles[candles.length - 1];
-            const periodOpenPrice = currentCandle[3]; // open
-            const currentPrice = candles[candles.length - 1][4]; // latest close
-
-            // 1-minute candles for analysis
-            const candle1mRes = await fetch(
-                `https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60&start=${start}&end=${end}`
-            );
-            let history = candles.map(c => ({ time: c[0] * 1000, price: c[4] }));
-            if (candle1mRes.ok) {
-                const candles1m = await candle1mRes.json();
-                candles1m.sort((a, b) => a[0] - b[0]);
-                history = candles1m.slice(-60).map(c => ({ time: c[0] * 1000, price: c[4] }));
-            }
-
-            // 24h change from spot
-            let change24h = 0;
+        async function fetchExchangePrice(name, url, parser) {
             try {
-                const statsRes = await fetch('https://api.exchange.coinbase.com/products/BTC-USD/stats');
-                if (statsRes.ok) {
-                    const stats = await statsRes.json();
-                    change24h = ((currentPrice - parseFloat(stats.open)) / parseFloat(stats.open)) * 100;
+                const res = await fetch(url);
+                if (!res.ok) return null;
+                const data = await res.json();
+                const price = parser(data);
+                if (price && price > 0) {
+                    console.log(`  ${name}: $${price.toFixed(2)}`);
+                    return { name, price };
+                }
+                return null;
+            } catch (err) {
+                console.warn(`  ${name} failed:`, err.message);
+                return null;
+            }
+        }
+
+        async function fetchBRTIApprox() {
+            console.log('Fetching BRTI constituent exchange prices...');
+            const results = await Promise.allSettled([
+                // Bitstamp: last price
+                fetchExchangePrice('Bitstamp',
+                    'https://www.bitstamp.net/api/v2/ticker/btcusd/',
+                    d => parseFloat(d.last)
+                ),
+                // Coinbase: price from ticker
+                fetchExchangePrice('Coinbase',
+                    'https://api.exchange.coinbase.com/products/BTC-USD/ticker',
+                    d => parseFloat(d.price)
+                ),
+                // Gemini: last price
+                fetchExchangePrice('Gemini',
+                    'https://api.gemini.com/v1/pubticker/btcusd',
+                    d => parseFloat(d.last)
+                ),
+                // Kraken: last trade price  (c[0] = last trade close price)
+                fetchExchangePrice('Kraken',
+                    'https://api.kraken.com/0/public/Ticker?pair=XBTUSD',
+                    d => {
+                        const key = Object.keys(d.result).find(k => k !== 'last');
+                        return parseFloat(d.result[key].c[0]);
+                    }
+                ),
+                // Binance (not BRTI but good fallback reference)
+                fetchExchangePrice('Binance',
+                    'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
+                    d => parseFloat(d.price)
+                ),
+                // Coinbase simple price as extra fallback
+                fetchExchangePrice('Coinbase-simple',
+                    'https://api.coinbase.com/v2/prices/BTC-USD/spot',
+                    d => parseFloat(d.data.amount)
+                )
+            ]);
+
+            const prices = results
+                .map(r => r.status === 'fulfilled' ? r.value : null)
+                .filter(Boolean);
+
+            if (prices.length === 0) throw new Error('No exchange prices available');
+
+            // Filter outliers: remove prices > 0.5% from median (BRTI methodology)
+            const sorted = [...prices].sort((a, b) => a.price - b.price);
+            const median = sorted[Math.floor(sorted.length / 2)].price;
+            const filtered = prices.filter(p => Math.abs(p.price - median) / median < 0.005);
+            const usePrices = filtered.length >= 2 ? filtered : prices;
+
+            // Simple average of remaining
+            const avg = usePrices.reduce((s, p) => s + p.price, 0) / usePrices.length;
+            const sourceNames = usePrices.map(p => p.name).join('+');
+
+            console.log(`BRTI approx: $${avg.toFixed(2)} from ${sourceNames} (${usePrices.length} sources)`);
+            return { price: avg, sources: sourceNames, count: usePrices.length };
+        }
+
+        // ── Get period open price from 15m kline (Binance primary, Kraken fallback) ──
+        async function fetchPeriodOpen() {
+            // Try Binance 15m kline
+            try {
+                const res = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=2');
+                if (res.ok) {
+                    const klines = await res.json();
+                    const current = klines[klines.length - 1];
+                    return parseFloat(current[1]); // open price
                 }
             } catch(e) {}
 
+            // Try Kraken 15m OHLC
+            try {
+                const res = await fetch('https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=15');
+                if (res.ok) {
+                    const data = await res.json();
+                    const key = Object.keys(data.result).find(k => k !== 'last');
+                    const candles = data.result[key];
+                    return parseFloat(candles[candles.length - 1][1]); // open
+                }
+            } catch(e) {}
+
+            return null;
+        }
+
+        // ── Get 1-minute klines for prediction analysis ──
+        async function fetchAnalysisHistory() {
+            // Try Binance 1m klines (best granularity)
+            try {
+                const res = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=60');
+                if (res.ok) {
+                    const klines = await res.json();
+                    return klines.map(k => ({ time: k[0], price: parseFloat(k[4]) }));
+                }
+            } catch(e) {}
+
+            // Try Kraken 1m OHLC
+            try {
+                const res = await fetch('https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=1');
+                if (res.ok) {
+                    const data = await res.json();
+                    const key = Object.keys(data.result).find(k => k !== 'last');
+                    return data.result[key].slice(-60).map(c => ({
+                        time: c[0] * 1000, price: parseFloat(c[4])
+                    }));
+                }
+            } catch(e) {}
+
+            return [];
+        }
+
+        // ── Get 24h change ──
+        async function fetch24hChange(currentPrice) {
+            try {
+                const res = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
+                if (res.ok) {
+                    const data = await res.json();
+                    return parseFloat(data.priceChangePercent);
+                }
+            } catch(e) {}
+            return 0;
+        }
+
+        // ── Main data fetcher ──
+        async function fetchPriceData() {
+            // Run all fetches in parallel
+            const [brtiResult, kStrike, periodOpen, history, change24h_unused] = await Promise.all([
+                fetchBRTIApprox(),
+                fetchKalshiStrike(),
+                fetchPeriodOpen(),
+                fetchAnalysisHistory(),
+                Promise.resolve(0)
+            ]);
+
+            const currentPrice = brtiResult.price;
+            const change24h = await fetch24hChange(currentPrice);
+
+            // For period open: prefer Kalshi strike, then kline open, then BRTI approx
+            let periodOpenPrice;
+            if (kStrike && kStrike > 0) {
+                periodOpenPrice = kStrike;
+                kalshiStrike = kStrike;
+                dataSourceName = `BRTI~(${brtiResult.sources}) + Kalshi strike`;
+            } else if (periodOpen && periodOpen > 0) {
+                periodOpenPrice = periodOpen;
+                dataSourceName = `BRTI~(${brtiResult.sources})`;
+            } else {
+                periodOpenPrice = currentPrice;
+                dataSourceName = `BRTI~(${brtiResult.sources})`;
+            }
+
+            console.log(`Final: current=$${currentPrice.toFixed(2)}, periodOpen=$${periodOpenPrice.toFixed(2)}, kalshiStrike=${kStrike}`);
+
             return {
                 currentPrice,
                 periodOpenPrice,
                 change24h,
-                history,
-                source: 'Coinbase'
+                history: history.length > 0 ? history : [{ time: Date.now(), price: currentPrice }],
+                source: dataSourceName
             };
-        }
-
-        // ── Binance (fallback, not a BRTI constituent but very liquid) ──
-        async function fetchFromBinance() {
-            // 15-min kline to get period open price
-            const kline15Res = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=2');
-            if (!kline15Res.ok) throw new Error('Binance 15m klines failed');
-            const klines15 = await kline15Res.json();
-            // Last candle is the current (open) one
-            const current15 = klines15[klines15.length - 1];
-            const periodOpenPrice = parseFloat(current15[1]); // open price of current 15m candle
-
-            // Current price from ticker
-            const tickerRes = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
-            if (!tickerRes.ok) throw new Error('Binance ticker failed');
-            const ticker = await tickerRes.json();
-
-            // 1-minute klines for analysis
-            const klinesRes = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=60');
-            if (!klinesRes.ok) throw new Error('Binance klines failed');
-            const klines = await klinesRes.json();
-
-            return {
-                currentPrice: parseFloat(ticker.lastPrice),
-                periodOpenPrice,
-                change24h: parseFloat(ticker.priceChangePercent),
-                history: klines.map(k => ({
-                    time: k[0],
-                    price: parseFloat(k[4])
-                })),
-                source: 'Binance'
-            };
-        }
-
-        async function fetchPriceData() {
-            const sources = [
-                { name: 'Kraken', fn: fetchFromKraken },
-                { name: 'Coinbase', fn: fetchFromCoinbase },
-                { name: 'Binance', fn: fetchFromBinance }
-            ];
-
-            for (const source of sources) {
-                try {
-                    const data = await source.fn();
-                    dataSourceName = data.source;
-                    console.log(`Price loaded from ${source.name}: current=${data.currentPrice}, periodOpen=${data.periodOpenPrice}`);
-                    return data;
-                } catch (err) {
-                    console.warn(`${source.name} failed:`, err.message);
-                }
-            }
-
-            throw new Error('All price sources failed. Check your internet connection.');
         }
 
         // ── Technical analysis ────────────────────────────────────────
@@ -984,13 +1071,16 @@
             changeEl.textContent = `24h: ${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}%`;
             changeEl.style.color = change24h >= 0 ? '#3fb950' : '#f85149';
 
-            // Period open price (from the 15m kline, matches Kalshi strike)
+            // Period open price
             if (periodStartPrice !== null) {
                 document.getElementById('period-start-price').textContent = formatPrice(periodStartPrice);
                 const delta = ((data.currentPrice - periodStartPrice) / periodStartPrice) * 100;
                 const deltaEl = document.getElementById('period-delta');
-                deltaEl.textContent = `${delta >= 0 ? '+' : ''}${delta.toFixed(3)}%`;
+                deltaEl.textContent = `${delta >= 0 ? '+' : ''}${delta.toFixed(4)}%`;
                 deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
+                // Label shows source
+                document.getElementById('period-label').textContent =
+                    kalshiStrike ? 'Kalshi strike' : 'Period open (strike)';
             }
 
             // Target time (period end)
