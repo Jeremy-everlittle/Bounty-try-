@@ -1656,6 +1656,30 @@
             return 0;
         }
 
+        // ── Regime-adaptive weight scaling ──
+        // Returns multipliers for signal categories based on detected regime
+        function getRegimeMultipliers(trendRegime, volRegime, ac1) {
+            // Default multipliers (1.0 = no change)
+            const m = { momentum: 1.0, flow: 1.0, reversion: 1.0, pattern: 1.0, volume: 1.0 };
+            // Trending: amplify momentum/flow, suppress reversion signals
+            if (ac1 > 0.15 || trendRegime.trending) {
+                m.momentum = 1.4; m.flow = 1.3; m.reversion = 0.3; m.pattern = 0.8;
+            }
+            // Mean-reverting: suppress momentum, amplify reversion
+            else if (ac1 < -0.15 || trendRegime.meanReverting) {
+                m.momentum = 0.5; m.flow = 0.8; m.reversion = 1.8; m.pattern = 1.2;
+            }
+            // Volatile: amplify flow and volume (institutional activity matters)
+            if (volRegime.regime === 'volatile' || volRegime.regime === 'expanding') {
+                m.flow *= 1.3; m.volume *= 1.5; m.momentum *= 0.8;
+            }
+            // Quiet: flow is noise, momentum is dominant
+            else if (volRegime.regime === 'quiet') {
+                m.flow *= 0.6; m.momentum *= 1.2;
+            }
+            return m;
+        }
+
         // ── Signal agreement multiplier ──
         function computeAgreementMultiplier(signals) {
             // signals: array of {value, weight} where value is the raw signal
@@ -2015,24 +2039,27 @@
             ];
             const agreementMult = computeAgreementMultiplier(allSignals);
 
-            // Combine drift signals into a single z-shift (16 signals)
+            // Regime-adaptive multipliers: boost/dampen signal categories based on market regime
+            const regM = getRegimeMultipliers(trendRegime, volRegime, ac1);
+
+            // Combine drift signals into a single z-shift (16 signals, regime-adapted)
             const rawTotalZShift = (
-                driftZShift          * (0.22 + earlyBoost * 0.08) * immediateBoosted +
-                orderFlowSignal      * (0.12 + earlyBoost * 0.06) * immediateBoosted +
-                tradeFlowSignal      * (0.09 + earlyBoost * 0.04) * immediateBoosted +
-                rsiSignal            * (0.04 - earlyBoost * 0.02) * urgencyFade +
-                candlePattern.signal * (0.04 - earlyBoost * 0.02) * urgencyFade +
-                volumeSurgeSignal    * (0.05 + earlyBoost * 0.03) +
+                driftZShift          * (0.22 + earlyBoost * 0.08) * immediateBoosted * regM.momentum +
+                orderFlowSignal      * (0.12 + earlyBoost * 0.06) * immediateBoosted * regM.flow +
+                tradeFlowSignal      * (0.09 + earlyBoost * 0.04) * immediateBoosted * regM.flow +
+                rsiSignal            * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.reversion +
+                candlePattern.signal * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.pattern +
+                volumeSurgeSignal    * (0.05 + earlyBoost * 0.03) * regM.volume +
                 fundingSignal        * (0.02 - earlyBoost * 0.01) * urgencyFade +
-                momAccel * 20        * (0.02 + earlyBoost * 0.02) * immediateBoosted +
-                vwapSignal           * (0.06 + earlyBoost * 0.04) +
-                macdSignal           * (0.05 + earlyBoost * 0.03) +
-                linRegSignal         * (0.04 + earlyBoost * 0.02) +
+                momAccel * 20        * (0.02 + earlyBoost * 0.02) * immediateBoosted * regM.momentum +
+                vwapSignal           * (0.06 + earlyBoost * 0.04) * regM.reversion +
+                macdSignal           * (0.05 + earlyBoost * 0.03) * regM.momentum +
+                linRegSignal         * (0.04 + earlyBoost * 0.02) * regM.momentum +
                 bayesianPrior        * earlyBoost * 0.08 +
-                bbSqueeze.breakoutSignal * 0.04 +
-                srSignal             * 0.04 +
-                haResult.signal      * (0.04 - earlyBoost * 0.01) +
-                crossTF.signal       * (0.04 + earlyBoost * 0.03) * immediateBoosted
+                bbSqueeze.breakoutSignal * 0.04 * regM.pattern +
+                srSignal             * 0.04 * regM.reversion +
+                haResult.signal      * (0.04 - earlyBoost * 0.01) * regM.pattern +
+                crossTF.signal       * (0.04 + earlyBoost * 0.03) * immediateBoosted * regM.momentum
             );
 
             // Apply agreement multiplier: amplify when signals agree, dampen when conflicting
@@ -2080,7 +2107,7 @@
             const volLabel = volRegime.regime === 'volatile' ? 'High'
                 : volRegime.regime === 'quiet' ? 'Low' : 'Medium';
 
-            console.log(`Predict v2: P(up)=${(clampedProb*100).toFixed(1)}% z=${zScore.toFixed(2)} drift=${totalZShift.toFixed(3)} regime=${volRegime.regime} ac1=${ac1.toFixed(2)} => ${predictUp?'UP':'DOWN'}`);
+            console.log(`Predict v2: P(up)=${(clampedProb*100).toFixed(1)}% z=${zScore.toFixed(2)} drift=${totalZShift.toFixed(3)} regime=${volRegime.regime} ac1=${ac1.toFixed(2)} regM=[mom=${regM.momentum.toFixed(1)} flow=${regM.flow.toFixed(1)} rev=${regM.reversion.toFixed(1)}] => ${predictUp?'UP':'DOWN'}`);
 
             return {
                 predictedPrice,
