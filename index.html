@@ -957,8 +957,8 @@
 
         async function fetchExchangePrice(name, url, parser) {
             try {
-                const res = await fetch(url);
-                if (!res.ok) return null;
+                const res = await fetchWithCors(url);
+                if (!res) return null;
                 const data = await res.json();
                 const price = parser(data);
                 if (price && price > 0) {
@@ -1190,8 +1190,8 @@
                 return orderBookCache.data;
             }
             try {
-                const res = await fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=20');
-                if (res.ok) {
+                const res = await fetchWithCors('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=20');
+                if (res) {
                     const data = await res.json();
                     orderBookCache = { timestamp: now, data };
                     return data;
@@ -1207,8 +1207,8 @@
                 return fundingRateCache.rate;
             }
             try {
-                const res = await fetch('https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1');
-                if (res.ok) {
+                const res = await fetchWithCors('https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1');
+                if (res) {
                     const data = await res.json();
                     if (data.length > 0) {
                         const rate = parseFloat(data[0].fundingRate);
@@ -1227,8 +1227,8 @@
                 return recentTradesCache.trades;
             }
             try {
-                const res = await fetch('https://api.binance.com/api/v3/aggTrades?symbol=BTCUSDT&limit=200');
-                if (res.ok) {
+                const res = await fetchWithCors('https://api.binance.com/api/v3/aggTrades?symbol=BTCUSDT&limit=200');
+                if (res) {
                     const trades = await res.json();
                     recentTradesCache = { timestamp: now, trades };
                     return trades;
