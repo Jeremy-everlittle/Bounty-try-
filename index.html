@@ -1738,11 +1738,12 @@
 
         // ── UI update ─────────────────────────────────────────────────
 
-        function renderChangeTag(changePercent, containerId) {
+        function renderChangeTag(changePercent, containerId, dollarAmount) {
             const el = document.getElementById(containerId);
             const changeClass = changePercent > 0.01 ? 'up' : changePercent < -0.01 ? 'down' : 'neutral';
             const arrow = changePercent > 0.01 ? '&#9650;' : changePercent < -0.01 ? '&#9660;' : '&#9654;';
-            el.innerHTML = `<span class="change ${changeClass}">${arrow} ${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(3)}%</span>`;
+            const dollarStr = dollarAmount !== undefined ? ` ${dollarAmount >= 0 ? '+' : '-'}$${Math.abs(dollarAmount).toFixed(2)}` : '';
+            el.innerHTML = `<span class="change ${changeClass}">${arrow}${dollarStr} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(3)}%)</span>`;
         }
 
         function updateUI(data, periodEnd) {
@@ -1764,9 +1765,10 @@
             // Period open price — always show latest Kalshi strike when available
             if (displayStrike !== null) {
                 document.getElementById('period-start-price').textContent = formatPrice(displayStrike);
-                const delta = ((data.currentPrice - displayStrike) / displayStrike) * 100;
+                const deltaDollar = data.currentPrice - displayStrike;
+                const delta = (deltaDollar / displayStrike) * 100;
                 const deltaEl = document.getElementById('period-delta');
-                deltaEl.textContent = `${delta >= 0 ? '+' : ''}${delta.toFixed(4)}%`;
+                deltaEl.textContent = `${deltaDollar >= 0 ? '+' : '-'}$${Math.abs(deltaDollar).toFixed(2)} (${delta >= 0 ? '+' : ''}${delta.toFixed(4)}%)`;
                 deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
                 document.getElementById('period-label').textContent = 'Kalshi strike';
             } else {
@@ -1790,8 +1792,9 @@
             // Original prediction (locked for the period)
             if (originalPrediction) {
                 document.getElementById('original-predicted-price').textContent = formatPrice(originalPrediction.predictedPrice);
-                const origChangePct = ((originalPrediction.predictedPrice - periodStartPrice) / periodStartPrice) * 100;
-                renderChangeTag(origChangePct, 'original-predicted-change');
+                const origChangeDollar = originalPrediction.predictedPrice - periodStartPrice;
+                const origChangePct = (origChangeDollar / periodStartPrice) * 100;
+                renderChangeTag(origChangePct, 'original-predicted-change', origChangeDollar);
             }
 
             // Updated prediction (recalculated, shown only after first refresh)
@@ -1799,8 +1802,9 @@
                 updatedPrediction.predictedPrice !== originalPrediction.predictedPrice) {
                 document.getElementById('updated-row').style.display = 'block';
                 document.getElementById('updated-predicted-price').textContent = formatPrice(updatedPrediction.predictedPrice);
-                const updChangePct = ((updatedPrediction.predictedPrice - periodStartPrice) / periodStartPrice) * 100;
-                renderChangeTag(updChangePct, 'updated-predicted-change');
+                const updChangeDollar = updatedPrediction.predictedPrice - periodStartPrice;
+                const updChangePct = (updChangeDollar / periodStartPrice) * 100;
+                renderChangeTag(updChangePct, 'updated-predicted-change', updChangeDollar);
             } else {
                 document.getElementById('updated-row').style.display = 'none';
             }
