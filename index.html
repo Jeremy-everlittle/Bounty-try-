@@ -1913,6 +1913,7 @@
 
         // ── EMA ──
         function computeEMA(prices, period) {
+            if (!prices || prices.length === 0) return 0;
             const k = 2 / (period + 1);
             let ema = prices[0];
             for (let i = 1; i < prices.length; i++) {
@@ -2434,8 +2435,9 @@
             const denom = n * sumX2 - sumX * sumX;
             if (denom === 0) return { slope: 0, r2: 0 };
             const slope = (n * sumXY - sumX * sumY) / denom;
-            const r = (n * sumXY - sumX * sumY) / Math.sqrt(denom * (n * sumY2 - sumY * sumY));
-            return { slope: slope / segment[0], r2: Math.min(1, r * r) }; // normalized slope
+            const r2denom = denom * (n * sumY2 - sumY * sumY);
+            const r = r2denom > 0 ? (n * sumXY - sumX * sumY) / Math.sqrt(r2denom) : 0;
+            return { slope: segment[0] !== 0 ? slope / segment[0] : 0, r2: Math.min(1, Math.max(0, r * r)) };
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -2540,11 +2542,6 @@
                 }
             }
 
-            const driftWithEarlyBias = minutesIntoPeriod <= 3
-                ? rawDrift * 0.6 + earlyMomentumSignal * 0.4 : rawDrift;
-            const adjustedDrift = driftWithEarlyBias * driftMultiplier;
-            const driftZShift = adjustedRemainingVol > 0 ? adjustedDrift / adjustedRemainingVol : 0;
-
             // ────────────────────────────────────────────────────────────
             // SIGNAL 4: ENHANCED ORDER FLOW & MICROSTRUCTURE
             // ────────────────────────────────────────────────────────────
@@ -2578,6 +2575,11 @@
             // Apply microstructure-informed vol adjustment to remaining vol
             const microVolAdjust = spreadVolAdjust * vpinVolAdjust;
             const adjustedRemainingVol = remainingVol * microVolAdjust;
+
+            const driftWithEarlyBias = minutesIntoPeriod <= 3
+                ? rawDrift * 0.6 + earlyMomentumSignal * 0.4 : rawDrift;
+            const adjustedDrift = driftWithEarlyBias * driftMultiplier;
+            const driftZShift = adjustedRemainingVol > 0 ? adjustedDrift / adjustedRemainingVol : 0;
 
             // ────────────────────────────────────────────────────────────
             // SIGNAL 5: RSI MEAN REVERSION (counter-trend)
