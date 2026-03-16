@@ -1509,6 +1509,17 @@
         let fundingRateCache = { timestamp: 0, rate: 0 };
         let recentTradesCache = { timestamp: 0, trades: [] };
 
+        // ── Microstructure historical state ──
+        const microState = {
+            prevOrderBookImbalance: null,
+            imbalanceHistory: [],
+            tradeFlowHistory: [],
+            cumulativeDelta: 0,
+            deltaHistory: [],
+            spreadHistory: [],
+            vpinBucketSize: 0,
+        };
+
         // Fetch Binance order book depth (top 20 levels)
         async function fetchOrderBookDepth() {
             const now = Date.now();
@@ -1722,6 +1733,182 @@
             const total = buyVol + sellVol;
             if (total === 0) return 0;
             return (buyVol - sellVol) / total;
+        }
+
+        // ── Order book pressure gradient (enhanced imbalance with shape analysis) ──
+        function computeOrderBookPressureGradient(orderBook) {
+            if (!orderBook || !orderBook.bids || !orderBook.asks)
+                return { imbalance: 0, gradient: 0, topHeavy: 1 };
+            const levels = Math.min(orderBook.bids.length, orderBook.asks.length, 20);
+            if (levels < 4) return { imbalance: 0, gradient: 0, topHeavy: 1 };
+            const mid = (parseFloat(orderBook.bids[0][0]) + parseFloat(orderBook.asks[0][0])) / 2;
+            const levelImbalances = [];
+            let nearBidVol = 0, nearAskVol = 0, farBidVol = 0, farAskVol = 0;
+            let totalBidVol = 0, totalAskVol = 0;
+            for (let i = 0; i < levels; i++) {
+                const bidVol = parseFloat(orderBook.bids[i][1]);
+                const askVol = parseFloat(orderBook.asks[i][1]);
+                const weight = Math.exp(-0.15 * i);
+                totalBidVol += bidVol * weight;
+                totalAskVol += askVol * weight;
+                const levelTotal = bidVol + askVol;
+                if (levelTotal > 0) levelImbalances.push((bidVol - askVol) / levelTotal);
+                if (i < 5) { nearBidVol += bidVol; nearAskVol += askVol; }
+                else { farBidVol += bidVol; farAskVol += askVol; }
+            }
+            const total = totalBidVol + totalAskVol;
+            const imbalance = total > 0 ? (totalBidVol - totalAskVol) / total : 0;
+            // Gradient via linear regression of level imbalances
+            let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+            const n = levelImbalances.length;
+            for (let i = 0; i < n; i++) {
+                sumX += i; sumY += levelImbalances[i];
+                sumXY += i * levelImbalances[i]; sumX2 += i * i;
+            }
+            const denom = n * sumX2 - sumX * sumX;
+            const gradient = denom !== 0 ? (n * sumXY - sumX * sumY) / denom : 0;
+            const farTotal = farBidVol + farAskVol;
+            const topHeavy = farTotal > 0 ? (nearBidVol + nearAskVol) / farTotal : 10;
+            return { imbalance, gradient, topHeavy };
+        }
+
+        // ── Order book delta over time (tracks imbalance velocity) ──
+        function computeOrderBookDelta(currentImbalance) {
+            const hist = microState.imbalanceHistory;
+            hist.push({ timestamp: Date.now(), imbalance: currentImbalance });
+            while (hist.length > 30) hist.shift();
+            if (hist.length < 3) return { delta: 0, velocity: 0, signal: 0 };
+            const alpha = 0.3;
+            let velocity = 0;
+            for (let i = 1; i < hist.length; i++) {
+                velocity = alpha * (hist[i].imbalance - hist[i - 1].imbalance) + (1 - alpha) * velocity;
+            }
+            let acceleration = 0;
+            if (hist.length >= 6) {
+                const mid = Math.floor(hist.length / 2);
+                const recentVel = (hist[hist.length - 1].imbalance - hist[mid].imbalance) / (hist.length - mid);
+                const olderVel = (hist[mid].imbalance - hist[0].imbalance) / mid;
+                acceleration = recentVel - olderVel;
+            }
+            const signal = Math.max(-1, Math.min(1, velocity * 3.0 + acceleration * 1.5));
+            return { delta: currentImbalance - hist[hist.length - 2].imbalance, velocity, signal };
+        }
+
+        // ── Trade size clustering (institutional vs retail flow) ──
+        function computeTradeSizeClustering(trades) {
+            if (!trades || trades.length < 10) return { signal: 0, largeTradeRatio: 0 };
+            const cutoff = Date.now() - 60000;
+            const recent = trades.filter(t => t.T >= cutoff);
+            if (recent.length < 5) return { signal: 0, largeTradeRatio: 0 };
+            const sizes = recent.map(t => parseFloat(t.q));
+            const avgSize = sizes.reduce((a, b) => a + b, 0) / sizes.length;
+            const threshold = avgSize * 2.0;
+            let retailBuy = 0, retailSell = 0, instBuy = 0, instSell = 0;
+            let totalVol = 0, largeVol = 0, largeBuyN = 0, largeSellN = 0;
+            for (const t of recent) {
+                const qty = parseFloat(t.q);
+                totalVol += qty;
+                if (qty >= threshold) {
+                    largeVol += qty;
+                    if (t.m) { instSell += qty; largeSellN++; }
+                    else { instBuy += qty; largeBuyN++; }
+                } else {
+                    if (t.m) retailSell += qty; else retailBuy += qty;
+                }
+            }
+            const retailTotal = retailBuy + retailSell;
+            const instTotal = instBuy + instSell;
+            const retailImb = retailTotal > 0 ? (retailBuy - retailSell) / retailTotal : 0;
+            const instImb = instTotal > 0 ? (instBuy - instSell) / instTotal : 0;
+            const largeCount = largeBuyN + largeSellN;
+            const clustering = largeCount > 0 ? Math.abs(largeBuyN - largeSellN) / largeCount : 0;
+            const raw = instImb * 0.75 + retailImb * 0.25;
+            const signal = Math.max(-1, Math.min(1, raw * (1 + clustering * 0.5)));
+            return { signal, largeTradeRatio: totalVol > 0 ? largeVol / totalVol : 0 };
+        }
+
+        // ── Bid-ask spread analysis ──
+        function computeSpreadAnalysis(orderBook) {
+            if (!orderBook || !orderBook.bids || !orderBook.asks ||
+                !orderBook.bids.length || !orderBook.asks.length)
+                return { spreadBps: 0, volAdjustment: 1.0, signal: 0 };
+            const bestBid = parseFloat(orderBook.bids[0][0]);
+            const bestAsk = parseFloat(orderBook.asks[0][0]);
+            const mid = (bestBid + bestAsk) / 2;
+            if (mid === 0) return { spreadBps: 0, volAdjustment: 1.0, signal: 0 };
+            const spreadBps = ((bestAsk - bestBid) / mid) * 10000;
+            const hist = microState.spreadHistory;
+            hist.push(spreadBps);
+            while (hist.length > 60) hist.shift();
+            const avgSpread = hist.reduce((s, v) => s + v, 0) / hist.length;
+            const spreadRatio = avgSpread > 0 ? spreadBps / avgSpread : 1;
+            let volAdjustment = 1.0;
+            if (spreadRatio > 1.5) volAdjustment = 1.0 + (spreadRatio - 1.5) * 0.3;
+            else if (spreadRatio < 0.7) volAdjustment = 1.0 - (0.7 - spreadRatio) * 0.2;
+            volAdjustment = Math.max(0.7, Math.min(1.5, volAdjustment));
+            const signal = spreadRatio < 0.8 ? 0.15 : spreadRatio > 1.5 ? -0.1 : 0;
+            return { spreadBps, spreadRatio, volAdjustment, signal };
+        }
+
+        // ── Cumulative volume delta with divergence detection ──
+        function computeCVD(trades) {
+            if (!trades || trades.length === 0) return { cvd: 0, divergence: 0, signal: 0 };
+            const cutoff = Date.now() - 60000;
+            let periodDelta = 0;
+            for (const t of trades) {
+                if (t.T < cutoff) continue;
+                const qty = parseFloat(t.q);
+                const price = parseFloat(t.p);
+                if (t.m) periodDelta -= qty * price; else periodDelta += qty * price;
+            }
+            microState.cumulativeDelta = periodDelta;
+            microState.deltaHistory.push({ timestamp: Date.now(), delta: periodDelta });
+            while (microState.deltaHistory.length > 30) microState.deltaHistory.shift();
+            let divergence = 0;
+            const dh = microState.deltaHistory;
+            if (dh.length >= 10) {
+                const recent = dh.slice(-5);
+                const older = dh.slice(-10, -5);
+                const recentAvg = recent.reduce((s, d) => s + d.delta, 0) / recent.length;
+                const olderAvg = older.reduce((s, d) => s + d.delta, 0) / older.length;
+                const totalAbs = Math.abs(recentAvg) + Math.abs(olderAvg);
+                if (totalAbs > 0) divergence = (recentAvg - olderAvg) / totalAbs;
+            }
+            const deltaSign = periodDelta > 0 ? 1 : periodDelta < 0 ? -1 : 0;
+            const signal = Math.max(-1, Math.min(1, deltaSign * 0.4 + divergence * 0.6));
+            return { cvd: periodDelta, divergence, signal };
+        }
+
+        // ── VPIN: Volume-Synchronized Probability of Informed Trading ──
+        function computeVPIN(trades, numBuckets = 20) {
+            if (!trades || trades.length < 20) return { vpin: 0, toxicity: 'low', signal: 0 };
+            if (microState.vpinBucketSize === 0) {
+                let totalVol = 0;
+                for (const t of trades) totalVol += parseFloat(t.q);
+                microState.vpinBucketSize = totalVol / numBuckets || 1;
+            }
+            const bucketSize = microState.vpinBucketSize;
+            const buckets = [];
+            let cur = { buyVol: 0, sellVol: 0 }, fill = 0;
+            for (const t of trades) {
+                const qty = parseFloat(t.q);
+                let remaining = qty;
+                while (remaining > 0) {
+                    const space = bucketSize - fill;
+                    const f = Math.min(remaining, space);
+                    if (t.m) cur.sellVol += f; else cur.buyVol += f;
+                    fill += f; remaining -= f;
+                    if (fill >= bucketSize) { buckets.push({...cur}); cur = { buyVol: 0, sellVol: 0 }; fill = 0; }
+                }
+            }
+            if (buckets.length < 3) return { vpin: 0, toxicity: 'low', signal: 0 };
+            const recent = buckets.slice(-numBuckets);
+            let sumAbsImb = 0;
+            for (const b of recent) sumAbsImb += Math.abs(b.buyVol - b.sellVol);
+            const vpin = sumAbsImb / (recent.length * bucketSize);
+            const toxicity = vpin > 0.6 ? 'critical' : vpin > 0.4 ? 'elevated' : vpin > 0.25 ? 'moderate' : 'low';
+            const signal = vpin > 0.4 ? -(vpin - 0.4) : 0;
+            return { vpin, toxicity, signal };
         }
 
         // ── EMA ──
@@ -2163,22 +2350,41 @@
             }
 
             const adjustedDrift = rawDrift * driftMultiplier;
-            const driftZShift = remainingVol > 0 ? adjustedDrift / remainingVol : 0;
+            const driftZShift = adjustedRemainingVol > 0 ? adjustedDrift / adjustedRemainingVol : 0;
 
             // ────────────────────────────────────────────────────────────
-            // SIGNAL 4: ORDER FLOW & MICROSTRUCTURE
+            // SIGNAL 4: ENHANCED ORDER FLOW & MICROSTRUCTURE
             // ────────────────────────────────────────────────────────────
             let orderFlowSignal = 0;
+            let spreadVolAdjust = 1.0;
             if (orderBookCache.data && Date.now() - orderBookCache.timestamp < 10000) {
-                const obi = computeOrderBookImbalance(orderBookCache.data);
-                orderFlowSignal = obi * 0.3;
+                const pressure = computeOrderBookPressureGradient(orderBookCache.data);
+                const obDelta = computeOrderBookDelta(pressure.imbalance);
+                const spread = computeSpreadAnalysis(orderBookCache.data);
+                spreadVolAdjust = spread.volAdjustment;
+                // Combine: static imbalance 30%, gradient 15%, delta velocity 25%, spread 10%
+                orderFlowSignal = pressure.imbalance * 0.30 + pressure.gradient * 2.0 * 0.15 +
+                                  obDelta.signal * 0.25 + spread.signal * 0.10;
             }
 
-            // Trade flow imbalance (buy vs sell aggressor volume)
+            // Enhanced trade flow: size clustering + CVD + VPIN
             let tradeFlowSignal = 0;
+            let vpinVolAdjust = 1.0;
             if (recentTradesCache.trades.length && Date.now() - recentTradesCache.timestamp < 10000) {
-                tradeFlowSignal = computeTradeFlowImbalance(recentTradesCache.trades) * 0.25;
+                const trades = recentTradesCache.trades;
+                const clustering = computeTradeSizeClustering(trades);
+                const rawFlow = computeTradeFlowImbalance(trades);
+                const cvd = computeCVD(trades);
+                const vpin = computeVPIN(trades);
+                // Combine: institutional flow 35%, raw flow 25%, CVD 25%, VPIN 15%
+                tradeFlowSignal = clustering.signal * 0.35 + rawFlow * 0.25 +
+                                  cvd.signal * 0.25 + vpin.signal * 0.15;
+                if (vpin.vpin > 0.4) vpinVolAdjust = 1.0 + (vpin.vpin - 0.4) * 0.5;
             }
+
+            // Apply microstructure-informed vol adjustment to remaining vol
+            const microVolAdjust = spreadVolAdjust * vpinVolAdjust;
+            const adjustedRemainingVol = remainingVol * microVolAdjust;
 
             // ────────────────────────────────────────────────────────────
             // SIGNAL 5: RSI MEAN REVERSION (counter-trend)
@@ -2342,7 +2548,7 @@
             // Place predicted price on correct side of strike;
             // distance reflects confidence
             const confidenceDistance = Math.abs(finalProb - 0.5) * 2; // 0-1
-            const priceOffset = remainingVol * current * confidenceDistance * 0.5;
+            const priceOffset = adjustedRemainingVol * current * confidenceDistance * 0.5;
             const predictedPrice = predictUp
                 ? strike + Math.max(priceOffset, 0.01)
                 : strike - Math.max(priceOffset, 0.01);
