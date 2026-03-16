@@ -645,6 +645,7 @@
         let dataSourceName = '';
         let kalshiStrike = null;    // exact strike from Kalshi API
         let kalshiMarketTicker = null;
+        let kalshiCloseTime = null; // close_time of the current Kalshi market
 
         // ── Kalshi public API (no auth needed) ──
         // Extract the resolution threshold from a Kalshi market object
@@ -761,36 +762,27 @@
                 // Since we queried KXBTC15M, all results are 15-minute markets
                 const pool = markets;
 
-                // Find the market that ends soonest (current or most recent period)
+                // Find the market whose close_time is in the FUTURE (current period)
+                // Never fall back to already-closed markets — that causes stale data
                 const now = new Date();
                 let best = null;
-                let mostRecent = null;
                 for (const m of pool) {
                     const closeTime = new Date(m.close_time || m.expiration_time);
-                    // Future market (current period)
                     if (closeTime > now) {
                         if (!best || closeTime < new Date(best.close_time || best.expiration_time)) {
                             best = m;
                         }
                     }
-                    // Track the most recently closed market as fallback
-                    if (!mostRecent || closeTime > new Date(mostRecent.close_time || mostRecent.expiration_time)) {
-                        mostRecent = m;
-                    }
-                }
-
-                // Use future market if available, otherwise the most recently closed one
-                if (!best) {
-                    best = mostRecent;
-                    writeDebug('Using most recent market (at boundary)');
                 }
 
                 if (!best) {
-                    writeDebug('No markets found in ' + pool.length + ' candidates');
+                    writeDebug('No future Kalshi markets found in ' + pool.length + ' candidates — waiting for new market');
                     return null;
                 }
 
+                const bestCloseTime = new Date(best.close_time || best.expiration_time);
                 kalshiMarketTicker = best.ticker;
+                kalshiCloseTime = bestCloseTime.toISOString();
 
                 // Dump ALL fields for debugging
                 console.log('Kalshi ALL fields:', JSON.stringify(best));
@@ -957,14 +949,21 @@
             return null;
         }
 
-        // ── Get 1-minute klines for prediction analysis ──
+        // ── Get 1-minute klines for prediction analysis (OHLCV) ──
         async function fetchAnalysisHistory() {
-            // Try Binance 1m klines (best granularity)
+            // Try Binance 1m klines — 120 candles for deeper analysis
             try {
-                const res = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=60');
+                const res = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=120');
                 if (res.ok) {
                     const klines = await res.json();
-                    return klines.map(k => ({ time: k[0], price: parseFloat(k[4]) }));
+                    return klines.map(k => ({
+                        time: k[0],
+                        open: parseFloat(k[1]),
+                        high: parseFloat(k[2]),
+                        low: parseFloat(k[3]),
+                        price: parseFloat(k[4]),  // close
+                        volume: parseFloat(k[5])
+                    }));
                 }
             } catch(e) {}
 
@@ -974,8 +973,13 @@
                 if (res.ok) {
                     const data = await res.json();
                     const key = Object.keys(data.result).find(k => k !== 'last');
-                    return data.result[key].slice(-60).map(c => ({
-                        time: c[0] * 1000, price: parseFloat(c[4])
+                    return data.result[key].slice(-120).map(c => ({
+                        time: c[0] * 1000,
+                        open: parseFloat(c[1]),
+                        high: parseFloat(c[2]),
+                        low: parseFloat(c[3]),
+                        price: parseFloat(c[4]),
+                        volume: parseFloat(c[6])
                     }));
                 }
             } catch(e) {}
@@ -1023,14 +1027,17 @@
 
         function computeRSI(prices, period = 14) {
             if (prices.length < period + 1) return 50;
-            let gains = 0, losses = 0;
-            for (let i = prices.length - period; i < prices.length; i++) {
-                const diff = prices[i] - prices[i - 1];
-                if (diff > 0) gains += diff;
-                else losses -= diff;
+            let avgGain = 0, avgLoss = 0;
+            // Initial SMA-based averages
+            for (let i = 1; i <= period; i++) {
+                const diff = prices[prices.length - period - 1 + i] - prices[prices.length - period - 1 + i - 1];
+                if (diff > 0) avgGain += diff;
+                else avgLoss -= diff;
             }
-            if (losses === 0) return 100;
-            const rs = (gains / period) / (losses / period);
+            avgGain /= period;
+            avgLoss /= period;
+            if (avgLoss === 0) return 100;
+            const rs = avgGain / avgLoss;
             return 100 - (100 / (1 + rs));
         }
 
@@ -1043,47 +1050,204 @@
             return ema;
         }
 
+        function computeSMA(prices, period) {
+            if (prices.length < period) return prices.reduce((a, b) => a + b, 0) / prices.length;
+            const slice = prices.slice(-period);
+            return slice.reduce((a, b) => a + b, 0) / period;
+        }
+
+        function computeMACD(prices) {
+            if (prices.length < 26) return { macd: 0, signal: 0, histogram: 0 };
+            const ema12 = computeEMA(prices, 12);
+            const ema26 = computeEMA(prices, 26);
+            const macdLine = ema12 - ema26;
+
+            // Compute signal line (9-period EMA of MACD values)
+            // Build MACD history for signal EMA
+            const macdHistory = [];
+            for (let i = 26; i <= prices.length; i++) {
+                const slice = prices.slice(0, i);
+                const e12 = computeEMA(slice, 12);
+                const e26 = computeEMA(slice, 26);
+                macdHistory.push(e12 - e26);
+            }
+            const signalLine = macdHistory.length >= 9 ? computeEMA(macdHistory, 9) : macdLine;
+            return { macd: macdLine, signal: signalLine, histogram: macdLine - signalLine };
+        }
+
+        function computeBollingerBands(prices, period = 20) {
+            const sma = computeSMA(prices, period);
+            const slice = prices.slice(-Math.min(period, prices.length));
+            const variance = slice.reduce((sum, p) => sum + (p - sma) ** 2, 0) / slice.length;
+            const stdDev = Math.sqrt(variance);
+            return { upper: sma + 2 * stdDev, middle: sma, lower: sma - 2 * stdDev, stdDev };
+        }
+
+        function computeVWAP(history) {
+            // Volume-Weighted Average Price
+            if (!history.length || !history[0].volume) return null;
+            let cumVol = 0, cumTP = 0;
+            for (const bar of history) {
+                const tp = bar.high && bar.low ? (bar.high + bar.low + bar.price) / 3 : bar.price;
+                cumTP += tp * (bar.volume || 1);
+                cumVol += (bar.volume || 1);
+            }
+            return cumVol > 0 ? cumTP / cumVol : null;
+        }
+
+        function computeATR(history, period = 14) {
+            // Average True Range for volatility measurement
+            if (history.length < period + 1) return 0;
+            let atr = 0;
+            for (let i = history.length - period; i < history.length; i++) {
+                const high = history[i].high || history[i].price;
+                const low = history[i].low || history[i].price;
+                const prevClose = history[i - 1] ? history[i - 1].price : history[i].price;
+                const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+                atr += tr;
+            }
+            return atr / period;
+        }
+
         function predictPrice(data, minutesAhead) {
-            const prices = data.history.map(h => h.price);
+            const history = data.history;
+            const prices = history.map(h => h.price);
             const current = data.currentPrice;
+            const n = prices.length;
 
-            const lookback = Math.min(10, prices.length - 1);
-            const oldPrice = prices[prices.length - 1 - lookback];
-            const momentum = (current - oldPrice) / oldPrice;
+            // ── 1. Multi-timeframe momentum ──
+            const mom5 = n > 5 ? (current - prices[n - 6]) / prices[n - 6] : 0;
+            const mom10 = n > 10 ? (current - prices[n - 11]) / prices[n - 11] : 0;
+            const mom20 = n > 20 ? (current - prices[n - 21]) / prices[n - 21] : 0;
 
+            // Momentum acceleration (is momentum increasing or decreasing?)
+            const recentMom = n > 3 ? (prices[n-1] - prices[n-4]) / prices[n-4] : 0;
+            const priorMom = n > 6 ? (prices[n-4] - prices[n-7]) / prices[n-7] : 0;
+            const momAccel = recentMom - priorMom;
+
+            // ── 2. EMA crossover system ──
             const ema5 = computeEMA(prices, 5);
+            const ema12 = computeEMA(prices, 12);
             const ema20 = computeEMA(prices, 20);
-            const emaCrossSignal = (ema5 - ema20) / current;
+            const emaCross = (ema5 - ema20) / current;
 
+            // ── 3. MACD ──
+            const macd = computeMACD(prices);
+            const macdSignal = macd.histogram / current; // Normalized histogram
+
+            // ── 4. RSI with nuanced interpretation ──
             const rsi = computeRSI(prices);
             let rsiSignal = 0;
-            if (rsi > 70) rsiSignal = -0.002;
-            else if (rsi < 30) rsiSignal = 0.002;
+            if (rsi > 80) rsiSignal = -0.004;       // Strongly overbought
+            else if (rsi > 70) rsiSignal = -0.002;   // Overbought
+            else if (rsi > 60) rsiSignal = 0.0005;   // Mildly bullish
+            else if (rsi < 20) rsiSignal = 0.004;    // Strongly oversold
+            else if (rsi < 30) rsiSignal = 0.002;    // Oversold
+            else if (rsi < 40) rsiSignal = -0.0005;  // Mildly bearish
 
+            // ── 5. Bollinger Bands — mean reversion ──
+            const bb = computeBollingerBands(prices);
+            let bbSignal = 0;
+            if (bb.stdDev > 0) {
+                const bbPosition = (current - bb.middle) / bb.stdDev;
+                // Price near upper band → likely to revert down, and vice versa
+                bbSignal = -bbPosition * 0.001;
+                // But if strongly trending, Bollinger walk happens — reduce reversion
+                if (Math.abs(emaCross) > 0.001) {
+                    bbSignal *= 0.3; // Reduce mean reversion in strong trends
+                }
+            }
+
+            // ── 6. Volume analysis ──
+            let volumeSignal = 0;
+            const volumes = history.map(h => h.volume || 0).filter(v => v > 0);
+            if (volumes.length > 10) {
+                const avgVol = volumes.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, volumes.length);
+                const recentVol = volumes.slice(-3).reduce((a, b) => a + b, 0) / 3;
+                const volRatio = avgVol > 0 ? recentVol / avgVol : 1;
+
+                // High volume confirms the current direction
+                if (volRatio > 1.5) {
+                    volumeSignal = mom5 > 0 ? 0.001 : -0.001; // Confirms current move
+                } else if (volRatio < 0.5) {
+                    // Low volume → move is weak, might reverse
+                    volumeSignal = mom5 > 0 ? -0.0005 : 0.0005;
+                }
+            }
+
+            // ── 7. VWAP deviation ──
+            let vwapSignal = 0;
+            const vwap = computeVWAP(history);
+            if (vwap) {
+                const vwapDev = (current - vwap) / vwap;
+                // Price above VWAP → bullish, but extreme deviation → mean reversion
+                if (Math.abs(vwapDev) > 0.003) {
+                    vwapSignal = -vwapDev * 0.3; // Mean revert from extreme VWAP deviation
+                } else {
+                    vwapSignal = vwapDev * 0.5; // Follow VWAP direction
+                }
+            }
+
+            // ── 8. Support/resistance from recent highs/lows ──
+            let srSignal = 0;
+            if (n > 15) {
+                const recentHighs = history.slice(-15).map(h => h.high || h.price);
+                const recentLows = history.slice(-15).map(h => h.low || h.price);
+                const resistance = Math.max(...recentHighs);
+                const support = Math.min(...recentLows);
+                const range = resistance - support;
+                if (range > 0) {
+                    const posInRange = (current - support) / range;
+                    // Near resistance → slight bearish pressure, near support → bullish
+                    srSignal = (0.5 - posInRange) * 0.001;
+                }
+            }
+
+            // ── Combine all signals with weights ──
             const returns = [];
             for (let i = 1; i < prices.length; i++) {
                 returns.push((prices[i] - prices[i - 1]) / prices[i - 1]);
             }
-            const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
-            const volatility = Math.sqrt(
+            const avgReturn = returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
+            const volatility = returns.length > 0 ? Math.sqrt(
                 returns.reduce((sum, r) => sum + (r - avgReturn) ** 2, 0) / returns.length
-            );
+            ) : 0;
 
-            const predictedChange =
-                momentum * 0.4 +
-                emaCrossSignal * 0.35 * 10 +
-                rsiSignal * 0.25;
+            // Weighted signal combination
+            const combinedSignal =
+                mom5 * 0.15 +             // Short-term momentum
+                mom10 * 0.10 +            // Medium momentum
+                momAccel * 2.0 * 0.10 +   // Momentum acceleration
+                emaCross * 3.5 * 0.15 +   // EMA crossover
+                macdSignal * 50 * 0.15 +  // MACD histogram
+                rsiSignal * 0.10 +        // RSI
+                bbSignal * 0.08 +         // Bollinger mean reversion
+                volumeSignal * 0.07 +     // Volume confirmation
+                vwapSignal * 0.05 +       // VWAP
+                srSignal * 0.05;          // Support/resistance
 
             const timeScale = minutesAhead / 15;
-            const scaledChange = predictedChange * 0.3 * timeScale;
+            const scaledChange = combinedSignal * 0.4 * timeScale;
             const predictedPrice = current * (1 + scaledChange);
 
-            const baseConfidence = 0.65;
-            const volPenalty = Math.min(volatility * 50, 0.4);
-            const confidence = Math.max(0.15, Math.min(0.85, baseConfidence - volPenalty));
+            // ── Confidence calculation ──
+            // Higher confidence when signals agree
+            const signals = [
+                Math.sign(mom5), Math.sign(mom10), Math.sign(emaCross),
+                Math.sign(macdSignal), Math.sign(rsiSignal || combinedSignal),
+                Math.sign(bbSignal || combinedSignal)
+            ];
+            const bullCount = signals.filter(s => s > 0).length;
+            const bearCount = signals.filter(s => s < 0).length;
+            const agreement = Math.max(bullCount, bearCount) / signals.length;
 
+            const baseConfidence = 0.50 + agreement * 0.25; // 50-75% base from agreement
+            const volPenalty = Math.min(volatility * 40, 0.35);
+            const confidence = Math.max(0.15, Math.min(0.90, baseConfidence - volPenalty));
+
+            // ── Signal labels ──
             const trendLabel = ema5 > ema20 ? 'Bullish' : ema5 < ema20 ? 'Bearish' : 'Neutral';
-            const momentumLabel = momentum > 0.001 ? 'Bullish' : momentum < -0.001 ? 'Bearish' : 'Neutral';
+            const momentumLabel = mom5 > 0.001 ? 'Bullish' : mom5 < -0.001 ? 'Bearish' : 'Neutral';
             const rsiLabel = rsi > 70 ? 'Overbought' : rsi < 30 ? 'Oversold' : 'Neutral';
             const volLabel = volatility > 0.005 ? 'High' : volatility > 0.002 ? 'Medium' : 'Low';
 
@@ -1326,7 +1490,8 @@
                 currentPeriodKey,
                 periodStartPrice,
                 originalPrediction,
-                kalshiMarketTicker
+                kalshiMarketTicker,
+                kalshiCloseTime
             };
             localStorage.setItem('btcPredSession', JSON.stringify(state));
         }
@@ -1343,6 +1508,7 @@
                     periodStartPrice = state.periodStartPrice;
                     originalPrediction = state.originalPrediction;
                     kalshiMarketTicker = state.kalshiMarketTicker;
+                    kalshiCloseTime = state.kalshiCloseTime;
                     console.log('Restored session state for period', currentPeriodKey);
                 } else {
                     // Period has changed since last visit — grade old prediction
@@ -1384,6 +1550,8 @@
             currentPrediction = null;
             periodStartPrice = null;
             kalshiStrike = null;
+            kalshiCloseTime = null;
+            kalshiMarketTicker = null;
             saveSessionState();
 
             // Update UI to show transition
@@ -1405,42 +1573,50 @@
         async function retryForNewTicker() {
             transitionRetries++;
             const newPeriodKey = getPeriodKey();
+            const currentPeriodEnd = getPeriodEndTime();
 
             try {
                 const data = await fetchPriceData();
                 latestData = data;
 
-                // Only accept data if the Kalshi market ticker has ACTUALLY changed.
-                // The local clock period key always changes at the boundary, so it's
-                // not reliable for detecting fresh API data.
-                const gotNewKalshiMarket = kalshiMarketTicker && kalshiMarketTicker !== lastKalshiTicker;
+                // Validate the Kalshi market is for the CURRENT period by checking
+                // its close_time matches the current period end (within 2 min tolerance)
+                let marketIsForCurrentPeriod = false;
+                if (kalshiCloseTime) {
+                    const closeMs = new Date(kalshiCloseTime).getTime();
+                    const periodEndMs = currentPeriodEnd.getTime();
+                    // Close time should be within 2 minutes of our calculated period end
+                    marketIsForCurrentPeriod = Math.abs(closeMs - periodEndMs) < 2 * 60 * 1000;
+                }
 
-                // If Kalshi is unavailable (no ticker at all), accept after enough
-                // retries (give API ~10s to update) so we don't hang forever
-                const kalshiUnavailable = !kalshiMarketTicker;
-                const enoughRetries = transitionRetries >= 4;
+                // If Kalshi returned null (no future markets), accept after enough
+                // retries so we don't hang forever
+                const kalshiUnavailable = !kalshiCloseTime;
+                const enoughRetries = transitionRetries >= 6;
 
-                if (gotNewKalshiMarket || (kalshiUnavailable && enoughRetries)) {
+                if (marketIsForCurrentPeriod || (kalshiUnavailable && enoughRetries)) {
                     // New period confirmed
                     isTransitioning = false;
                     currentPeriodKey = newPeriodKey;
-                    const periodEnd = getPeriodEndTime();
-                    currentTarget = periodEnd;
+                    currentTarget = currentPeriodEnd;
                     periodStartPrice = data.periodOpenPrice;
-                    const minutesAhead = Math.max(1, getSecondsUntilTarget(periodEnd) / 60);
+                    const minutesAhead = Math.max(1, getSecondsUntilTarget(currentPeriodEnd) / 60);
                     originalPrediction = predictPrice(data, minutesAhead);
                     updatedPrediction = null;
                     currentPrediction = originalPrediction;
-                    recordPrediction(newPeriodKey, periodStartPrice, originalPrediction.predictedPrice, formatTargetTime(periodEnd));
+                    recordPrediction(newPeriodKey, periodStartPrice, originalPrediction.predictedPrice, formatTargetTime(currentPeriodEnd));
                     saveSessionState();
-                    updateUI(data, periodEnd);
+                    updateUI(data, currentPeriodEnd);
                     renderPredictionHistory();
                     return;
                 }
 
-                // Still got old Kalshi ticker — show status and retry
+                // Still got old Kalshi market or no market — show status and retry
+                const reason = kalshiCloseTime
+                    ? 'market close ' + new Date(kalshiCloseTime).toLocaleTimeString() + ' != period end ' + currentPeriodEnd.toLocaleTimeString()
+                    : 'no Kalshi market available';
                 document.getElementById('status-bar').innerHTML =
-                    '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026 (attempt ' + transitionRetries + ')';
+                    '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026 (attempt ' + transitionRetries + ': ' + reason + ')';
                 document.getElementById('current-price').textContent = 'Waiting for new ticker\u2026';
 
             } catch (err) {
@@ -1448,9 +1624,8 @@
                     '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026 (attempt ' + transitionRetries + ')';
             }
 
-            // Retry with increasing delay (2s, 3s, 4s, max 5s)
-            const delay = Math.min(2000 + transitionRetries * 500, 5000);
-            setTimeout(retryForNewTicker, delay);
+            // Retry every 3s
+            setTimeout(retryForNewTicker, 3000);
         }
 
         async function fetchAndPredict() {
