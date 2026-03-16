@@ -1388,10 +1388,12 @@
         function updateUI(data, periodEnd) {
             // Current price (always live)
             document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
+            // Use Kalshi strike as the authoritative strike price; fall back to periodStartPrice
+            const displayStrike = kalshiStrike || periodStartPrice;
             // Show current price vs strike (how far above/below the strike)
             const changeEl = document.getElementById('price-change-24h');
-            if (periodStartPrice !== null) {
-                const strikeDelta = data.currentPrice - periodStartPrice;
+            if (displayStrike !== null) {
+                const strikeDelta = data.currentPrice - displayStrike;
                 const direction = strikeDelta >= 0 ? 'Up' : 'Down';
                 changeEl.textContent = `${direction} ${formatPrice(Math.abs(strikeDelta))} vs strike`;
                 changeEl.style.color = strikeDelta >= 0 ? '#3fb950' : '#f85149';
@@ -1399,10 +1401,10 @@
                 changeEl.textContent = '';
             }
 
-            // Period open price
-            if (periodStartPrice !== null) {
-                document.getElementById('period-start-price').textContent = formatPrice(periodStartPrice);
-                const delta = ((data.currentPrice - periodStartPrice) / periodStartPrice) * 100;
+            // Period open price — always show latest Kalshi strike when available
+            if (displayStrike !== null) {
+                document.getElementById('period-start-price').textContent = formatPrice(displayStrike);
+                const delta = ((data.currentPrice - displayStrike) / displayStrike) * 100;
                 const deltaEl = document.getElementById('period-delta');
                 deltaEl.textContent = `${delta >= 0 ? '+' : ''}${delta.toFixed(4)}%`;
                 deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
@@ -1668,6 +1670,13 @@
                 } else {
                     // Same period, original exists — only update the secondary prediction
                     updatedPrediction = predictPrice(data, minutesAhead);
+
+                    // If Kalshi strike arrived (or updated), always use it as the
+                    // authoritative period start price — it's the actual settlement threshold
+                    if (kalshiStrike && kalshiStrike !== periodStartPrice) {
+                        periodStartPrice = kalshiStrike;
+                        saveSessionState();
+                    }
                 }
 
                 currentPrediction = updatedPrediction || originalPrediction;
