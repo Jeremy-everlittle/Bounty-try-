@@ -227,6 +227,34 @@
             margin-right: 4px;
         }
 
+        .kalshi-error-banner {
+            background: #2d1a1a;
+            border: 1px solid #f85149;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin: 8px 16px;
+            text-align: center;
+            display: none;
+        }
+        .kalshi-error-banner .error-msg {
+            color: #f85149;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+        .kalshi-error-banner .refresh-btn {
+            background: #f7931a;
+            color: #0d1117;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 20px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .kalshi-error-banner .refresh-btn:active {
+            opacity: 0.7;
+        }
+
         @keyframes spin { to { transform: rotate(360deg); } }
 
         .period-info {
@@ -512,11 +540,15 @@
     </div>
 
     <div class="status-bar" id="status-bar"></div>
+    <div class="kalshi-error-banner" id="kalshi-error-banner">
+        <div class="error-msg" id="kalshi-error-msg">Kalshi strike not available</div>
+        <button class="refresh-btn" onclick="manualRefresh()">Refresh Kalshi</button>
+    </div>
     <div id="debug-strike" style="font-size:13px;color:#f0c040;background:#2d1f00;border:1px solid #f0c040;border-radius:6px;padding:8px 12px;margin:8px 16px;word-break:break-all;"></div>
 
     <p class="disclaimer">
         Aligned with Kalshi "BTC Up or Down - 15 minutes" (KXBTC15M).
-        Strike price from Kalshi public API when available.
+        Strike price from Kalshi public API only — no fallback sources.
         Current price approximates BRTI by averaging mid-prices from constituent exchanges.
         Kalshi resolves using CF Benchmarks BRTI (order-book based) — small differences possible.
         For entertainment only. NOT financial advice.
@@ -1018,10 +1050,9 @@
         // ── Main data fetcher ──
         async function fetchPriceData() {
             // Run all fetches in parallel — including microstructure data
-            const [brtiResult, kStrike, periodOpen, history] = await Promise.all([
+            const [brtiResult, kStrike, history] = await Promise.all([
                 fetchBRTIApprox(),
                 fetchKalshiStrike(),
-                fetchPeriodOpen(),
                 fetchAnalysisHistory()
             ]);
             // Fire-and-forget microstructure fetches (cached, non-blocking)
@@ -1031,21 +1062,19 @@
 
             const currentPrice = brtiResult.price;
 
-            // For period open: prefer Kalshi strike, then kline open, then BRTI approx
-            let periodOpenPrice;
+            // Strike comes ONLY from Kalshi — no fallback
+            let periodOpenPrice = null;
             if (kStrike && kStrike > 0) {
-                periodOpenPrice = kStrike;
                 kalshiStrike = kStrike;
+                periodOpenPrice = kStrike;
                 dataSourceName = `BRTI~(${brtiResult.sources}) + Kalshi strike`;
-            } else if (periodOpen && periodOpen > 0) {
-                periodOpenPrice = periodOpen;
-                dataSourceName = `BRTI~(${brtiResult.sources})`;
+                // Hide error banner when Kalshi is working
+                document.getElementById('kalshi-error-banner').style.display = 'none';
             } else {
-                periodOpenPrice = currentPrice;
                 dataSourceName = `BRTI~(${brtiResult.sources})`;
             }
 
-            console.log(`Final: current=$${currentPrice.toFixed(2)}, periodOpen=$${periodOpenPrice.toFixed(2)}, kalshiStrike=${kStrike}`);
+            console.log(`Final: current=$${currentPrice.toFixed(2)}, kalshiStrike=${kStrike}`);
 
             return {
                 currentPrice,
@@ -1331,7 +1360,7 @@
             const prices = history.map(h => h.price);
             const current = data.currentPrice;
             const n = prices.length;
-            const strike = kalshiStrike || data.periodOpenPrice || current;
+            const strike = kalshiStrike || periodStartPrice || current;
 
             // ────────────────────────────────────────────────────────────
             // SIGNAL 1: POSITIONAL Z-SCORE (the dominant signal)
@@ -1664,14 +1693,12 @@
                 const deltaEl = document.getElementById('period-delta');
                 deltaEl.textContent = `${delta >= 0 ? '+' : ''}${delta.toFixed(4)}%`;
                 deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
-                // Label shows source — flag when using fallback
-                if (kalshiStrike) {
-                    document.getElementById('period-label').textContent = 'Kalshi strike';
-                } else if (strikeIsPending) {
-                    document.getElementById('period-label').textContent = 'Strike (pending Kalshi...)';
-                } else {
-                    document.getElementById('period-label').textContent = 'Period open (strike)';
-                }
+                document.getElementById('period-label').textContent = 'Kalshi strike';
+            } else {
+                // No Kalshi strike available
+                document.getElementById('period-start-price').textContent = 'Waiting\u2026';
+                document.getElementById('period-delta').textContent = '';
+                document.getElementById('period-label').textContent = 'Strike';
             }
 
             // Target time (period end)
@@ -1854,26 +1881,13 @@
                     marketIsForCurrentPeriod = Math.abs(closeMs - periodEndMs) < 2 * 60 * 1000;
                 }
 
-                // If Kalshi returned null (no future markets), accept after enough
-                // retries so we don't hang forever — but mark strike as pending
-                const kalshiUnavailable = !kalshiCloseTime;
-                const enoughRetries = transitionRetries >= 20; // ~60s of waiting
-
-                if (marketIsForCurrentPeriod || (kalshiUnavailable && enoughRetries)) {
-                    // New period confirmed
+                if (marketIsForCurrentPeriod && kalshiStrike) {
+                    // Got the real Kalshi strike — start the new period
                     isTransitioning = false;
                     currentPeriodKey = newPeriodKey;
                     currentTarget = currentPeriodEnd;
-
-                    if (marketIsForCurrentPeriod && kalshiStrike) {
-                        // Got the real Kalshi strike — use it
-                        periodStartPrice = kalshiStrike;
-                    } else {
-                        // Kalshi unavailable — use kline open as fallback,
-                        // flag that we still need the real strike
-                        periodStartPrice = data.periodOpenPrice;
-                        strikeIsPending = true;
-                    }
+                    periodStartPrice = kalshiStrike;
+                    strikeIsPending = false;
 
                     const minutesAhead = Math.max(1, getSecondsUntilTarget(currentPeriodEnd) / 60);
                     originalPrediction = predictPrice(data, minutesAhead);
@@ -1881,9 +1895,23 @@
                     currentPrediction = originalPrediction;
                     recordPrediction(newPeriodKey, periodStartPrice, originalPrediction.predictedPrice, formatTargetTime(currentPeriodEnd));
                     saveSessionState();
+                    document.getElementById('kalshi-error-banner').style.display = 'none';
                     updateUI(data, currentPeriodEnd);
                     renderPredictionHistory();
                     return;
+                }
+
+                // After 20 retries (~60s), stop auto-retrying and show error with refresh button
+                if (transitionRetries >= 20) {
+                    document.getElementById('kalshi-error-msg').textContent =
+                        'Kalshi strike not available — no market found for this period';
+                    document.getElementById('kalshi-error-banner').style.display = 'block';
+                    document.getElementById('status-bar').innerHTML =
+                        '&#9888; Kalshi strike unavailable &mdash; tap Refresh to retry';
+                    document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
+                    document.getElementById('period-start-price').textContent = 'No Kalshi data';
+                    document.getElementById('period-label').textContent = 'Strike';
+                    return; // stop auto-retrying, user can hit refresh
                 }
 
                 // Still got old Kalshi market or no market — show status and retry
@@ -1902,6 +1930,27 @@
 
             // Retry every 3s
             setTimeout(retryForNewTicker, 3000);
+        }
+
+        // Manual refresh — triggered by the refresh button when Kalshi is unavailable
+        async function manualRefresh() {
+            const btn = document.querySelector('.refresh-btn');
+            btn.textContent = 'Refreshing\u2026';
+            btn.disabled = true;
+
+            if (isTransitioning) {
+                // Still in transition — restart retry loop
+                transitionRetries = 0;
+                retryForNewTicker();
+            } else {
+                // Not transitioning but missing Kalshi — just re-fetch
+                await fetchAndPredict();
+            }
+
+            setTimeout(() => {
+                btn.textContent = 'Refresh Kalshi';
+                btn.disabled = false;
+            }, 2000);
         }
 
         async function fetchAndPredict() {
@@ -1925,21 +1974,36 @@
                     }
                     currentPeriodKey = periodKey;
 
-                    // Use the 15m kline open price as the Kalshi-aligned period open
-                    periodStartPrice = data.periodOpenPrice;
-
-                    originalPrediction = predictPrice(data, minutesAhead);
-                    updatedPrediction = null;
-
-                    // Record this new prediction
-                    recordPrediction(periodKey, periodStartPrice, originalPrediction.predictedPrice, formatTargetTime(periodEnd));
+                    // Only start prediction if we have Kalshi strike
+                    if (kalshiStrike) {
+                        periodStartPrice = kalshiStrike;
+                        strikeIsPending = false;
+                        originalPrediction = predictPrice(data, minutesAhead);
+                        updatedPrediction = null;
+                        recordPrediction(periodKey, periodStartPrice, originalPrediction.predictedPrice, formatTargetTime(periodEnd));
+                        document.getElementById('kalshi-error-banner').style.display = 'none';
+                    } else {
+                        // No Kalshi strike — show error, wait for it
+                        periodStartPrice = null;
+                        originalPrediction = null;
+                        strikeIsPending = true;
+                        document.getElementById('kalshi-error-msg').textContent =
+                            'Waiting for Kalshi strike price\u2026';
+                        document.getElementById('kalshi-error-banner').style.display = 'block';
+                        document.getElementById('period-start-price').textContent = 'Waiting\u2026';
+                        document.getElementById('period-label').textContent = 'Strike';
+                    }
                     saveSessionState();
                 } else if (!originalPrediction) {
-                    // Same period but no original (shouldn't happen, but safety)
-                    periodStartPrice = data.periodOpenPrice;
-                    originalPrediction = predictPrice(data, minutesAhead);
-                    updatedPrediction = null;
-                    recordPrediction(periodKey, periodStartPrice, originalPrediction.predictedPrice, formatTargetTime(periodEnd));
+                    // Same period, no prediction yet — try again if Kalshi arrived
+                    if (kalshiStrike) {
+                        periodStartPrice = kalshiStrike;
+                        strikeIsPending = false;
+                        originalPrediction = predictPrice(data, minutesAhead);
+                        updatedPrediction = null;
+                        recordPrediction(periodKey, periodStartPrice, originalPrediction.predictedPrice, formatTargetTime(periodEnd));
+                        document.getElementById('kalshi-error-banner').style.display = 'none';
+                    }
                     saveSessionState();
                 } else {
                     // Same period, original exists — only update the secondary prediction
