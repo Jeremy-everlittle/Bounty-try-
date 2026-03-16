@@ -1141,6 +1141,39 @@
             return null;
         }
 
+        // Guess the next Kalshi ticker(s) based on the last known ticker
+        // Ticker format: KXBTC15M-YYMMMDDhhmm-SS (e.g., KXBTC15M-26MAR161930-30)
+        // The hhmm is the close time, SS is a suffix (likely strike-related)
+        function guessNextKalshiTickers(lastTicker) {
+            const guesses = [];
+            // Parse: KXBTC15M-26MAR161930-30
+            const match = lastTicker.match(/^(KXBTC15M-\d{2}[A-Z]{3}\d{2})(\d{4})-(\d+)$/);
+            if (!match) return guesses;
+            const prefix = match[1]; // KXBTC15M-26MAR16
+            const timeStr = match[2]; // 1930
+            const suffix = match[3]; // 30
+            const hours = parseInt(timeStr.substring(0, 2));
+            const mins = parseInt(timeStr.substring(2, 4));
+
+            // Next period is 15 minutes later
+            let nextMins = mins + 15;
+            let nextHours = hours;
+            if (nextMins >= 60) {
+                nextMins -= 60;
+                nextHours = (nextHours + 1) % 24;
+            }
+            const nextTime = String(nextHours).padStart(2, '0') + String(nextMins).padStart(2, '0');
+
+            // Try with same suffix and without suffix
+            guesses.push(prefix + nextTime + '-' + suffix);
+            // Also try common suffixes in case it changes
+            for (const s of ['30', '25', '35', '20', '40']) {
+                const g = prefix + nextTime + '-' + s;
+                if (!guesses.includes(g)) guesses.push(g);
+            }
+            return guesses;
+        }
+
         async function fetchKalshiStrike() {
             writeDebug('Fetching Kalshi...');
             try {
@@ -1158,22 +1191,33 @@
                 markets = openData.markets || [];
                 console.log('Kalshi status=open returned ' + markets.length + ' markets');
 
-                // If no open markets, try without status filter to catch markets in transition
-                if (markets.length === 0) {
-                    console.log('Kalshi: no open markets, trying without status filter...');
-                    const kalshiUrlAll = 'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&limit=50';
+                // Check if any returned markets actually have a future close_time
+                const now0 = new Date();
+                const hasFutureMarket = markets.some(m => new Date(m.close_time || m.expiration_time) > now0);
+
+                // Fall back to unfiltered query if no markets OR all markets are expired
+                // (Kalshi can return a market as "open" even after its close_time has passed)
+                if (markets.length === 0 || !hasFutureMarket) {
+                    if (markets.length > 0 && !hasFutureMarket) {
+                        console.log('Kalshi: ' + markets.length + ' open markets but all expired, trying unfiltered...');
+                    } else {
+                        console.log('Kalshi: no open markets, trying without status filter...');
+                    }
+                    const kalshiUrlAll = 'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&limit=100';
                     const allRes = await fetchWithCors(kalshiUrlAll);
                     if (allRes) {
                         const allData = await allRes.json();
-                        markets = (allData.markets || []).filter(m =>
-                            m.status === 'open' || m.status === 'active' || m.status === 'trading'
-                        );
-                        console.log('Kalshi unfiltered returned ' + (allData.markets || []).length +
-                            ' total, ' + markets.length + ' active. Statuses: ' +
-                            [...new Set((allData.markets || []).map(m => m.status))].join(', '));
-                        // If still nothing active, use all — we filter by close_time anyway
-                        if (markets.length === 0) {
-                            markets = allData.markets || [];
+                        // Use all returned markets — we filter by close_time anyway
+                        const allMarkets = allData.markets || [];
+                        console.log('Kalshi unfiltered returned ' + allMarkets.length +
+                            ' total. Statuses: ' +
+                            [...new Set(allMarkets.map(m => m.status))].join(', '));
+                        // Merge: keep any new future markets from the unfiltered set
+                        const existingTickers = new Set(markets.map(m => m.ticker));
+                        for (const m of allMarkets) {
+                            if (!existingTickers.has(m.ticker)) {
+                                markets.push(m);
+                            }
                         }
                     }
                 }
@@ -1225,16 +1269,45 @@
                     });
                     const closestTime = new Date(closestExpired.close_time || closestExpired.expiration_time);
                     const agoSec = Math.round((now - closestTime) / 1000);
-                    writeDebug(
-                        'No future markets in ' + pool.length + ' candidates — ' +
-                        'nearest closed ' + agoSec + 's ago (' + closestExpired.ticker + ' @ ' +
-                        closestTime.toLocaleTimeString() + '), now=' + now.toLocaleTimeString() +
-                        ' — waiting for new market'
-                    );
-                    console.warn('Kalshi: all ' + pool.length + ' markets have close_time in the past. ' +
-                        'Nearest: ' + closestExpired.ticker + ' closed ' + agoSec + 's ago at ' +
-                        closestTime.toISOString() + '. Current time: ' + now.toISOString());
-                    return null;
+
+                    // Try to guess the next ticker and fetch it directly
+                    // Ticker format: KXBTC15M-YYMMMDDhhmm-SS where hhmm is close time in UTC
+                    if (lastKalshiTicker) {
+                        const guessedTickers = guessNextKalshiTickers(lastKalshiTicker);
+                        for (const guessTicker of guessedTickers) {
+                            try {
+                                console.log('Kalshi: trying direct ticker lookup:', guessTicker);
+                                const guessUrl = 'https://api.elections.kalshi.com/trade-api/v2/markets/' + guessTicker;
+                                const guessRes = await fetchWithCors(guessUrl);
+                                if (guessRes) {
+                                    const guessData = await guessRes.json();
+                                    if (guessData.market) {
+                                        const guessClose = new Date(guessData.market.close_time || guessData.market.expiration_time);
+                                        if (guessClose > now) {
+                                            console.log('Kalshi: direct ticker lookup found future market:', guessTicker);
+                                            best = guessData.market;
+                                            break;
+                                        }
+                                    }
+                                }
+                            } catch(e) {
+                                console.log('Kalshi: direct ticker lookup failed for', guessTicker, e.message);
+                            }
+                        }
+                    }
+
+                    if (!best) {
+                        writeDebug(
+                            'No future markets in ' + pool.length + ' candidates — ' +
+                            'nearest closed ' + agoSec + 's ago (' + closestExpired.ticker + ' @ ' +
+                            closestTime.toLocaleTimeString() + '), now=' + now.toLocaleTimeString() +
+                            ' — waiting for new market'
+                        );
+                        console.warn('Kalshi: all ' + pool.length + ' markets have close_time in the past. ' +
+                            'Nearest: ' + closestExpired.ticker + ' closed ' + agoSec + 's ago at ' +
+                            closestTime.toISOString() + '. Current time: ' + now.toISOString());
+                        return null;
+                    }
                 }
 
                 const bestCloseTime = new Date(best.close_time || best.expiration_time);
@@ -3408,8 +3481,8 @@
                     return;
                 }
 
-                // After 20 retries (~60s), stop auto-retrying and show error with refresh button
-                if (transitionRetries >= 20) {
+                // After 40 retries (~120s), stop auto-retrying and show error with refresh button
+                if (transitionRetries >= 40) {
                     document.getElementById('kalshi-error-msg').textContent =
                         'Kalshi strike not available — no market found for this period';
                     document.getElementById('kalshi-error-banner').style.display = 'block';
@@ -3433,10 +3506,10 @@
                         ' vs period end ' + currentPeriodEnd.toLocaleTimeString() +
                         ' (off by ' + diffSec + 's)';
                 }
-                console.log('Kalshi retry ' + transitionRetries + '/20: ' + reason +
+                console.log('Kalshi retry ' + transitionRetries + '/40: ' + reason +
                     ' | kalshiStrike=' + kalshiStrike + ' | marketIsForCurrentPeriod=' + marketIsForCurrentPeriod);
                 document.getElementById('status-bar').innerHTML =
-                    '<span class="spinner-inline"></span> Waiting for new Kalshi market\u2026 (' + transitionRetries + '/20: ' + reason + ')';
+                    '<span class="spinner-inline"></span> Waiting for new Kalshi market\u2026 (' + transitionRetries + '/40: ' + reason + ')';
                 // Still show live price during transition
                 document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
 
