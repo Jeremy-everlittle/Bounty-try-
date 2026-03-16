@@ -306,6 +306,40 @@
             border: 2px solid rgba(248, 81, 73, 0.3);
         }
 
+        .risk-badge {
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 4px 12px;
+            border-radius: 8px;
+            margin-top: 6px;
+        }
+        .risk-badge .risk-reason {
+            font-weight: 400;
+            font-size: 10px;
+            letter-spacing: 0;
+            text-transform: none;
+            opacity: 0.85;
+            margin-left: 4px;
+        }
+        .risk-safe {
+            background: rgba(63, 185, 80, 0.12);
+            color: #3fb950;
+            border: 1px solid rgba(63, 185, 80, 0.25);
+        }
+        .risk-moderate {
+            background: rgba(210, 153, 34, 0.12);
+            color: #d29922;
+            border: 1px solid rgba(210, 153, 34, 0.25);
+        }
+        .risk-risky {
+            background: rgba(248, 81, 73, 0.12);
+            color: #f85149;
+            border: 1px solid rgba(248, 81, 73, 0.25);
+        }
+
         .pred-row {
             padding: 10px 0;
         }
@@ -518,12 +552,14 @@
             <div class="pred-row-label">Original</div>
             <div class="price predicted-price" id="original-predicted-price">--</div>
             <div id="original-predicted-change"></div>
+            <div id="original-risk-badge"></div>
         </div>
 
         <div class="pred-row updated" id="updated-row" style="display:none;">
             <div class="pred-row-label">Updated</div>
             <div class="price predicted-price updated-color" id="updated-predicted-price">--</div>
             <div id="updated-predicted-change"></div>
+            <div id="updated-risk-badge"></div>
         </div>
 
         <div class="countdown" id="countdown">
@@ -1633,6 +1669,93 @@
             });
         }
 
+        // ── Risk Assessment ──────────────────────────────────────────
+        // Evaluates how risky a bet is based on multiple factors.
+        // Returns { level: 'safe'|'moderate'|'risky', score: 0-100, reasons: [] }
+
+        function assessRisk(prediction, strike, currentPrice) {
+            if (!prediction || strike === null) return null;
+
+            const reasons = [];
+            let riskScore = 0; // 0 = safest, 100 = riskiest
+
+            // 1. Margin to strike (biggest factor)
+            // How far is the predicted price from the strike as % of price?
+            const margin = Math.abs(prediction.predictedPrice - strike);
+            const marginPct = (margin / strike) * 100;
+
+            if (marginPct < 0.01) {
+                riskScore += 45;
+                reasons.push('Razor-thin margin to strike');
+            } else if (marginPct < 0.03) {
+                riskScore += 30;
+                reasons.push('Very close to strike');
+            } else if (marginPct < 0.06) {
+                riskScore += 15;
+                reasons.push('Near strike');
+            }
+
+            // 2. Confidence level
+            const conf = prediction.confidence || 0.5;
+            if (conf < 0.55) {
+                riskScore += 25;
+                reasons.push('Low confidence');
+            } else if (conf < 0.65) {
+                riskScore += 12;
+                reasons.push('Moderate confidence');
+            }
+
+            // 3. Signal agreement — count how many signals align with the bet direction
+            if (prediction.signals) {
+                const isUp = prediction.predictedPrice >= strike;
+                const sigs = prediction.signals;
+                let agree = 0, disagree = 0;
+
+                if (sigs.trend === 'Bullish') isUp ? agree++ : disagree++;
+                else if (sigs.trend === 'Bearish') isUp ? disagree++ : agree++;
+
+                if (sigs.momentum === 'Bullish') isUp ? agree++ : disagree++;
+                else if (sigs.momentum === 'Bearish') isUp ? disagree++ : agree++;
+
+                if (sigs.rsi === 'Overbought') isUp ? disagree++ : agree++;
+                else if (sigs.rsi === 'Oversold') isUp ? agree++ : disagree++;
+
+                if (disagree >= 2) {
+                    riskScore += 20;
+                    reasons.push('Conflicting signals');
+                } else if (disagree >= 1 && agree <= 1) {
+                    riskScore += 10;
+                    reasons.push('Mixed signals');
+                }
+
+                // High volatility adds risk
+                if (sigs.volatility === 'High') {
+                    riskScore += 15;
+                    reasons.push('High volatility');
+                }
+            }
+
+            // 4. Current price vs predicted — if current price is already on wrong side
+            const predictedUp = prediction.predictedPrice >= strike;
+            const currentUp = currentPrice >= strike;
+            if (predictedUp !== currentUp) {
+                riskScore += 10;
+                reasons.push('Price moving against prediction');
+            }
+
+            // Clamp
+            riskScore = Math.min(100, riskScore);
+
+            let level;
+            if (riskScore >= 50) level = 'risky';
+            else if (riskScore >= 25) level = 'moderate';
+            else level = 'safe';
+
+            if (reasons.length === 0) reasons.push('Strong margin from strike');
+
+            return { level, score: riskScore, reasons };
+        }
+
         // ── Chart ─────────────────────────────────────────────────────
 
         function drawChart(history, currentPrice, predictedPrice, targetLabel) {
@@ -1738,6 +1861,16 @@
 
         // ── UI update ─────────────────────────────────────────────────
 
+        function renderRiskBadge(prediction, strike, currentPrice, containerId) {
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            const risk = assessRisk(prediction, strike, currentPrice);
+            if (!risk) { el.innerHTML = ''; return; }
+            const icons = { safe: '&#9679;', moderate: '&#9888;', risky: '&#9888;' };
+            const labels = { safe: 'Safe Bet', moderate: 'Moderate Risk', risky: 'Risky Bet' };
+            el.innerHTML = `<span class="risk-badge risk-${risk.level}">${icons[risk.level]} ${labels[risk.level]}<span class="risk-reason"> \u2014 ${risk.reasons[0]}</span></span>`;
+        }
+
         function renderChangeTag(changePercent, containerId, dollarAmount) {
             const el = document.getElementById(containerId);
             const changeClass = changePercent > 0.01 ? 'up' : changePercent < -0.01 ? 'down' : 'neutral';
@@ -1795,6 +1928,7 @@
                 const origChangeDollar = originalPrediction.predictedPrice - periodStartPrice;
                 const origChangePct = (origChangeDollar / periodStartPrice) * 100;
                 renderChangeTag(origChangePct, 'original-predicted-change', origChangeDollar);
+                renderRiskBadge(originalPrediction, displayStrike, data.currentPrice, 'original-risk-badge');
             }
 
             // Updated prediction (recalculated, shown only after first refresh)
@@ -1805,6 +1939,7 @@
                 const updChangeDollar = updatedPrediction.predictedPrice - periodStartPrice;
                 const updChangePct = (updChangeDollar / periodStartPrice) * 100;
                 renderChangeTag(updChangePct, 'updated-predicted-change', updChangeDollar);
+                renderRiskBadge(updatedPrediction, displayStrike, data.currentPrice, 'updated-risk-badge');
             } else {
                 document.getElementById('updated-row').style.display = 'none';
             }
