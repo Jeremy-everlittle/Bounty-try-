@@ -346,10 +346,10 @@
         }
 
         .history-item {
-            padding: 8px 10px;
+            padding: 10px 12px;
             border-radius: 8px;
-            margin-bottom: 4px;
-            font-size: 12px;
+            margin-bottom: 6px;
+            font-size: 14px;
             font-variant-numeric: tabular-nums;
         }
 
@@ -361,20 +361,21 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
-            margin-bottom: 3px;
+            margin-bottom: 6px;
         }
 
         .history-item .hi-time {
-            color: #8b949e;
-            font-size: 11px;
+            color: #c9d1d9;
+            font-size: 14px;
+            font-weight: 600;
         }
 
         .history-item .hi-bet {
             font-weight: 700;
-            font-size: 10px;
+            font-size: 12px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            padding: 2px 6px;
+            padding: 3px 10px;
             border-radius: 6px;
         }
 
@@ -388,44 +389,63 @@
             color: #f85149;
         }
 
-        .hi-bottom {
+        .hi-prices {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 4px 8px;
+            margin-bottom: 8px;
+        }
+
+        .hi-price-cell {
             display: flex;
-            align-items: center;
-            gap: 4px;
-            font-size: 10px;
-            color: #8b949e;
+            flex-direction: column;
         }
 
-        .hi-bottom .hi-label {
-            color: #484f58;
+        .hi-price-cell .hi-label {
+            color: #6e7681;
+            font-size: 11px;
+            margin-bottom: 1px;
         }
 
-        .hi-bottom .hi-pred {
+        .hi-price-cell .hi-value {
+            color: #c9d1d9;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .hi-price-cell .hi-value.hi-pred {
             color: #58a6ff;
         }
 
-        .hi-bottom .hi-arrow {
-            color: #484f58;
+        .hi-diffs {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4px 12px;
         }
 
-        .hi-accuracy {
+        .hi-diff-cell {
             display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 10px;
-            color: #8b949e;
-            margin-top: 2px;
+            flex-direction: column;
         }
-        .hi-accuracy .hi-off-label {
-            color: #484f58;
+
+        .hi-diff-cell .hi-diff-label {
+            color: #6e7681;
+            font-size: 11px;
+            margin-bottom: 1px;
         }
-        .hi-accuracy .hi-off-good {
+
+        .hi-diff-cell .hi-diff-value {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .hi-diff-value.hi-off-good {
             color: #3fb950;
         }
-        .hi-accuracy .hi-off-ok {
+        .hi-diff-value.hi-off-ok {
             color: #d29922;
         }
-        .hi-accuracy .hi-off-bad {
+        .hi-diff-value.hi-off-bad {
             color: #f85149;
         }
 
@@ -439,9 +459,9 @@
 
         .history-item .hi-result {
             font-weight: 700;
-            min-width: 18px;
+            min-width: 22px;
             text-align: center;
-            font-size: 14px;
+            font-size: 18px;
         }
 
         .hi-result.correct { color: #3fb950; }
@@ -452,14 +472,14 @@
             margin-top: 10px;
             padding-top: 10px;
             border-top: 1px solid #30363d;
-            font-size: 13px;
-            color: #8b949e;
+            font-size: 14px;
+            color: #c9d1d9;
             text-align: center;
             display: none;
         }
 
-        .history-stats .stat-correct { color: #3fb950; font-weight: 600; }
-        .history-stats .stat-wrong { color: #f85149; font-weight: 600; }
+        .history-stats .stat-correct { color: #3fb950; font-weight: 700; }
+        .history-stats .stat-wrong { color: #f85149; font-weight: 700; }
 
         .disclaimer {
             font-size: 10px;
@@ -666,22 +686,29 @@
                         <span class="hi-bet ${betCls}">${betLabel}</span>
                         <span class="hi-result ${cls}">${icon}</span>
                     </div>
-                    <div class="hi-bottom">
-                        <span class="hi-label">Strike</span> ${formatPrice(p.startPrice)}
-                        <span class="hi-arrow">\u2192</span>
-                        <span class="hi-label">Pred</span> <span class="hi-pred">${formatPrice(p.predictedPrice)}</span>
-                        <span class="hi-arrow">\u2192</span>
-                        <span class="hi-label">Final</span> ${formatPrice(p.actualPrice)}
+                    <div class="hi-prices">
+                        <div class="hi-price-cell">
+                            <span class="hi-label">Strike</span>
+                            <span class="hi-value">${formatPrice(p.startPrice)}</span>
+                        </div>
+                        <div class="hi-price-cell">
+                            <span class="hi-label">Predicted</span>
+                            <span class="hi-value hi-pred">${formatPrice(p.predictedPrice)}</span>
+                        </div>
+                        <div class="hi-price-cell">
+                            <span class="hi-label">Final</span>
+                            <span class="hi-value">${formatPrice(p.actualPrice)}</span>
+                        </div>
                     </div>
-                    <div class="hi-accuracy">
-                        <span class="hi-off-label">Pred vs Final:</span>
-                        <span class="${offCls}">${sign}$${absDollar.toFixed(2)}</span>
-                        <span class="${offCls}">(${sign}${absPct.toFixed(3)}%)</span>
-                    </div>
-                    <div class="hi-accuracy">
-                        <span class="hi-off-label">Final vs Strike:</span>
-                        <span class="${strikeCls}">${strikeSign}$${absStrikeDiff.toFixed(2)}</span>
-                        <span class="${strikeCls}">(${strikeSign}${absStrikePct.toFixed(3)}%)</span>
+                    <div class="hi-diffs">
+                        <div class="hi-diff-cell">
+                            <span class="hi-diff-label">Pred vs Final</span>
+                            <span class="hi-diff-value ${offCls}">${sign}$${absDollar.toFixed(2)} (${sign}${absPct.toFixed(3)}%)</span>
+                        </div>
+                        <div class="hi-diff-cell">
+                            <span class="hi-diff-label">Final vs Strike</span>
+                            <span class="hi-diff-value ${strikeCls}">${strikeSign}$${absStrikeDiff.toFixed(2)} (${strikeSign}${absStrikePct.toFixed(3)}%)</span>
+                        </div>
                     </div>
                 </div>`;
             }
