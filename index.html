@@ -318,9 +318,6 @@
         }
 
         .history-item {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
             padding: 8px 10px;
             border-radius: 8px;
             margin-bottom: 4px;
@@ -332,18 +329,24 @@
             background: #21262d;
         }
 
+        .hi-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 3px;
+        }
+
         .history-item .hi-time {
             color: #8b949e;
-            min-width: 105px;
             font-size: 11px;
         }
 
         .history-item .hi-bet {
             font-weight: 700;
-            font-size: 11px;
+            font-size: 10px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            padding: 2px 8px;
+            padding: 2px 6px;
             border-radius: 6px;
         }
 
@@ -355,6 +358,26 @@
         .hi-bet.bet-down {
             background: rgba(248, 81, 73, 0.15);
             color: #f85149;
+        }
+
+        .hi-bottom {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 10px;
+            color: #8b949e;
+        }
+
+        .hi-bottom .hi-label {
+            color: #484f58;
+        }
+
+        .hi-bottom .hi-pred {
+            color: #58a6ff;
+        }
+
+        .hi-bottom .hi-arrow {
+            color: #484f58;
         }
 
         .history-item .hi-prices {
@@ -565,16 +588,21 @@
             for (const p of toShow) {
                 const icon = p.correct === true ? '\u2713' : p.correct === false ? '\u2717' : '\u25CF';
                 const cls = p.correct === true ? 'correct' : p.correct === false ? 'wrong' : 'pending';
-                const betLabel = p.predictedDirection === 'up' ? 'Bet Up' : 'Bet Down';
+                const betLabel = p.predictedDirection === 'up' ? 'Up' : 'Down';
                 const betCls = p.predictedDirection === 'up' ? 'bet-up' : 'bet-down';
-                const actualStr = p.actualPrice !== null
-                    ? `${formatPrice(p.startPrice)} \u2192 ${formatPrice(p.actualPrice)}`
-                    : 'open';
                 html += `<div class="history-item">
-                    <span class="hi-time">${p.time}</span>
-                    <span class="hi-bet ${betCls}">${betLabel}</span>
-                    <span class="hi-prices">${actualStr}</span>
-                    <span class="hi-result ${cls}">${icon}</span>
+                    <div class="hi-top">
+                        <span class="hi-time">${p.time}</span>
+                        <span class="hi-bet ${betCls}">${betLabel}</span>
+                        <span class="hi-result ${cls}">${icon}</span>
+                    </div>
+                    <div class="hi-bottom">
+                        <span class="hi-label">Strike</span> ${formatPrice(p.startPrice)}
+                        <span class="hi-arrow">\u2192</span>
+                        <span class="hi-label">Pred</span> <span class="hi-pred">${formatPrice(p.predictedPrice)}</span>
+                        <span class="hi-arrow">\u2192</span>
+                        <span class="hi-label">Final</span> ${formatPrice(p.actualPrice)}
+                    </div>
                 </div>`;
             }
             container.innerHTML = html;
