@@ -2292,11 +2292,22 @@
             // remaining-time volatility? This is the digital-option insight:
             // P(S_T > K) = N(d2) where d2 = ln(S/K) / (sigma * sqrt(T))
 
+            // Adaptive vol window: shrinks near expiry to capture current regime
+            const volWindow = Math.round(8 + 52 * (minutesAhead / 15));
+            const adaptiveWindow = Math.max(2, Math.min(volWindow, n - 1));
+
             // Composite vol: blend close-to-close, EWMA (responsive), Garman-Klass (efficient)
-            const ccVol = computeRealizedVol(prices, Math.min(30, n - 1));
+            const ccVol = computeRealizedVol(prices, adaptiveWindow);
             const ewmaVol = computeEWMAVol(prices, 0.97);
-            const gkVol = computeGarmanKlassVol(history, Math.min(30, n - 1));
-            const perMinuteVol = 0.25 * ccVol + 0.40 * ewmaVol + 0.35 * gkVol;
+            const gkVol = computeGarmanKlassVol(history, adaptiveWindow);
+            const rawPerMinVol = 0.25 * ccVol + 0.40 * ewmaVol + 0.35 * gkVol;
+
+            // Vol floor: blend short/long vol to prevent underestimation near expiry
+            const shortVol = computeRealizedVol(prices, Math.min(8, n - 1));
+            const longVol = computeRealizedVol(prices, Math.min(60, n - 1));
+            const volBlendRatio = minutesAhead / 15;
+            const blendedVol = longVol * volBlendRatio + shortVol * (1 - volBlendRatio);
+            const perMinuteVol = Math.max(rawPerMinVol, blendedVol * 0.8);
 
             // Variance-ratio-adjusted time scaling (T^H instead of sqrt(T))
             const { remainingVol: rawRemainingVol, H } = computeAdjustedRemainingVol(
@@ -2349,7 +2360,23 @@
                 driftMultiplier = 1.3;
             }
 
-            const adjustedDrift = rawDrift * driftMultiplier;
+            // Early period momentum bias: opening move is highly predictive in first 3 min
+            const minutesIntoPeriod = 15 - minutesAhead;
+            let earlyMomentumSignal = 0;
+            if (minutesIntoPeriod <= 3 && periodStartPrice && periodStartPrice > 0) {
+                const openingMove = (current - periodStartPrice) / periodStartPrice;
+                const openingMoveZ = perMinuteVol > 0
+                    ? openingMove / (perMinuteVol * Math.sqrt(minutesIntoPeriod + 0.5)) : 0;
+                const earlyConf = Math.min(1.0, minutesIntoPeriod / 2.5);
+                if (Math.abs(openingMoveZ) > 0.5) {
+                    earlyMomentumSignal = Math.sign(openingMoveZ) *
+                        Math.min(Math.abs(openingMoveZ) * 0.15, 0.4) * earlyConf;
+                }
+            }
+
+            const driftWithEarlyBias = minutesIntoPeriod <= 3
+                ? rawDrift * 0.6 + earlyMomentumSignal * 0.4 : rawDrift;
+            const adjustedDrift = driftWithEarlyBias * driftMultiplier;
             const driftZShift = adjustedRemainingVol > 0 ? adjustedDrift / adjustedRemainingVol : 0;
 
             // ────────────────────────────────────────────────────────────
@@ -2436,8 +2463,15 @@
             // so positional z-score is ~0 (coin flip). Drift signals dominate early.
             // At period end, positional edge is everything.
             const timeProgress = Math.max(0, Math.min(1, 1 - (minutesAhead / 15)));
-            const positionalWeight = 0.10 + timeProgress * timeProgress * 0.85;
-            // t=0: 0.10 | t=0.33: 0.19 | t=0.67: 0.48 | t=1.0: 0.95
+
+            // Sigmoid positional weight: models digital option delta profile
+            // Slow shift early, rapid mid-period transition, saturation near end
+            const sigK = 6, sigMid = 0.5;
+            const sigRaw = 1 / (1 + Math.exp(-sigK * (timeProgress - sigMid)));
+            const sigMin = 1 / (1 + Math.exp(sigK * sigMid));
+            const sigMax = 1 / (1 + Math.exp(-sigK * sigMid));
+            const positionalWeight = 0.35 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.62;
+            // t=0: ~0.35 | t=0.5: ~0.66 | t=0.8: ~0.90 | t=1.0: ~0.97
 
             // SIGNAL 9: VWAP DEVIATION
             const vwapResult = computeAnchoredVWAP(history);
@@ -2538,7 +2572,15 @@
 
             // Bayesian learning adjustment: correct probability using historical accuracy
             const bayesResult = bayesianAdjust(clampedProb, volRegime.regime, getBayesTrendLabel(trendRegime));
-            const finalProb = bayesResult.adjustedProb;
+            let finalProb = bayesResult.adjustedProb;
+
+            // Gamma-aware confidence dampening: near strike + near expiry = genuine uncertainty
+            // When |zScore| < 1 and < 3 min left, pull probability toward 0.5 (pin risk)
+            const isNearStrike = Math.abs(zScore) < 1.0;
+            if (isNearStrike && minutesAhead < 3) {
+                const gammaRisk = 1 + (1 - Math.abs(zScore)) * (3 - minutesAhead) * 0.15;
+                finalProb = 0.5 + (finalProb - 0.5) / gammaRisk;
+            }
 
             // ════════════════════════════════════════════════════════════
             // CONSTRUCT OUTPUT (UI-compatible)
