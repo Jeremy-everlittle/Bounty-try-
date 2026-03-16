@@ -340,6 +340,13 @@
             border: 1px solid rgba(248, 81, 73, 0.25);
         }
 
+        .updated-bet-badge {
+            font-size: 14px !important;
+            padding: 5px 14px !important;
+            margin: 6px 0 4px 0 !important;
+            letter-spacing: 1.5px !important;
+        }
+
         .pred-row {
             padding: 10px 0;
         }
@@ -553,13 +560,28 @@
             <div class="price predicted-price" id="original-predicted-price">--</div>
             <div id="original-predicted-change"></div>
             <div id="original-risk-badge"></div>
+            <div class="confidence" id="original-confidence">
+                <div class="confidence-label">Original Confidence</div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill" id="original-confidence-fill" style="width: 0%"></div>
+                </div>
+                <div class="confidence-value" id="original-confidence-value">--</div>
+            </div>
         </div>
 
         <div class="pred-row updated" id="updated-row" style="display:none;">
             <div class="pred-row-label">Updated</div>
+            <div class="bet-badge updated-bet-badge" id="updated-bet-badge"></div>
             <div class="price predicted-price updated-color" id="updated-predicted-price">--</div>
             <div id="updated-predicted-change"></div>
             <div id="updated-risk-badge"></div>
+            <div class="confidence" id="updated-confidence">
+                <div class="confidence-label">Updated Confidence</div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill" id="updated-confidence-fill" style="width: 0%"></div>
+                </div>
+                <div class="confidence-value" id="updated-confidence-value">--</div>
+            </div>
         </div>
 
         <div class="countdown" id="countdown">
@@ -567,13 +589,6 @@
             <span class="countdown-time" id="countdown-time">--:--</span>
         </div>
 
-        <div class="confidence">
-            <div class="confidence-label">Prediction Confidence</div>
-            <div class="confidence-bar">
-                <div class="confidence-fill" id="confidence-fill" style="width: 0%"></div>
-            </div>
-            <div class="confidence-value" id="confidence-value">--</div>
-        </div>
     </div>
 
     <div class="card">
@@ -1929,6 +1944,11 @@
                 const origChangePct = (origChangeDollar / periodStartPrice) * 100;
                 renderChangeTag(origChangePct, 'original-predicted-change', origChangeDollar);
                 renderRiskBadge(originalPrediction, displayStrike, data.currentPrice, 'original-risk-badge');
+
+                // Original confidence (locked)
+                const origConf = Math.round(originalPrediction.confidence * 100);
+                document.getElementById('original-confidence-fill').style.width = origConf + '%';
+                document.getElementById('original-confidence-value').textContent = origConf + '%';
             }
 
             // Updated prediction (recalculated, shown only after first refresh)
@@ -1940,17 +1960,24 @@
                 const updChangePct = (updChangeDollar / periodStartPrice) * 100;
                 renderChangeTag(updChangePct, 'updated-predicted-change', updChangeDollar);
                 renderRiskBadge(updatedPrediction, displayStrike, data.currentPrice, 'updated-risk-badge');
+
+                // Updated bet badge
+                const updBetEl = document.getElementById('updated-bet-badge');
+                const updIsUp = updatedPrediction.predictedPrice >= displayStrike;
+                updBetEl.textContent = updIsUp ? '\u25B2 Bet Up' : '\u25BC Bet Down';
+                updBetEl.className = 'bet-badge updated-bet-badge ' + (updIsUp ? 'bet-up' : 'bet-down');
+
+                // Updated confidence (live)
+                const updConf = Math.round(updatedPrediction.confidence * 100);
+                document.getElementById('updated-confidence-fill').style.width = updConf + '%';
+                document.getElementById('updated-confidence-value').textContent = updConf + '%';
             } else {
                 document.getElementById('updated-row').style.display = 'none';
             }
 
-            // Confidence (use latest prediction)
+            // Technical signals (use latest prediction)
             const activePred = updatedPrediction || originalPrediction;
             if (activePred) {
-                const confPercent = Math.round(activePred.confidence * 100);
-                document.getElementById('confidence-fill').style.width = confPercent + '%';
-                document.getElementById('confidence-value').textContent = confPercent + '%';
-
                 const sigClasses = {
                     Bullish: 'bullish', Bearish: 'bearish', Neutral: 'neutral',
                     Overbought: 'bearish', Oversold: 'bullish',
@@ -2065,12 +2092,14 @@
             document.getElementById('period-start-price').textContent = '---';
             document.getElementById('period-delta').textContent = '';
             document.getElementById('original-predicted-price').textContent = '---';
+            document.getElementById('original-predicted-change').innerHTML = '';
+            document.getElementById('original-risk-badge').innerHTML = '';
+            document.getElementById('original-confidence-fill').style.width = '0%';
+            document.getElementById('original-confidence-value').textContent = '--%';
             document.getElementById('updated-row').style.display = 'none';
             document.getElementById('bet-badge').textContent = '';
             document.getElementById('bet-badge').className = 'bet-badge';
             document.getElementById('countdown-time').textContent = '0:00';
-            document.getElementById('confidence-fill').style.width = '0%';
-            document.getElementById('confidence-value').textContent = '--%';
             document.getElementById('status-bar').innerHTML =
                 '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026';
         }
