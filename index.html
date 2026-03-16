@@ -1680,6 +1680,51 @@
             return m;
         }
 
+        // ── Time-polarization: push probability toward 0 or 1 as expiry approaches ──
+        // Mimics option gamma acceleration near expiry
+        function timePolarize(prob, minutesAhead, totalMinutes = 15, maxExponent = 3.0) {
+            const timeProgress = 1 - Math.max(0, Math.min(1, minutesAhead / totalMinutes));
+            // Quadratic ramp: polarization accelerates near expiry
+            const exponent = 1 + (maxExponent - 1) * timeProgress * timeProgress;
+            // Symmetric polarization around 0.5
+            const d = 2 * prob - 1;
+            const sign = d >= 0 ? 1 : -1;
+            const polarizedD = sign * Math.pow(Math.abs(d), 1 / exponent);
+            return 0.5 + 0.5 * polarizedD;
+        }
+
+        // ── Ensemble confidence via bootstrap perturbation ──
+        function ensembleConfidence(zScore, totalZShift, positionalWeight, positionalProb, minutesAhead, normCDF, nIter = 30) {
+            function randn() {
+                let u = 0, v = 0;
+                while (u === 0) u = Math.random();
+                while (v === 0) v = Math.random();
+                return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+            }
+            function toLogOddsE(p) { return Math.log(Math.max(p, 1e-9) / Math.max(1 - p, 1e-9)); }
+            function fromLogOddsE(lo) { return 1 / (1 + Math.exp(-lo)); }
+
+            const samples = [];
+            for (let i = 0; i < nIter; i++) {
+                const pZ = zScore + randn() * 0.05;
+                const pShift = Math.max(-1, Math.min(1, totalZShift + randn() * 0.03));
+                const pPosPr = Math.max(0.01, Math.min(0.99, positionalProb + randn() * 0.02));
+                const dap = normCDF(pZ + pShift * (1 - positionalWeight) * 3);
+                const lo = toLogOddsE(pPosPr) * positionalWeight + toLogOddsE(dap) * (1 - positionalWeight);
+                let p = fromLogOddsE(lo);
+                p = timePolarize(p, minutesAhead);
+                p = 0.03 + 0.94 / (1 + Math.exp(-10 * (p - 0.5)));
+                samples.push(p);
+            }
+            const mean = samples.reduce((s, v) => s + v, 0) / nIter;
+            const variance = samples.reduce((s, v) => s + (v - mean) ** 2, 0) / (nIter - 1);
+            const stddev = Math.sqrt(variance);
+            return {
+                stddev,
+                level: stddev < 0.02 ? 'high' : stddev < 0.05 ? 'moderate' : 'low'
+            };
+        }
+
         // ── Signal agreement multiplier ──
         function computeAgreementMultiplier(signals) {
             // signals: array of {value, weight} where value is the raw signal
@@ -2075,8 +2120,14 @@
             const driftLO = toLogOdds(driftAdjustedProb) * (1 - positionalWeight);
             const combinedProb = fromLogOdds(posLO + driftLO);
 
-            // Soft clamp via sigmoid squeeze (smoother than hard clamp)
-            const clampedProb = 0.03 + 0.94 / (1 + Math.exp(-8 * (combinedProb - 0.5)));
+            // Time polarization: push probability toward 0/1 as expiry approaches
+            const polarizedProb = timePolarize(combinedProb, minutesAhead);
+
+            // Soft clamp via sigmoid squeeze (smoother than hard clamp, steepness=10)
+            const clampedProb = 0.03 + 0.94 / (1 + Math.exp(-10 * (polarizedProb - 0.5)));
+
+            // Ensemble confidence: bootstrap perturbation to measure prediction robustness
+            const ensConf = ensembleConfidence(zScore, totalZShift, positionalWeight, positionalProb, minutesAhead, normCDF);
 
             // ════════════════════════════════════════════════════════════
             // CONSTRUCT OUTPUT (UI-compatible)
@@ -2107,7 +2158,7 @@
             const volLabel = volRegime.regime === 'volatile' ? 'High'
                 : volRegime.regime === 'quiet' ? 'Low' : 'Medium';
 
-            console.log(`Predict v2: P(up)=${(clampedProb*100).toFixed(1)}% z=${zScore.toFixed(2)} drift=${totalZShift.toFixed(3)} regime=${volRegime.regime} ac1=${ac1.toFixed(2)} regM=[mom=${regM.momentum.toFixed(1)} flow=${regM.flow.toFixed(1)} rev=${regM.reversion.toFixed(1)}] => ${predictUp?'UP':'DOWN'}`);
+            console.log(`Predict v2: P(up)=${(clampedProb*100).toFixed(1)}% z=${zScore.toFixed(2)} drift=${totalZShift.toFixed(3)} regime=${volRegime.regime} ac1=${ac1.toFixed(2)} regM=[mom=${regM.momentum.toFixed(1)} flow=${regM.flow.toFixed(1)} rev=${regM.reversion.toFixed(1)}] ens=${ensConf.level}(σ=${ensConf.stddev.toFixed(3)}) => ${predictUp?'UP':'DOWN'}`);
 
             return {
                 predictedPrice,
@@ -2115,6 +2166,7 @@
                 confidence,
                 probability: clampedProb,
                 _remainingVol: remainingVol,
+                ensembleConfidence: ensConf,
                 signals: {
                     momentum: momentumLabel,
                     volatility: volLabel,
