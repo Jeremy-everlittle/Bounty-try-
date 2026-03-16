@@ -408,6 +408,27 @@
             color: #484f58;
         }
 
+        .hi-accuracy {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 10px;
+            color: #8b949e;
+            margin-top: 2px;
+        }
+        .hi-accuracy .hi-off-label {
+            color: #484f58;
+        }
+        .hi-accuracy .hi-off-good {
+            color: #3fb950;
+        }
+        .hi-accuracy .hi-off-ok {
+            color: #d29922;
+        }
+        .hi-accuracy .hi-off-bad {
+            color: #f85149;
+        }
+
         .history-item .hi-prices {
             color: #8b949e;
             font-size: 11px;
@@ -622,6 +643,15 @@
                 const cls = p.correct === true ? 'correct' : p.correct === false ? 'wrong' : 'pending';
                 const betLabel = p.predictedDirection === 'up' ? 'Up' : 'Down';
                 const betCls = p.predictedDirection === 'up' ? 'bet-up' : 'bet-down';
+                // Compute prediction accuracy vs actual
+                const dollarOff = p.predictedPrice - p.actualPrice;
+                const pctOff = ((dollarOff) / p.actualPrice) * 100;
+                const absDollar = Math.abs(dollarOff);
+                const absPct = Math.abs(pctOff);
+                // Color: green <0.1%, yellow <0.3%, red >=0.3%
+                const offCls = absPct < 0.1 ? 'hi-off-good' : absPct < 0.3 ? 'hi-off-ok' : 'hi-off-bad';
+                const sign = dollarOff >= 0 ? '+' : '-';
+
                 html += `<div class="history-item">
                     <div class="hi-top">
                         <span class="hi-time">${p.time}</span>
@@ -634,6 +664,11 @@
                         <span class="hi-label">Pred</span> <span class="hi-pred">${formatPrice(p.predictedPrice)}</span>
                         <span class="hi-arrow">\u2192</span>
                         <span class="hi-label">Final</span> ${formatPrice(p.actualPrice)}
+                    </div>
+                    <div class="hi-accuracy">
+                        <span class="hi-off-label">Pred vs Final:</span>
+                        <span class="${offCls}">${sign}$${absDollar.toFixed(2)}</span>
+                        <span class="${offCls}">(${sign}${absPct.toFixed(3)}%)</span>
                     </div>
                 </div>`;
             }
