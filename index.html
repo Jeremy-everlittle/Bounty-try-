@@ -1389,6 +1389,74 @@
             return Math.max(Math.sqrt(variance), 0.0001);
         }
 
+        // ── EWMA Volatility (RiskMetrics-style, responsive to regime changes) ──
+        function computeEWMAVol(prices, lambda = 0.97) {
+            if (prices.length < 5) return 0.001;
+            const returns = [];
+            for (let i = 1; i < prices.length; i++) {
+                returns.push(Math.log(prices[i] / prices[i - 1]));
+            }
+            let ewmaVar = 0;
+            for (let i = 0; i < Math.min(5, returns.length); i++) ewmaVar += returns[i] * returns[i];
+            ewmaVar /= Math.min(5, returns.length);
+            for (let i = 1; i < returns.length; i++) {
+                ewmaVar = lambda * ewmaVar + (1 - lambda) * returns[i] * returns[i];
+            }
+            return Math.max(Math.sqrt(ewmaVar), 0.0001);
+        }
+
+        // ── Garman-Klass OHLC Volatility (~7.4x more efficient than close-to-close) ──
+        function computeGarmanKlassVol(history, window) {
+            if (history.length < 3) return 0.001;
+            window = Math.min(window, history.length);
+            const slice = history.slice(-window);
+            let gkSum = 0, validCount = 0;
+            for (let i = 0; i < slice.length; i++) {
+                const h = slice[i];
+                const open = h.open || h.price;
+                const high = h.high || h.price;
+                const low = h.low || h.price;
+                const close = h.price;
+                if (high <= low || open <= 0) continue;
+                const logHL = Math.log(high / low);
+                const logCO = Math.log(close / open);
+                gkSum += 0.5 * logHL * logHL - (2 * Math.LN2 - 1) * logCO * logCO;
+                validCount++;
+            }
+            if (validCount < 2) return 0.001;
+            return Math.max(Math.sqrt(gkSum / validCount), 0.0001);
+        }
+
+        // ── Variance-Ratio-Adjusted Vol Scaling ──
+        // Uses Hurst exponent from variance ratio to correct sqrt(T) scaling
+        function computeAdjustedRemainingVol(perMinuteVol, minutesAhead, prices) {
+            const n = prices.length;
+            const trendInfo = detectTrendRegime(prices, Math.min(n, 60));
+            const vr = trendInfo.vr;
+            const q = 5;
+            let H = 0.5 + Math.log(Math.max(vr, 0.01)) / (2 * Math.log(q));
+            H = Math.max(0.30, Math.min(0.70, H));
+            const T = Math.max(minutesAhead, 0.5);
+            return { remainingVol: perMinuteVol * Math.pow(T, H), H, vr };
+        }
+
+        // ── Intraday Vol Multiplier (BTC time-of-day pattern) ──
+        function getIntradayVolMultiplier() {
+            const now = new Date();
+            const hourFrac = now.getUTCHours() + now.getUTCMinutes() / 60;
+            const schedule = [
+                [0, 0.75], [6, 0.90], [8, 1.10], [12, 0.95],
+                [14.5, 1.40], [16, 1.15], [20, 0.85], [24, 0.75]
+            ];
+            for (let i = 0; i < schedule.length - 1; i++) {
+                if (hourFrac >= schedule[i][0] && hourFrac < schedule[i + 1][0]) {
+                    const t = (hourFrac - schedule[i][0]) / (schedule[i + 1][0] - schedule[i][0]);
+                    return schedule[i][1] + t * (schedule[i + 1][1] - schedule[i][1]);
+                }
+            }
+            return 1.0;
+        }
+
         // ── Volatility regime detection ──
         function detectVolRegime(prices) {
             const shortVol = computeRealizedVol(prices, Math.min(10, prices.length - 1));
@@ -1636,9 +1704,19 @@
             // remaining-time volatility? This is the digital-option insight:
             // P(S_T > K) = N(d2) where d2 = ln(S/K) / (sigma * sqrt(T))
 
-            const perMinuteVol = computeRealizedVol(prices, Math.min(30, n - 1));
-            // Scale vol to remaining time: sigma_T = sigma_1min * sqrt(T_minutes)
-            const remainingVol = perMinuteVol * Math.sqrt(Math.max(minutesAhead, 0.5));
+            // Composite vol: blend close-to-close, EWMA (responsive), Garman-Klass (efficient)
+            const ccVol = computeRealizedVol(prices, Math.min(30, n - 1));
+            const ewmaVol = computeEWMAVol(prices, 0.97);
+            const gkVol = computeGarmanKlassVol(history, Math.min(30, n - 1));
+            const perMinuteVol = 0.25 * ccVol + 0.40 * ewmaVol + 0.35 * gkVol;
+
+            // Variance-ratio-adjusted time scaling (T^H instead of sqrt(T))
+            const { remainingVol: rawRemainingVol, H } = computeAdjustedRemainingVol(
+                perMinuteVol, minutesAhead, prices);
+            // Blend with intraday vol pattern (30% weight to time-of-day prior)
+            const todMult = getIntradayVolMultiplier();
+            const remainingVol = rawRemainingVol * (0.70 + 0.30 * todMult);
+
             // Z-score: how many sigma is price from strike?
             const zScore = remainingVol > 0 ? Math.log(current / strike) / remainingVol : 0;
             // P(finish above strike) from z-score alone
