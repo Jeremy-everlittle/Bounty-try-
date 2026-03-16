@@ -652,6 +652,14 @@
                 const offCls = absPct < 0.1 ? 'hi-off-good' : absPct < 0.3 ? 'hi-off-ok' : 'hi-off-bad';
                 const sign = dollarOff >= 0 ? '+' : '-';
 
+                // Compute final vs strike
+                const strikeDiff = p.actualPrice - p.startPrice;
+                const strikePct = ((strikeDiff) / p.startPrice) * 100;
+                const absStrikeDiff = Math.abs(strikeDiff);
+                const absStrikePct = Math.abs(strikePct);
+                const strikeSign = strikeDiff >= 0 ? '+' : '-';
+                const strikeCls = strikeDiff >= 0 ? 'hi-off-good' : 'hi-off-bad';
+
                 html += `<div class="history-item">
                     <div class="hi-top">
                         <span class="hi-time">${p.time}</span>
@@ -669,6 +677,11 @@
                         <span class="hi-off-label">Pred vs Final:</span>
                         <span class="${offCls}">${sign}$${absDollar.toFixed(2)}</span>
                         <span class="${offCls}">(${sign}${absPct.toFixed(3)}%)</span>
+                    </div>
+                    <div class="hi-accuracy">
+                        <span class="hi-off-label">Final vs Strike:</span>
+                        <span class="${strikeCls}">${strikeSign}$${absStrikeDiff.toFixed(2)}</span>
+                        <span class="${strikeCls}">(${strikeSign}${absStrikePct.toFixed(3)}%)</span>
                     </div>
                 </div>`;
             }
