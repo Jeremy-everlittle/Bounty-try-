@@ -1676,6 +1676,63 @@
             return 1.0;
         }
 
+        // ── Heikin-Ashi trend clarity ──
+        function computeHeikinAshi(history) {
+            const n = history.length;
+            if (n < 5) return { signal: 0, trendStrength: 0 };
+            const ha = [];
+            for (let i = 0; i < n; i++) {
+                const o = history[i].open || history[i].price;
+                const c = history[i].price;
+                const h = history[i].high || c;
+                const l = history[i].low || c;
+                if (i === 0) {
+                    ha.push({ open: (o + c) / 2, close: (o + h + l + c) / 4, high: h, low: l });
+                } else {
+                    const haOpen = (ha[i-1].open + ha[i-1].close) / 2;
+                    const haClose = (o + h + l + c) / 4;
+                    ha.push({ open: haOpen, close: haClose, high: Math.max(h, haOpen, haClose), low: Math.min(l, haOpen, haClose) });
+                }
+            }
+            const lookback = Math.min(5, ha.length);
+            let bullish = 0, bearish = 0;
+            for (let i = ha.length - lookback; i < ha.length; i++) {
+                (ha[i].close > ha[i].open) ? bullish++ : bearish++;
+            }
+            let signal = 0;
+            if (bullish === lookback) signal = 0.3;
+            else if (bearish === lookback) signal = -0.3;
+            else signal = (bullish - bearish) / lookback * 0.15;
+            // Trend reversal detection
+            const lastBody = ha[ha.length-1].close - ha[ha.length-1].open;
+            const prevBody = ha[ha.length-2].close - ha[ha.length-2].open;
+            if (Math.sign(lastBody) !== Math.sign(prevBody) && Math.sign(prevBody) !== 0) {
+                signal = Math.sign(lastBody) * 0.2;
+            }
+            return { signal, trendStrength: Math.abs(bullish - bearish) / lookback };
+        }
+
+        // ── Cross-timeframe momentum confluence ──
+        function computeCrossTimeframeMomentum(prices) {
+            const n = prices.length;
+            if (n < 6) return { signal: 0, confluence: 0 };
+            const mom1 = n > 1 ? (prices[n-1] - prices[n-2]) / prices[n-2] : 0;
+            const mom3 = n > 3 ? (prices[n-1] - prices[n-4]) / prices[n-4] : 0;
+            const mom5 = n > 5 ? (prices[n-1] - prices[n-6]) / prices[n-6] : 0;
+            const signs = [Math.sign(mom1), Math.sign(mom3), Math.sign(mom5)];
+            const allAgree = signs[0] !== 0 && signs[0] === signs[1] && signs[1] === signs[2];
+            const twoAgree = (signs[0] === signs[1] && signs[0] !== 0) ||
+                             (signs[1] === signs[2] && signs[1] !== 0);
+            if (allAgree) {
+                const raw = signs[0] * (Math.abs(mom1) * 0.2 + Math.abs(mom3) * 0.3 + Math.abs(mom5) * 0.5);
+                return { signal: Math.sign(raw) * Math.min(Math.abs(raw) * 300, 0.4), confluence: 1 };
+            } else if (twoAgree) {
+                const majoritySign = signs[0] + signs[1] + signs[2] > 0 ? 1 : -1;
+                return { signal: majoritySign * 0.1, confluence: 0.5 };
+            }
+            return { signal: 0, confluence: 0 };
+        }
+
         // ── Lag-1 autocorrelation of returns ──
         function computeAutocorrelation(prices, lag) {
             const returns = [];
@@ -1929,6 +1986,12 @@
             // SIGNAL 14: SUPPORT/RESISTANCE near strike
             const srSignal = computeSRNearStrike(history, strike);
 
+            // SIGNAL 15: HEIKIN-ASHI TREND CLARITY
+            const haResult = computeHeikinAshi(history);
+
+            // SIGNAL 16: CROSS-TIMEFRAME MOMENTUM CONFLUENCE
+            const crossTF = computeCrossTimeframeMomentum(prices);
+
             // Dynamic signal weights: boost momentum/flow early, fade noise late
             const earlyBoost = Math.max(0, 1 - timeProgress * 2); // 1.0 at start, 0 by mid
 
@@ -1938,34 +2001,38 @@
 
             // All signals with their current values for agreement check
             const allSignals = [
-                { value: driftZShift, weight: 0.28 },
-                { value: orderFlowSignal, weight: 0.15 },
-                { value: tradeFlowSignal, weight: 0.12 },
-                { value: vwapSignal, weight: 0.08 },
-                { value: macdSignal, weight: 0.06 },
+                { value: driftZShift, weight: 0.24 },
+                { value: orderFlowSignal, weight: 0.12 },
+                { value: tradeFlowSignal, weight: 0.10 },
+                { value: vwapSignal, weight: 0.07 },
+                { value: macdSignal, weight: 0.05 },
                 { value: linRegSignal, weight: 0.05 },
                 { value: bbSqueeze.breakoutSignal, weight: 0.04 },
-                { value: rsiSignal, weight: 0.06 },
-                { value: candlePattern.signal, weight: 0.06 }
+                { value: haResult.signal, weight: 0.04 },
+                { value: crossTF.signal, weight: 0.04 },
+                { value: rsiSignal, weight: 0.05 },
+                { value: candlePattern.signal, weight: 0.05 }
             ];
             const agreementMult = computeAgreementMultiplier(allSignals);
 
-            // Combine drift signals into a single z-shift
+            // Combine drift signals into a single z-shift (16 signals)
             const rawTotalZShift = (
-                driftZShift          * (0.26 + earlyBoost * 0.10) * immediateBoosted +
-                orderFlowSignal      * (0.14 + earlyBoost * 0.07) * immediateBoosted +
-                tradeFlowSignal      * (0.11 + earlyBoost * 0.05) * immediateBoosted +
-                rsiSignal            * (0.05 - earlyBoost * 0.02) * urgencyFade +
-                candlePattern.signal * (0.05 - earlyBoost * 0.02) * urgencyFade +
-                volumeSurgeSignal    * (0.06 + earlyBoost * 0.03) +
+                driftZShift          * (0.22 + earlyBoost * 0.08) * immediateBoosted +
+                orderFlowSignal      * (0.12 + earlyBoost * 0.06) * immediateBoosted +
+                tradeFlowSignal      * (0.09 + earlyBoost * 0.04) * immediateBoosted +
+                rsiSignal            * (0.04 - earlyBoost * 0.02) * urgencyFade +
+                candlePattern.signal * (0.04 - earlyBoost * 0.02) * urgencyFade +
+                volumeSurgeSignal    * (0.05 + earlyBoost * 0.03) +
                 fundingSignal        * (0.02 - earlyBoost * 0.01) * urgencyFade +
                 momAccel * 20        * (0.02 + earlyBoost * 0.02) * immediateBoosted +
-                vwapSignal           * (0.07 + earlyBoost * 0.05) +
+                vwapSignal           * (0.06 + earlyBoost * 0.04) +
                 macdSignal           * (0.05 + earlyBoost * 0.03) +
-                linRegSignal         * (0.05 + earlyBoost * 0.03) +
-                bayesianPrior        * earlyBoost * 0.10 +
+                linRegSignal         * (0.04 + earlyBoost * 0.02) +
+                bayesianPrior        * earlyBoost * 0.08 +
                 bbSqueeze.breakoutSignal * 0.04 +
-                srSignal             * 0.04
+                srSignal             * 0.04 +
+                haResult.signal      * (0.04 - earlyBoost * 0.01) +
+                crossTF.signal       * (0.04 + earlyBoost * 0.03) * immediateBoosted
             );
 
             // Apply agreement multiplier: amplify when signals agree, dampen when conflicting
