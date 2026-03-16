@@ -59,6 +59,19 @@
             50% { opacity: 0.6; box-shadow: 0 0 0 6px rgba(63, 185, 80, 0); }
         }
 
+        .sell-signal { padding: 10px 14px; border-radius: 10px; margin-top: 10px; }
+        .sell-signal-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+        .sell-signal-icon { font-size: 16px; }
+        .sell-signal-label { font-size: 13px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; }
+        .sell-signal-urgency { margin-left: auto; font-size: 10px; font-weight: 600; opacity: 0.7; }
+        .sell-signal-reason { font-size: 11px; font-weight: 500; opacity: 0.9; margin-top: 2px; }
+        .sell-signal-details { font-size: 10px; font-weight: 400; opacity: 0.65; margin-top: 3px; }
+        .sell-consider_selling { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.35); }
+        .sell-sell_now { background: rgba(248, 81, 73, 0.18); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.4); animation: sellPulse 1.5s ease-in-out infinite; }
+        .sell-lost_cause { background: rgba(248, 81, 73, 0.25); color: #ff6b6b; border: 1px solid rgba(248, 81, 73, 0.5); animation: sellPulseUrgent 0.8s ease-in-out infinite; }
+        @keyframes sellPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.85; } }
+        @keyframes sellPulseUrgent { 0%, 100% { opacity: 1; } 50% { opacity: 0.9; box-shadow: 0 0 12px 2px rgba(248, 81, 73, 0.25); } }
+
         .card {
             background: #161b22;
             border: 1px solid #30363d;
@@ -583,6 +596,8 @@
                 <div class="confidence-value" id="updated-confidence-value">--</div>
             </div>
         </div>
+
+        <div id="sell-signal-badge"></div>
 
         <div class="countdown" id="countdown">
             <span>Next period in</span>
@@ -1534,6 +1549,73 @@
             return den > 0 ? num / den : 0;
         }
 
+        // ── Anchored VWAP deviation ──
+        function computeAnchoredVWAP(history) {
+            if (history.length < 3) return { vwap: 0, deviation: 0 };
+            let cumPV = 0, cumVol = 0;
+            for (let i = 0; i < history.length; i++) {
+                const vol = history[i].volume || 1;
+                cumPV += history[i].price * vol;
+                cumVol += vol;
+            }
+            const vwap = cumPV / cumVol;
+            const current = history[history.length - 1].price;
+            return { vwap, deviation: (current - vwap) / vwap };
+        }
+
+        // ── Bayesian prior from recent period outcomes ──
+        function computeBayesianPrior() {
+            const graded = predictionLog.filter(p => p.actualDirection !== null);
+            if (graded.length < 2) return 0;
+            const recent = graded.slice(-5);
+            let upWeight = 0, totalWeight = 0;
+            for (let i = 0; i < recent.length; i++) {
+                const w = Math.pow(1.5, i);
+                if (recent[i].actualDirection === 'up') upWeight += w;
+                totalWeight += w;
+            }
+            const upRate = upWeight / totalWeight;
+            if (upRate > 0.6) return (upRate - 0.5) * 0.6;
+            if (upRate < 0.4) return (upRate - 0.5) * 0.6;
+            return 0;
+        }
+
+        // ── MACD computation ──
+        function computeMACD(prices) {
+            if (prices.length < 26) return { macd: 0, signal: 0, histogram: 0 };
+            const ema12 = computeEMA(prices, 12);
+            const ema26 = computeEMA(prices, 26);
+            const macdLine = ema12 - ema26;
+            // Signal line: EMA(9) of MACD — approximate with current value
+            const macdValues = [];
+            for (let i = 26; i <= prices.length; i++) {
+                const e12 = computeEMA(prices.slice(0, i), 12);
+                const e26 = computeEMA(prices.slice(0, i), 26);
+                macdValues.push(e12 - e26);
+            }
+            const signalLine = macdValues.length >= 9 ? computeEMA(macdValues, 9) : macdLine;
+            return { macd: macdLine, signal: signalLine, histogram: macdLine - signalLine };
+        }
+
+        // ── Linear regression slope ──
+        function computeLinRegSlope(prices, lookback) {
+            lookback = Math.min(lookback, prices.length);
+            if (lookback < 3) return { slope: 0, r2: 0 };
+            const segment = prices.slice(-lookback);
+            const n = segment.length;
+            let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0, sumY2 = 0;
+            for (let i = 0; i < n; i++) {
+                sumX += i; sumY += segment[i];
+                sumXY += i * segment[i]; sumX2 += i * i;
+                sumY2 += segment[i] * segment[i];
+            }
+            const denom = n * sumX2 - sumX * sumX;
+            if (denom === 0) return { slope: 0, r2: 0 };
+            const slope = (n * sumXY - sumX * sumY) / denom;
+            const r = (n * sumXY - sumX * sumY) / Math.sqrt(denom * (n * sumY2 - sumY * sumY));
+            return { slope: slope / segment[0], r2: Math.min(1, r * r) }; // normalized slope
+        }
+
         // ════════════════════════════════════════════════════════════════
         // MAIN PREDICTION FUNCTION — Probabilistic Binary Classifier
         //
@@ -1665,31 +1747,61 @@
             // COMBINE ALL SIGNALS INTO FINAL PROBABILITY
             // ════════════════════════════════════════════════════════════
 
-            // Time weighting: as period progresses, positional edge dominates
-            // At 15 min left: positional 40%, drift 60%
-            // At 1 min left:  positional 95%, drift 5%
-            const timeProgress = 1 - (minutesAhead / 15); // 0=start, 1=end
-            const positionalWeight = 0.40 + timeProgress * 0.55;
+            // Time weighting: quadratic ramp — at start, position is near strike
+            // so positional z-score is ~0 (coin flip). Drift signals dominate early.
+            // At period end, positional edge is everything.
+            const timeProgress = Math.max(0, Math.min(1, 1 - (minutesAhead / 15)));
+            const positionalWeight = 0.10 + timeProgress * timeProgress * 0.85;
+            // t=0: 0.10 | t=0.33: 0.19 | t=0.67: 0.48 | t=1.0: 0.95
+
+            // SIGNAL 9: VWAP DEVIATION
+            const vwapResult = computeAnchoredVWAP(history);
+            const vwapSignal = Math.max(-0.5, Math.min(0.5, vwapResult.deviation * 1000));
+
+            // SIGNAL 10: MACD HISTOGRAM
+            const macd = computeMACD(prices);
+            const macdSignal = Math.max(-0.4, Math.min(0.4,
+                (macd.histogram / current) * 50000));
+
+            // SIGNAL 11: LINEAR REGRESSION TREND
+            const linReg = computeLinRegSlope(prices, 10);
+            const linRegSignal = Math.max(-0.4, Math.min(0.4,
+                linReg.slope * 500 * linReg.r2)); // weighted by fit quality
+
+            // SIGNAL 12: BAYESIAN PRIOR (from recent period outcomes)
+            const bayesianPrior = computeBayesianPrior();
+
+            // Dynamic signal weights: boost momentum/flow early, fade noise late
+            const earlyBoost = Math.max(0, 1 - timeProgress * 2); // 1.0 at start, 0 by mid
 
             // Combine drift signals into a single z-shift
             const totalZShift = (
-                driftZShift * 0.35 +
-                orderFlowSignal * 0.20 +
-                tradeFlowSignal * 0.15 +
-                rsiSignal * 0.08 +
-                candlePattern.signal * 0.08 +
-                volumeSurgeSignal * 0.09 +
-                fundingSignal * 0.03 +
-                momAccel * 20 * 0.02
+                driftZShift          * (0.28 + earlyBoost * 0.12) +
+                orderFlowSignal      * (0.15 + earlyBoost * 0.08) +
+                tradeFlowSignal      * (0.12 + earlyBoost * 0.06) +
+                rsiSignal            * (0.06 - earlyBoost * 0.03) +
+                candlePattern.signal * (0.06 - earlyBoost * 0.03) +
+                volumeSurgeSignal    * (0.07 + earlyBoost * 0.04) +
+                fundingSignal        * (0.02 - earlyBoost * 0.01) +
+                momAccel * 20        * (0.02 + earlyBoost * 0.02) +
+                vwapSignal           * (0.08 + earlyBoost * 0.06) +
+                macdSignal           * (0.06 + earlyBoost * 0.04) +
+                linRegSignal         * (0.05 + earlyBoost * 0.03) +
+                bayesianPrior        * earlyBoost * 0.12
             );
 
-            // Final probability: blend positional (pure z-score) with
-            // drift-adjusted probability
+            // Final probability: combine in log-odds space (mathematically correct)
             const driftAdjustedProb = normCDF(zScore + totalZShift * (1 - positionalWeight) * 3);
-            const finalProb = positionalProb * positionalWeight + driftAdjustedProb * (1 - positionalWeight);
 
-            // Clamp to [0.05, 0.95]
-            const clampedProb = Math.max(0.05, Math.min(0.95, finalProb));
+            // Log-odds combination: more principled than linear blend
+            function toLogOdds(p) { return Math.log(Math.max(p, 0.001) / Math.max(1 - p, 0.001)); }
+            function fromLogOdds(lo) { return 1 / (1 + Math.exp(-lo)); }
+            const posLO = toLogOdds(positionalProb) * positionalWeight;
+            const driftLO = toLogOdds(driftAdjustedProb) * (1 - positionalWeight);
+            const combinedProb = fromLogOdds(posLO + driftLO);
+
+            // Soft clamp via sigmoid squeeze (smoother than hard clamp)
+            const clampedProb = 0.03 + 0.94 / (1 + Math.exp(-8 * (combinedProb - 0.5)));
 
             // ════════════════════════════════════════════════════════════
             // CONSTRUCT OUTPUT (UI-compatible)
@@ -1706,9 +1818,11 @@
 
             const changePercent = ((predictedPrice - current) / current) * 100;
 
-            // Confidence for UI display
-            const confidence = Math.max(0.15, Math.min(0.92,
-                0.50 + confidenceDistance * 0.42
+            // Confidence for UI: sigmoid mapping for more decisive display
+            const sigmoidInput = (confidenceDistance - 0.35) * 8;
+            const sigmoidVal = 1 / (1 + Math.exp(-sigmoidInput));
+            const confidence = Math.max(0.20, Math.min(0.96,
+                0.40 + sigmoidVal * 0.56
             ));
 
             // Signal labels for UI
@@ -1725,6 +1839,7 @@
                 changePercent,
                 confidence,
                 probability: clampedProb,
+                _remainingVol: remainingVol,
                 signals: {
                     momentum: momentumLabel,
                     volatility: volLabel,
@@ -1828,6 +1943,110 @@
             if (reasons.length === 0) reasons.push('Strong margin from strike');
 
             return { level, score: riskScore, reasons };
+        }
+
+        // ── Sell Signal Assessment ────────────────────────────────────
+        function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemaining) {
+            if (!origPred || !updPred || strike === null) return null;
+
+            const reasons = [];
+            let urgency = 0;
+            const betIsUp = origPred.predictedPrice >= strike;
+
+            // Factor 1: Price on wrong side of strike
+            const priceAboveStrike = currentPrice >= strike;
+            const onWrongSide = (betIsUp && !priceAboveStrike) || (!betIsUp && priceAboveStrike);
+            const distancePct = (Math.abs(currentPrice - strike) / strike) * 100;
+
+            if (onWrongSide) {
+                if (distancePct > 0.10) { urgency += 35; reasons.push('Price ' + distancePct.toFixed(3) + '% wrong side'); }
+                else if (distancePct > 0.05) { urgency += 25; reasons.push('Price drifting wrong side'); }
+                else if (distancePct > 0.02) { urgency += 15; reasons.push('Price slightly wrong side'); }
+                else { urgency += 8; reasons.push('Price marginally wrong side'); }
+            }
+
+            // Factor 2: Win probability
+            const probForBet = betIsUp ? updPred.probability : (1 - updPred.probability);
+            if (probForBet < 0.10) { urgency += 40; reasons.push('Win prob only ' + (probForBet * 100).toFixed(0) + '%'); }
+            else if (probForBet < 0.20) { urgency += 30; reasons.push('Win prob dropped to ' + (probForBet * 100).toFixed(0) + '%'); }
+            else if (probForBet < 0.30) { urgency += 20; reasons.push('Win prob at ' + (probForBet * 100).toFixed(0) + '%'); }
+            else if (probForBet < 0.40) { urgency += 10; reasons.push('Win prob weakening (' + (probForBet * 100).toFixed(0) + '%)'); }
+
+            // Factor 3: Signal opposition
+            const sigs = updPred.signals;
+            if (sigs) {
+                let agreeing = 0, opposing = 0;
+                if (sigs.momentum === 'Bullish') { betIsUp ? agreeing++ : opposing++; }
+                else if (sigs.momentum === 'Bearish') { betIsUp ? opposing++ : agreeing++; }
+                if (sigs.trend === 'Bullish') { betIsUp ? agreeing++ : opposing++; }
+                else if (sigs.trend === 'Bearish') { betIsUp ? opposing++ : agreeing++; }
+                if (sigs.rsi === 'Overbought') { betIsUp ? opposing++ : agreeing++; }
+                else if (sigs.rsi === 'Oversold') { betIsUp ? agreeing++ : opposing++; }
+                if (opposing >= 3) { urgency += 20; reasons.push('All signals oppose bet'); }
+                else if (opposing >= 2 && agreeing === 0) { urgency += 15; reasons.push('Multiple signals oppose'); }
+                if (sigs.volatility === 'High' && onWrongSide) { urgency += 5; reasons.push('High vol amplifies risk'); }
+            }
+
+            // Factor 4: Time pressure (only when already losing)
+            if (onWrongSide || probForBet < 0.35) {
+                if (minutesRemaining < 1.5) { urgency += 25; reasons.push('Under 90 seconds left'); }
+                else if (minutesRemaining < 3) { urgency += 18; reasons.push('Under 3 minutes left'); }
+                else if (minutesRemaining < 5) { urgency += 10; reasons.push('Under 5 minutes left'); }
+            }
+
+            // Factor 5: Model flipped direction
+            if (betIsUp !== (updPred.predictedPrice >= strike)) {
+                urgency += 15;
+                reasons.push('Model predicts opposite direction');
+            }
+
+            // Factor 6: Confidence collapse
+            if (origPred.confidence - updPred.confidence > 0.25) {
+                urgency += 10;
+                reasons.push('Confidence dropped significantly');
+            }
+
+            urgency = Math.min(100, Math.max(0, urgency));
+
+            let level, shortLabel;
+            if (urgency >= 75 || (probForBet < 0.10 && minutesRemaining < 2)) {
+                level = 'lost_cause'; shortLabel = 'LOST CAUSE';
+            } else if (urgency >= 55 || probForBet < 0.20 || (probForBet < 0.30 && minutesRemaining < 3)) {
+                level = 'sell_now'; shortLabel = 'SELL NOW';
+            } else if (urgency >= 35 || (probForBet < 0.30 && minutesRemaining < 5)) {
+                level = 'consider_selling'; shortLabel = 'CONSIDER SELLING';
+            } else {
+                level = 'hold'; shortLabel = 'HOLD';
+            }
+
+            return { level, urgency, reasons: reasons.length > 0 ? reasons : ['Position looks okay'], shortLabel, probForBet };
+        }
+
+        function renderSellSignal(containerId) {
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            if (!originalPrediction || !updatedPrediction || periodStartPrice === null) {
+                el.innerHTML = '';
+                return;
+            }
+            const strike = kalshiStrike || periodStartPrice;
+            const minutesLeft = currentTarget ? Math.max(0, getSecondsUntilTarget(currentTarget) / 60) : 15;
+            const currentPrice = latestData ? latestData.currentPrice : strike;
+            const signal = assessSellSignal(originalPrediction, updatedPrediction, strike, currentPrice, minutesLeft);
+            if (!signal || signal.level === 'hold') { el.innerHTML = ''; return; }
+
+            const icons = { consider_selling: '&#9888;', sell_now: '&#9888;', lost_cause: '&#10006;' };
+            const probText = ' | ' + (signal.probForBet * 100).toFixed(0) + '% win prob';
+            el.innerHTML =
+                '<div class="sell-signal sell-' + signal.level + '">' +
+                    '<div class="sell-signal-header">' +
+                        '<span class="sell-signal-icon">' + (icons[signal.level] || '') + '</span>' +
+                        '<span class="sell-signal-label">' + signal.shortLabel + '</span>' +
+                        '<span class="sell-signal-urgency">' + signal.urgency + '/100</span>' +
+                    '</div>' +
+                    '<div class="sell-signal-reason">' + signal.reasons[0] + probText + '</div>' +
+                    (signal.reasons.length > 1 ? '<div class="sell-signal-details">' + signal.reasons.slice(1).join(' &middot; ') + '</div>' : '') +
+                '</div>';
         }
 
         // ── Chart ─────────────────────────────────────────────────────
@@ -2049,6 +2268,9 @@
                 }
             }
 
+            // Sell signal
+            renderSellSignal('sell-signal-badge');
+
             // Chart
             const chartPred = originalPrediction ? originalPrediction.predictedPrice : data.currentPrice;
             const targetLabel = formatTargetTime(periodEnd);
@@ -2069,6 +2291,8 @@
         let periodStartPrice = null;      // 15m kline open price (= Kalshi strike)
         let originalPrediction = null;     // locked prediction for the period
         let updatedPrediction = null;      // recalculated on each refresh
+        let smoothedProbability = null;     // EMA-smoothed probability for anti-flip
+        let lockedDirection = null;         // 'up' or 'down' — committed direction
         let currentPeriodKey = null;       // e.g. "14:30" to detect period change
         let isTransitioning = false;       // true while waiting for new ticker
         let transitionRetries = 0;
@@ -2139,6 +2363,8 @@
             originalPrediction = null;
             updatedPrediction = null;
             currentPrediction = null;
+            smoothedProbability = null;
+            lockedDirection = null;
             periodStartPrice = null;
             kalshiStrike = null;
             kalshiCloseTime = null;
@@ -2159,6 +2385,7 @@
             document.getElementById('bet-badge').textContent = '';
             document.getElementById('bet-badge').className = 'bet-badge';
             document.getElementById('countdown-time').textContent = '0:00';
+            document.getElementById('sell-signal-badge').innerHTML = '';
             document.getElementById('status-bar').innerHTML =
                 '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026';
         }
@@ -2191,6 +2418,8 @@
                     periodStartPrice = kalshiStrike;
                     strikeIsPending = false;
 
+                    smoothedProbability = null;
+                    lockedDirection = null;
                     const minutesAhead = Math.max(1, getSecondsUntilTarget(currentPeriodEnd) / 60);
                     originalPrediction = predictPrice(data, minutesAhead);
                     updatedPrediction = null;
@@ -2319,7 +2548,47 @@
                     saveSessionState();
                 } else {
                     // Same period, original exists — only update the secondary prediction
-                    updatedPrediction = predictPrice(data, minutesAhead);
+                    const rawUpdated = predictPrice(data, minutesAhead);
+
+                    // ── Anti flip-flop: EMA smoothing + hysteresis ──
+                    const strike = kalshiStrike || periodStartPrice;
+                    if (lockedDirection === null && originalPrediction) {
+                        lockedDirection = originalPrediction.predictedPrice >= strike ? 'up' : 'down';
+                    }
+
+                    // Smooth probability (lower alpha near expiry = more stable)
+                    const alpha = minutesAhead <= 3 ? 0.20 : 0.35;
+                    if (smoothedProbability === null) {
+                        smoothedProbability = rawUpdated.probability;
+                    } else {
+                        smoothedProbability = alpha * rawUpdated.probability + (1 - alpha) * smoothedProbability;
+                    }
+
+                    // Hysteresis: require strong signal to flip direction
+                    const flipThreshold = minutesAhead <= 2 ? 0.35
+                                        : minutesAhead <= 5 ? 0.20
+                                        : 0.12;
+
+                    if (lockedDirection === 'up' && smoothedProbability < (0.5 - flipThreshold)) {
+                        lockedDirection = 'down';
+                        console.log(`FLIP -> DOWN (smoothedP=${(smoothedProbability*100).toFixed(1)}%)`);
+                    } else if (lockedDirection === 'down' && smoothedProbability > (0.5 + flipThreshold)) {
+                        lockedDirection = 'up';
+                        console.log(`FLIP -> UP (smoothedP=${(smoothedProbability*100).toFixed(1)}%)`);
+                    }
+
+                    // Override predicted price to locked side if direction was stabilized
+                    const rawIsUp = rawUpdated.predictedPrice >= strike;
+                    if ((lockedDirection === 'up') !== rawIsUp) {
+                        const confDist = Math.abs(smoothedProbability - 0.5) * 2;
+                        const offset = (rawUpdated._remainingVol || 0.002) * strike * confDist * 0.5;
+                        rawUpdated.predictedPrice = lockedDirection === 'up'
+                            ? strike + Math.max(offset, 0.01)
+                            : strike - Math.max(offset, 0.01);
+                        rawUpdated.changePercent = ((rawUpdated.predictedPrice - strike) / strike) * 100;
+                    }
+
+                    updatedPrediction = rawUpdated;
 
                     // If Kalshi strike just arrived and we were using a fallback,
                     // re-do the original prediction with the real strike and re-record
