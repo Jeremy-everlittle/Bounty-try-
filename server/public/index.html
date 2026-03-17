@@ -4016,7 +4016,11 @@
         const WALLET_KEY = 'kalshiSimWallet';
         const WALLET_HISTORY_KEY = 'kalshiSimHistory';
         const STARTING_BALANCE = 100;
-        const KALSHI_FEE_RATE = 0.07; // 7¢ per contract on entry (Kalshi fee)
+        // Kalshi parabolic fee: ceil(0.07 * contracts * P * (1-P))
+        // Max fee ~1.75¢/contract at P=0.50, decreases toward extremes
+        function kalshiFee(contracts, contractPrice) {
+            return Math.ceil(0.07 * contracts * contractPrice * (1 - contractPrice) * 100) / 100;
+        }
         const MIN_CONTRACT_PRICE = 0.02; // 2¢ minimum
         const MAX_CONTRACT_PRICE = 0.98; // 98¢ maximum
         const SPREAD_CENTS = 2; // 2¢ bid-ask spread simulation
@@ -4211,13 +4215,13 @@
             if (contracts <= 0) { alert('Bet too small for current contract price ($' + contractPrice.toFixed(2) + '/contract).'); return; }
 
             const totalCost = contracts * contractPrice;
-            const fee = Math.round(contracts * KALSHI_FEE_RATE * 100) / 100; // 7¢ per contract
+            const fee = kalshiFee(contracts, contractPrice);
             const totalWithFee = totalCost + fee;
 
             if (totalWithFee > wallet.balance) {
-                const affordable = Math.floor((wallet.balance - fee) / contractPrice);
+                const affordable = Math.floor(wallet.balance / (contractPrice + 0.02));
                 if (affordable <= 0) { alert('Insufficient balance.'); return; }
-                alert('Can only afford ' + affordable + ' contracts ($' + (affordable * contractPrice + Math.round(affordable * KALSHI_FEE_RATE * 100) / 100).toFixed(2) + '). Adjust your amount.');
+                alert('Can only afford ' + affordable + ' contracts ($' + (affordable * contractPrice + kalshiFee(affordable, contractPrice)).toFixed(2) + '). Adjust your amount.');
                 return;
             }
 
@@ -4257,7 +4261,7 @@
 
             const bet = wallet.activeBet;
             const proceeds = bet.contracts * exitPrice;
-            const exitFee = Math.round(bet.contracts * KALSHI_FEE_RATE * 100) / 100;
+            const exitFee = kalshiFee(bet.contracts, exitPrice);
             const netProceeds = proceeds - exitFee;
             const pnl = netProceeds - bet.totalCost;
 
@@ -4307,8 +4311,9 @@
                         (bet.direction === 'no' && !priceAboveStrike);
 
             // Payout: $1 per contract if won, $0 if lost
+            // Kalshi charges NO fee on losing settlements
             const payout = won ? bet.contracts * 1.00 : 0;
-            const pnl = payout - bet.totalWithFee; // total cost included fee
+            const pnl = payout - bet.totalCost - bet.fee; // entry cost + entry fee only (no exit fee on settlement)
 
             wallet.balance += payout;
             wallet.balance = Math.round(wallet.balance * 100) / 100;
@@ -4396,7 +4401,7 @@
                             (exitPrice ? ' (' + Math.round(exitPrice * 100) + '¢/contract)' : '') +
                             ' | Win payout: $' + bet.contracts.toFixed(2) +
                         '</div>' +
-                        '<button class="wallet-sell-btn" onclick="sellBetEarly()">Sell Now — Get $' + (currentValue - Math.round(bet.contracts * KALSHI_FEE_RATE * 100) / 100).toFixed(2) + '</button>' +
+                        '<button class="wallet-sell-btn" onclick="sellBetEarly()">Sell Now — Get $' + (currentValue - kalshiFee(bet.contracts, exitPrice || 0.5)).toFixed(2) + '</button>' +
                     '</div>';
             } else {
                 activeSection.innerHTML = '';
