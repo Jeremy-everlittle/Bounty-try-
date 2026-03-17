@@ -2369,13 +2369,13 @@
             // Reduced from original aggressive values — less extreme regime adaptation
             // prevents overfitting to noisy regime detection on short timeframes
             const m = { momentum: 1.0, flow: 1.0, reversion: 1.0, pattern: 1.0, volume: 1.0 };
-            // Trending: moderate momentum boost, mild reversion suppression
-            if (ac1 > 0.25 || trendRegime.trending) {
-                m.momentum = 1.20; m.flow = 1.15; m.reversion = 0.55; m.pattern = 0.85;
+            // Trending: trust momentum but don't amplify — no boost above 1.0
+            if (ac1 > 0.35 || trendRegime.trending) {
+                m.momentum = 1.0; m.flow = 1.0; m.reversion = 0.65; m.pattern = 0.85;
             }
-            // Mean-reverting: moderate reversion boost, mild momentum suppression
-            else if (ac1 < -0.25 || trendRegime.meanReverting) {
-                m.momentum = 0.65; m.flow = 0.85; m.reversion = 1.30; m.pattern = 1.10;
+            // Mean-reverting: aggressive fade of momentum, strong reversion boost
+            else if (ac1 < -0.35 || trendRegime.meanReverting) {
+                m.momentum = 0.35; m.flow = 0.60; m.reversion = 1.80; m.pattern = 0.80;
             }
             // Volatile: mild flow/volume boost
             if (volRegime.regime === 'volatile' || volRegime.regime === 'expanding') {
@@ -2390,10 +2390,10 @@
 
         // ── Time-polarization: push probability toward 0 or 1 as expiry approaches ──
         // Mimics option gamma acceleration near expiry
-        function timePolarize(prob, minutesAhead, totalMinutes = 15, maxExponent = 2.0) {
+        function timePolarize(prob, minutesAhead, totalMinutes = 15, maxExponent = 1.5) {
             const timeProgress = 1 - Math.max(0, Math.min(1, minutesAhead / totalMinutes));
-            // Quadratic ramp: polarization accelerates near expiry
-            const exponent = 1 + (maxExponent - 1) * timeProgress * timeProgress;
+            // Linear ramp: gentler polarization — old quadratic pushed extremes too hard
+            const exponent = 1 + (maxExponent - 1) * timeProgress;
             // Symmetric polarization around 0.5
             const d = 2 * prob - 1;
             const sign = d >= 0 ? 1 : -1;
@@ -2611,13 +2611,13 @@
             }
             if (totalWeight === 0) return 1.0;
             const dominantPct = Math.max(positiveWeight, negativeWeight) / totalWeight;
-            // >80% agree: amplify by 1.15; <50% agree (conflict): dampen to 0.65
-            // Conservative: signals are correlated (derived from same price data)
-            if (dominantPct > 0.80) return 1.15;
-            if (dominantPct > 0.65) return 1.05;
-            if (dominantPct < 0.50) return 0.65;
-            if (dominantPct < 0.60) return 0.80;
-            return 1.0;
+            // Signals are correlated (derived from same price data) — don't amplify consensus
+            // Agreement should reduce dampening, not boost signal
+            if (dominantPct > 0.80) return 1.05;
+            if (dominantPct > 0.65) return 1.0;
+            if (dominantPct < 0.50) return 0.55;
+            if (dominantPct < 0.60) return 0.70;
+            return 0.90;
         }
 
         // ── Heikin-Ashi trend clarity ──
@@ -2790,14 +2790,16 @@
             const ccVol = computeRealizedVol(prices, adaptiveWindow);
             const ewmaVol = computeEWMAVol(prices, 0.97);
             const gkVol = computeGarmanKlassVol(history, adaptiveWindow);
-            const rawPerMinVol = 0.25 * ccVol + 0.40 * ewmaVol + 0.35 * gkVol;
+            // Cap EWMA at 1.5x realized vol to prevent momentum inflating vol estimate
+            const ewmaVolCapped = Math.min(ewmaVol, ccVol * 1.5);
+            const rawPerMinVol = 0.30 * ccVol + 0.30 * ewmaVolCapped + 0.40 * gkVol;
 
             // Vol floor: blend short/long vol to prevent underestimation near expiry
             const shortVol = computeRealizedVol(prices, Math.min(8, n - 1));
             const longVol = computeRealizedVol(prices, Math.min(60, n - 1));
             const volBlendRatio = minutesAhead / 15;
             const blendedVol = longVol * volBlendRatio + shortVol * (1 - volBlendRatio);
-            const perMinuteVol = Math.max(rawPerMinVol, blendedVol * 0.8);
+            const perMinuteVol = Math.max(rawPerMinVol, blendedVol * 0.9);
 
             // Variance-ratio-adjusted time scaling (T^H instead of sqrt(T))
             const { remainingVol: rawRemainingVol, H } = computeAdjustedRemainingVol(
@@ -2828,8 +2830,8 @@
             const priorMom = n > 6 ? (prices[n-4] - prices[n-7]) / prices[n-7] : 0;
             const momAccel = recentMom - priorMom;
 
-            // Weighted drift estimate (shorter lookbacks weighted more)
-            const rawDrift = mom3 * 0.35 + mom5 * 0.25 + vwMom5 * 0.20 + mom10 * 0.10 + emaTrend * 0.10;
+            // Weighted drift estimate — reduced short-term noise weight, more on longer lookback
+            const rawDrift = mom3 * 0.15 + mom5 * 0.20 + vwMom5 * 0.25 + mom10 * 0.25 + emaTrend * 0.15;
 
             // ────────────────────────────────────────────────────────────
             // SIGNAL 3: REGIME DETECTION
@@ -2838,18 +2840,17 @@
             const trendRegime = detectTrendRegime(prices, n);
             const ac1 = computeAutocorrelation(prices, 1);
 
-            // Adapt: mean-reverting = fade momentum, trending = amplify
-            // Tightened AC1 thresholds: ±0.15 was too loose for noisy 15-min windows
-            // Natural AC1 noise is ±0.10-0.20, so old thresholds triggered on noise
+            // Adapt: mean-reverting = fade momentum hard, trending = no boost (just trust it)
+            // AC1 thresholds tightened to ±0.35 — noise is ±0.20, avoid false triggers
             let driftMultiplier = 1.0;
-            if (ac1 < -0.25) {
-                driftMultiplier = 0.20; // mean-reverting: strong fade
-            } else if (ac1 > 0.25) {
-                driftMultiplier = 1.25; // trending: moderate amplify
+            if (ac1 < -0.35) {
+                driftMultiplier = 0.15; // mean-reverting: aggressive fade
+            } else if (ac1 > 0.35) {
+                driftMultiplier = 0.95; // trending: trust but don't amplify
             } else if (trendRegime.meanReverting) {
-                driftMultiplier = 0.4;
+                driftMultiplier = 0.25; // variance ratio says mean-reverting
             } else if (trendRegime.trending) {
-                driftMultiplier = 1.2;
+                driftMultiplier = 1.0; // no amplification — momentum is already in the signal
             }
 
             // Early period momentum bias: opening move is highly predictive in first 3 min
@@ -2910,10 +2911,11 @@
             // ────────────────────────────────────────────────────────────
             const rsi = computeRSI(prices);
             let rsiSignal = 0;
-            if (rsi > 80) rsiSignal = -0.4;
-            else if (rsi > 70) rsiSignal = -0.2;
-            else if (rsi < 20) rsiSignal = 0.4;
-            else if (rsi < 30) rsiSignal = 0.2;
+            // Lower thresholds + stronger signals for mean-reversion
+            if (rsi > 75) rsiSignal = -0.5;
+            else if (rsi > 65) rsiSignal = -0.25;
+            else if (rsi < 25) rsiSignal = 0.5;
+            else if (rsi < 35) rsiSignal = 0.25;
 
             // ────────────────────────────────────────────────────────────
             // SIGNAL 6: CANDLE PATTERNS
@@ -3030,7 +3032,7 @@
                 { value: bbSqueeze.breakoutSignal, weight: 0.04 },
                 { value: haResult.signal, weight: 0.04 },
                 { value: crossTF.signal, weight: 0.04 },
-                { value: rsiSignal, weight: 0.04 },
+                { value: rsiSignal, weight: 0.12 },
                 { value: candlePattern.signal, weight: 0.04 },
                 { value: microMRSignal, weight: 0.08 },
                 { value: breakoutSignal, weight: 0.06 },
@@ -3047,10 +3049,10 @@
             // Combine drift signals into a single z-shift (16 signals, regime-adapted)
             // Reduced drift/flow dominance, increased mean-reversion weight for balance
             const rawTotalZShift = (
-                driftZShift          * (0.16 + earlyBoost * 0.04) * immediateBoosted * regM.momentum +
+                driftZShift          * (0.10 + earlyBoost * 0.02) * immediateBoosted * regM.momentum +
                 orderFlowSignal      * (0.09 + earlyBoost * 0.04) * immediateBoosted * regM.flow +
                 tradeFlowSignal      * (0.08 + earlyBoost * 0.03) * immediateBoosted * regM.flow +
-                rsiSignal            * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.reversion +
+                rsiSignal            * (0.12 - earlyBoost * 0.02) * urgencyFade * regM.reversion +
                 candlePattern.signal * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.pattern +
                 volumeSurgeSignal    * (0.05 + earlyBoost * 0.03) * regM.volume +
                 fundingSignal        * (0.02 - earlyBoost * 0.01) * urgencyFade +
@@ -3075,8 +3077,8 @@
             const totalZShift = Math.max(-1.2, Math.min(1.2, rawTotalZShift * agreementMult));
 
             // Final probability: combine in log-odds space (mathematically correct)
-            // Scale drift contribution: 1.5x is enough — higher causes overshoot
-            const driftAdjustedProb = normCDF(zScore + totalZShift * (1 - positionalWeight) * 1.5);
+            // Scale drift contribution: 0.8x — momentum is evidence, not law
+            const driftAdjustedProb = normCDF(zScore + totalZShift * (1 - positionalWeight) * 0.8);
 
             // Log-odds combination: more principled than linear blend
             function toLogOdds(p) { return Math.log(Math.max(p, 0.001) / Math.max(1 - p, 0.001)); }
@@ -3088,9 +3090,9 @@
             // Time polarization: push probability toward 0/1 as expiry approaches
             const polarizedProb = timePolarize(combinedProb, minutesAhead);
 
-            // Soft clamp via sigmoid squeeze (smoother than hard clamp, steepness=7)
-            // Lower steepness = more moderate probability outputs (less extreme)
-            const clampedProb = 0.05 + 0.90 / (1 + Math.exp(-7 * (polarizedProb - 0.5)));
+            // Soft clamp via sigmoid squeeze — steepness reduced from 7 to 5
+            // This keeps probabilities closer to 0.5 (less overconfident)
+            const clampedProb = 0.08 + 0.84 / (1 + Math.exp(-5 * (polarizedProb - 0.5)));
 
             // Ensemble confidence: bootstrap perturbation to measure prediction robustness
             const ensConf = ensembleConfidence(zScore, totalZShift, positionalWeight, positionalProb, minutesAhead, normCDF);
@@ -3099,14 +3101,13 @@
             const bayesResult = bayesianAdjust(clampedProb, volRegime.regime, getBayesTrendLabel(trendRegime));
             let finalProb = bayesResult.adjustedProb;
 
-            // Gamma-aware confidence dampening: near strike + near expiry = genuine uncertainty
-            // When |zScore| < 1.5 and < 5 min left, pull probability toward 0.5 (pin risk)
-            // This prevents overconfident predictions when price is close to strike
-            const isNearStrike = Math.abs(zScore) < 1.5;
-            if (isNearStrike && minutesAhead < 5) {
-                const proximityFactor = 1 - Math.abs(zScore) / 1.5; // 1 at strike, 0 at 1.5σ
-                const timeFactor = (5 - minutesAhead) / 5; // 0 at 5min, 1 at 0min
-                const gammaRisk = 1 + proximityFactor * timeFactor * 0.40;
+            // Gamma-aware confidence dampening: near strike = genuine uncertainty
+            // Extended to 10 min window and 1.0σ threshold — old values (5 min, 1.5σ) were too narrow
+            const isNearStrike = Math.abs(zScore) < 1.0;
+            if (isNearStrike && minutesAhead < 10) {
+                const proximityFactor = 1 - Math.abs(zScore) / 1.0; // 1 at strike, 0 at 1.0σ
+                const timeFactor = (10 - minutesAhead) / 10; // 0 at 10min, 1 at 0min
+                const gammaRisk = 1 + proximityFactor * timeFactor * 0.50;
                 finalProb = 0.5 + (finalProb - 0.5) / gammaRisk;
             }
 
@@ -3118,7 +3119,9 @@
             // Place predicted price on correct side of strike;
             // distance reflects confidence
             const confidenceDistance = Math.abs(finalProb - 0.5) * 2; // 0-1
-            const priceOffset = adjustedRemainingVol * current * confidenceDistance * 0.5;
+            // Cap offset to 1.5x expected vol — prevents runaway predictions
+            const maxOffset = adjustedRemainingVol * current * 1.5;
+            const priceOffset = Math.min(adjustedRemainingVol * current * confidenceDistance * 0.5, maxOffset);
             const predictedPrice = predictUp
                 ? strike + Math.max(priceOffset, 0.01)
                 : strike - Math.max(priceOffset, 0.01);
@@ -3128,8 +3131,8 @@
             // Confidence for UI: sigmoid mapping — less aggressive to avoid false confidence
             const sigmoidInput = (confidenceDistance - 0.40) * 6;
             const sigmoidVal = 1 / (1 + Math.exp(-sigmoidInput));
-            const confidence = Math.max(0.20, Math.min(0.90,
-                0.30 + sigmoidVal * 0.60
+            const confidence = Math.max(0.10, Math.min(0.85,
+                0.20 + sigmoidVal * 0.60
             ));
 
             // Signal labels for UI
@@ -4579,20 +4582,20 @@
                         lockedDirection = originalPrediction.predictedPrice >= strike ? 'up' : 'down';
                     }
 
-                    // Smooth probability — lower alpha = more stable, especially near expiry
-                    // Reduced from 0.25 to 0.18 max to prevent noise from whipsawing predictions
-                    const alpha = minutesAhead <= 2 ? 0.08 : minutesAhead <= 5 ? 0.12 : 0.18;
+                    // Smooth probability — increased alpha to be more responsive to new data
+                    // Old values (0.08-0.18) locked in wrong direction too aggressively
+                    const alpha = minutesAhead <= 2 ? 0.15 : minutesAhead <= 5 ? 0.22 : 0.30;
                     if (smoothedProbability === null) {
                         smoothedProbability = rawUpdated.probability;
                     } else {
                         smoothedProbability = alpha * rawUpdated.probability + (1 - alpha) * smoothedProbability;
                     }
 
-                    // Hysteresis: require STRONG sustained signal to flip direction
-                    const flipThreshold = minutesAhead <= 2 ? 0.40
-                                        : minutesAhead <= 5 ? 0.28
-                                        : minutesAhead <= 10 ? 0.18
-                                        : 0.14;
+                    // Hysteresis: reduced thresholds — old values prevented necessary corrections
+                    const flipThreshold = minutesAhead <= 2 ? 0.25
+                                        : minutesAhead <= 5 ? 0.15
+                                        : minutesAhead <= 10 ? 0.10
+                                        : 0.08;
 
                     if (lockedDirection === 'up' && smoothedProbability < (0.5 - flipThreshold)) {
                         lockedDirection = 'down';
