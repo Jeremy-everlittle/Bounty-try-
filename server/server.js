@@ -5,6 +5,9 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
 
+const store = require('./store');
+const engine = require('./prediction-engine');
+
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -254,6 +257,28 @@ function getPeriodKey() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// PERIOD HELPERS (from frontend, now server-side)
+// ═══════════════════════════════════════════════════════════════
+
+function getPeriodStartTime() {
+    const now = new Date();
+    const mins = now.getMinutes();
+    const periodStart = Math.floor(mins / 15) * 15;
+    const t = new Date(now);
+    t.setMinutes(periodStart, 0, 0);
+    return t;
+}
+
+function getPeriodEndTime() {
+    const start = getPeriodStartTime();
+    return new Date(start.getTime() + 15 * 60 * 1000);
+}
+
+function getSecondsUntilTarget(target) {
+    return Math.max(0, Math.floor((target - Date.now()) / 1000));
+}
+
+// ═══════════════════════════════════════════════════════════════
 // MAIN FETCH LOOP — Runs every 10 seconds
 // ═══════════════════════════════════════════════════════════════
 
@@ -308,10 +333,108 @@ async function fetchAllData() {
         state.lastUpdate = new Date().toISOString();
         state.error = null;
 
+        // ═══════════════════════════════════════════════════════
+        // SERVER-SIDE PREDICTION ENGINE
+        // ═══════════════════════════════════════════════════════
+        try {
+            const currentPeriod = store.getCurrentPeriod();
+            const periodEnd = getPeriodEndTime();
+            const periodKey = getPeriodKey();
+            const minutesAhead = Math.max(1, getSecondsUntilTarget(periodEnd) / 60);
+
+            // Detect period transitions
+            if (periodKey !== currentPeriod.periodKey) {
+                // Grade previous predictions
+                if (currentPeriod.periodKey !== null && state.brtiPrice) {
+                    engine.gradeBayesianPrediction(state.brtiPrice, currentPeriod.periodKey);
+                    engine.gradePreviousPrediction(state.brtiPrice, currentPeriod.periodKey);
+                }
+
+                // New period - wait for Kalshi strike
+                if (state.kalshiStrike) {
+                    const marketData = {
+                        currentPrice: state.brtiPrice,
+                        history: state.history,
+                        orderBook: state.orderBook,
+                        recentTrades: state.recentTrades,
+                        fundingRate: state.fundingRate
+                    };
+                    const prediction = engine.handleNewPeriod(periodKey, marketData, minutesAhead, state.kalshiStrike, periodEnd);
+                    store.updateCurrentPeriod({
+                        periodKey,
+                        periodStartPrice: state.kalshiStrike,
+                        originalPrediction: prediction,
+                        updatedPrediction: null,
+                        kalshiTicker: state.kalshiTicker,
+                        kalshiCloseTime: state.kalshiCloseTime,
+                        kalshiStrike: state.kalshiStrike,
+                        isTransitioning: false
+                    });
+
+                    console.log(`Prediction: ${prediction.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(prediction.probability * 100).toFixed(1)}% | Conf=${(prediction.confidence * 100).toFixed(0)}%`);
+                } else {
+                    store.updateCurrentPeriod({
+                        periodKey,
+                        isTransitioning: true,
+                        originalPrediction: null,
+                        updatedPrediction: null,
+                        periodStartPrice: null,
+                        kalshiStrike: null
+                    });
+                }
+            } else if (currentPeriod.originalPrediction && state.kalshiStrike) {
+                // Same period - update prediction
+                const marketData = {
+                    currentPrice: state.brtiPrice,
+                    history: state.history,
+                    orderBook: state.orderBook,
+                    recentTrades: state.recentTrades,
+                    fundingRate: state.fundingRate
+                };
+                const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike);
+                store.updateCurrentPeriod({ updatedPrediction: updated });
+
+                // Compute sell signal
+                const sellSignal = engine.assessSellSignal(
+                    currentPeriod.originalPrediction, updated,
+                    state.kalshiStrike, state.brtiPrice, minutesAhead
+                );
+                store.setSellSignal(sellSignal);
+
+                // Next period preview in last 3 minutes
+                if (minutesAhead <= 3) {
+                    const preview = engine.computeNextPeriodPreview(marketData);
+                    store.setNextPeriodPreview(preview);
+                }
+
+                console.log(`Prediction: ${updated.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(updated.probability * 100).toFixed(1)}% | Conf=${(updated.confidence * 100).toFixed(0)}%`);
+            }
+
+            store.incrementPredictionCount();
+        } catch (predErr) {
+            console.error('Prediction engine error:', predErr.message);
+        }
+
         // Broadcast to all connected clients
         broadcast({
             type: 'data',
-            ...state
+            // Market data
+            brtiPrice: state.brtiPrice,
+            brtiSources: state.brtiSources,
+            kalshiStrike: state.kalshiStrike,
+            kalshiCloseTime: state.kalshiCloseTime,
+            kalshiTicker: state.kalshiTicker,
+            kalshiMarket: state.kalshiMarket,
+            history: state.history,
+            lastUpdate: state.lastUpdate,
+            periodKey: state.periodKey,
+            // Prediction data (from server!)
+            prediction: store.getCurrentPeriod(),
+            predictionLog: store.getPredictionLog(),
+            sellSignal: store.getState().sellSignal,
+            nextPeriodPreview: store.getState().nextPeriodPreview,
+            serverUptime: process.uptime(),
+            totalPredictions: store.getState().totalPredictionsMade
         });
 
         console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | ${wss.clients.size} clients`);
@@ -338,10 +461,26 @@ function broadcast(data) {
 wss.on('connection', (ws) => {
     console.log(`Client connected (total: ${wss.clients.size})`);
 
-    // Send current state immediately
+    // Send full current state including predictions immediately
     ws.send(JSON.stringify({
         type: 'data',
-        ...state
+        // Market data
+        brtiPrice: state.brtiPrice,
+        brtiSources: state.brtiSources,
+        kalshiStrike: state.kalshiStrike,
+        kalshiCloseTime: state.kalshiCloseTime,
+        kalshiTicker: state.kalshiTicker,
+        kalshiMarket: state.kalshiMarket,
+        history: state.history,
+        lastUpdate: state.lastUpdate,
+        periodKey: state.periodKey,
+        // Prediction data (from server!)
+        prediction: store.getCurrentPeriod(),
+        predictionLog: store.getPredictionLog(),
+        sellSignal: store.getState().sellSignal,
+        nextPeriodPreview: store.getState().nextPeriodPreview,
+        serverUptime: process.uptime(),
+        totalPredictions: store.getState().totalPredictionsMade
     }));
 
     ws.on('close', () => {
@@ -354,7 +493,7 @@ wss.on('connection', (ws) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// HEALTH CHECK ENDPOINT
+// API ENDPOINTS
 // ═══════════════════════════════════════════════════════════════
 
 app.get('/api/health', (req, res) => {
@@ -364,12 +503,55 @@ app.get('/api/health', (req, res) => {
         lastUpdate: state.lastUpdate,
         brtiPrice: state.brtiPrice,
         kalshiTicker: state.kalshiTicker,
-        clients: wss.clients.size
+        clients: wss.clients.size,
+        totalPredictions: store.getState().totalPredictionsMade,
+        lastPredictionTime: store.getState().lastPredictionTime,
+        predictionLogSize: store.getPredictionLog().length
     });
 });
 
 app.get('/api/state', (req, res) => {
-    res.json(state);
+    res.json({
+        ...state,
+        prediction: store.getCurrentPeriod(),
+        predictionLog: store.getPredictionLog(),
+        sellSignal: store.getState().sellSignal,
+        nextPeriodPreview: store.getState().nextPeriodPreview,
+        serverUptime: process.uptime(),
+        totalPredictions: store.getState().totalPredictionsMade
+    });
+});
+
+app.get('/api/predictions', (req, res) => {
+    res.json({
+        currentPeriod: store.getCurrentPeriod(),
+        sellSignal: store.getState().sellSignal,
+        nextPeriodPreview: store.getState().nextPeriodPreview,
+        totalPredictions: store.getState().totalPredictionsMade,
+        lastPredictionTime: store.getState().lastPredictionTime
+    });
+});
+
+app.get('/api/history', (req, res) => {
+    res.json({
+        predictionLog: store.getPredictionLog()
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// GRACEFUL SHUTDOWN — Save state on exit
+// ═══════════════════════════════════════════════════════════════
+
+process.on('SIGTERM', () => {
+    console.log('SIGTERM received, saving state...');
+    store.forceSave();
+    process.exit(0);
+});
+
+process.on('SIGINT', () => {
+    console.log('SIGINT received, saving state...');
+    store.forceSave();
+    process.exit(0);
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -377,10 +559,16 @@ app.get('/api/state', (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 3000;
+
+// Load persisted prediction state before starting
+store.load();
+
 server.listen(PORT, () => {
     console.log(`BTC Predictor server running on port ${PORT}`);
     console.log(`Frontend: http://localhost:${PORT}`);
     console.log(`Health:   http://localhost:${PORT}/api/health`);
+    console.log(`Predictions: http://localhost:${PORT}/api/predictions`);
+    console.log(`History: http://localhost:${PORT}/api/history`);
 
     // Initial fetch
     fetchAllData();
