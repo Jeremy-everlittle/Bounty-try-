@@ -66,6 +66,10 @@
         .sell-signal-urgency { margin-left: auto; font-size: 10px; font-weight: 600; opacity: 0.7; }
         .sell-signal-reason { font-size: 11px; font-weight: 500; opacity: 0.9; margin-top: 2px; }
         .sell-signal-details { font-size: 10px; font-weight: 400; opacity: 0.65; margin-top: 3px; }
+        .sell-signal-pnl { font-size: 10px; font-weight: 600; margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.1); }
+        .sell-signal-advice { font-size: 11px; font-weight: 600; margin-top: 5px; padding: 5px 8px; border-radius: 6px; background: rgba(0,0,0,0.2); }
+        .sell-hold { background: rgba(63, 185, 80, 0.12); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.3); }
+        .sell-winning { background: rgba(63, 185, 80, 0.18); color: #56d364; border: 1px solid rgba(63, 185, 80, 0.4); }
         .sell-consider_selling { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.35); }
         .sell-sell_now { background: rgba(248, 81, 73, 0.18); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.4); animation: sellPulse 1.5s ease-in-out infinite; }
         .sell-lost_cause { background: rgba(248, 81, 73, 0.25); color: #ff6b6b; border: 1px solid rgba(248, 81, 73, 0.5); animation: sellPulseUrgent 0.8s ease-in-out infinite; }
@@ -3051,74 +3055,157 @@
             const reasons = [];
             let urgency = 0;
             const betIsUp = origPred.predictedPrice >= strike;
+            const betDirection = betIsUp ? 'UP' : 'DOWN';
 
-            // Factor 1: Price on wrong side of strike
+            // Current state
             const priceAboveStrike = currentPrice >= strike;
             const onWrongSide = (betIsUp && !priceAboveStrike) || (!betIsUp && priceAboveStrike);
-            const distancePct = (Math.abs(currentPrice - strike) / strike) * 100;
+            const onRightSide = !onWrongSide;
+            const distanceFromStrike = currentPrice - strike;
+            const distancePct = (Math.abs(distanceFromStrike) / strike) * 100;
 
+            // Win probabilities
+            const probForBet = betIsUp ? updPred.probability : (1 - updPred.probability);
+            const origProbForBet = betIsUp ? origPred.probability : (1 - origPred.probability);
+
+            // Did the model flip its prediction?
+            const modelFlipped = betIsUp !== (updPred.predictedPrice >= strike);
+            const origDirection = betIsUp ? 'UP' : 'DOWN';
+            const updDirection = updPred.predictedPrice >= strike ? 'UP' : 'DOWN';
+
+            // Factor 1: Price position relative to strike
             if (onWrongSide) {
-                if (distancePct > 0.10) { urgency += 35; reasons.push('Price ' + distancePct.toFixed(3) + '% wrong side'); }
-                else if (distancePct > 0.05) { urgency += 25; reasons.push('Price drifting wrong side'); }
-                else if (distancePct > 0.02) { urgency += 15; reasons.push('Price slightly wrong side'); }
-                else { urgency += 8; reasons.push('Price marginally wrong side'); }
+                const side = betIsUp ? 'below' : 'above';
+                if (distancePct > 0.15) {
+                    urgency += 40;
+                    reasons.push('Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' + side + ' strike (' + distancePct.toFixed(3) + '% away)');
+                } else if (distancePct > 0.08) {
+                    urgency += 30;
+                    reasons.push('Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' + side + ' strike');
+                } else if (distancePct > 0.03) {
+                    urgency += 18;
+                    reasons.push('Price drifting ' + side + ' strike by $' + Math.abs(distanceFromStrike).toFixed(2));
+                } else {
+                    urgency += 8;
+                    reasons.push('Price barely ' + side + ' strike ($' + Math.abs(distanceFromStrike).toFixed(2) + ')');
+                }
             }
 
-            // Factor 2: Win probability
-            const probForBet = betIsUp ? updPred.probability : (1 - updPred.probability);
-            if (probForBet < 0.10) { urgency += 40; reasons.push('Win prob only ' + (probForBet * 100).toFixed(0) + '%'); }
-            else if (probForBet < 0.20) { urgency += 30; reasons.push('Win prob dropped to ' + (probForBet * 100).toFixed(0) + '%'); }
-            else if (probForBet < 0.30) { urgency += 20; reasons.push('Win prob at ' + (probForBet * 100).toFixed(0) + '%'); }
-            else if (probForBet < 0.40) { urgency += 10; reasons.push('Win prob weakening (' + (probForBet * 100).toFixed(0) + '%)'); }
+            // Factor 2: Win probability assessment
+            if (probForBet < 0.08) {
+                urgency += 45;
+                reasons.push('Win probability collapsed to ' + (probForBet * 100).toFixed(0) + '%');
+            } else if (probForBet < 0.15) {
+                urgency += 35;
+                reasons.push('Win probability critical: ' + (probForBet * 100).toFixed(0) + '%');
+            } else if (probForBet < 0.25) {
+                urgency += 22;
+                reasons.push('Win probability weak: ' + (probForBet * 100).toFixed(0) + '%');
+            } else if (probForBet < 0.35) {
+                urgency += 12;
+                reasons.push('Win probability softening: ' + (probForBet * 100).toFixed(0) + '%');
+            }
 
             // Factor 3: Signal opposition
             const sigs = updPred.signals;
+            let agreeing = 0, opposing = 0;
             if (sigs) {
-                let agreeing = 0, opposing = 0;
                 if (sigs.momentum === 'Bullish') { betIsUp ? agreeing++ : opposing++; }
                 else if (sigs.momentum === 'Bearish') { betIsUp ? opposing++ : agreeing++; }
                 if (sigs.trend === 'Bullish') { betIsUp ? agreeing++ : opposing++; }
                 else if (sigs.trend === 'Bearish') { betIsUp ? opposing++ : agreeing++; }
                 if (sigs.rsi === 'Overbought') { betIsUp ? opposing++ : agreeing++; }
                 else if (sigs.rsi === 'Oversold') { betIsUp ? agreeing++ : opposing++; }
-                if (opposing >= 3) { urgency += 20; reasons.push('All signals oppose bet'); }
-                else if (opposing >= 2 && agreeing === 0) { urgency += 15; reasons.push('Multiple signals oppose'); }
-                if (sigs.volatility === 'High' && onWrongSide) { urgency += 5; reasons.push('High vol amplifies risk'); }
+                if (opposing >= 3) { urgency += 20; reasons.push('All signals oppose your ' + betDirection + ' bet'); }
+                else if (opposing >= 2 && agreeing === 0) { urgency += 15; reasons.push('Multiple signals turned against ' + betDirection); }
+                if (sigs.volatility === 'High' && onWrongSide) { urgency += 5; reasons.push('High volatility amplifies loss risk'); }
             }
 
-            // Factor 4: Time pressure (only when already losing)
+            // Factor 4: Time pressure
             if (onWrongSide || probForBet < 0.35) {
-                if (minutesRemaining < 1.5) { urgency += 25; reasons.push('Under 90 seconds left'); }
-                else if (minutesRemaining < 3) { urgency += 18; reasons.push('Under 3 minutes left'); }
-                else if (minutesRemaining < 5) { urgency += 10; reasons.push('Under 5 minutes left'); }
+                if (minutesRemaining < 1) { urgency += 30; reasons.push('Under 60 seconds — no time to recover'); }
+                else if (minutesRemaining < 2) { urgency += 22; reasons.push('Under 2 min left — recovery unlikely'); }
+                else if (minutesRemaining < 3.5) { urgency += 15; reasons.push('Under 3.5 min — time running out'); }
+                else if (minutesRemaining < 5) { urgency += 8; reasons.push('Under 5 min remaining'); }
             }
 
             // Factor 5: Model flipped direction
-            if (betIsUp !== (updPred.predictedPrice >= strike)) {
-                urgency += 15;
-                reasons.push('Model predicts opposite direction');
+            if (modelFlipped) {
+                urgency += 18;
+                reasons.push('Model now predicts ' + updDirection + ' (was ' + origDirection + ')');
             }
 
             // Factor 6: Confidence collapse
-            if (origPred.confidence - updPred.confidence > 0.25) {
-                urgency += 10;
-                reasons.push('Confidence dropped significantly');
+            const confDrop = origPred.confidence - updPred.confidence;
+            if (confDrop > 0.35) {
+                urgency += 15;
+                reasons.push('Confidence crashed: ' + (origPred.confidence * 100).toFixed(0) + '% \u2192 ' + (updPred.confidence * 100).toFixed(0) + '%');
+            } else if (confDrop > 0.20) {
+                urgency += 8;
+                reasons.push('Confidence dropped: ' + (origPred.confidence * 100).toFixed(0) + '% \u2192 ' + (updPred.confidence * 100).toFixed(0) + '%');
+            }
+
+            // Factor 7: Probability trend (original vs updated)
+            const probDrop = origProbForBet - probForBet;
+            if (probDrop > 0.30) {
+                urgency += 12;
+                reasons.push('Win prob fell from ' + (origProbForBet * 100).toFixed(0) + '% to ' + (probForBet * 100).toFixed(0) + '%');
             }
 
             urgency = Math.min(100, Math.max(0, urgency));
 
-            let level, shortLabel;
-            if (urgency >= 75 || (probForBet < 0.10 && minutesRemaining < 2)) {
-                level = 'lost_cause'; shortLabel = 'LOST CAUSE';
-            } else if (urgency >= 55 || probForBet < 0.20 || (probForBet < 0.30 && minutesRemaining < 3)) {
-                level = 'sell_now'; shortLabel = 'SELL NOW';
-            } else if (urgency >= 35 || (probForBet < 0.30 && minutesRemaining < 5)) {
-                level = 'consider_selling'; shortLabel = 'CONSIDER SELLING';
+            // Determine level and messaging
+            let level, shortLabel, advice;
+            const isDeepWrongSide = onWrongSide && distancePct > 0.08;
+            const noTimeLeft = minutesRemaining < 1.5;
+
+            if (urgency >= 75 || (probForBet < 0.08 && minutesRemaining < 2.5) || (isDeepWrongSide && noTimeLeft)) {
+                level = 'lost_cause';
+                shortLabel = 'LOST CAUSE';
+                if (modelFlipped) {
+                    advice = 'Both original (' + origDirection + ') and updated (' + updDirection + ') predictions have failed. Sell immediately to cut losses.';
+                } else if (onWrongSide && noTimeLeft) {
+                    advice = 'Original ' + origDirection + ' prediction wrong — price stuck on wrong side with no time to recover. Sell now.';
+                } else {
+                    advice = 'Original ' + origDirection + ' prediction has failed. Market moved against you. Sell to minimize loss.';
+                }
+            } else if (urgency >= 55 || probForBet < 0.18 || (probForBet < 0.28 && minutesRemaining < 3)) {
+                level = 'sell_now';
+                shortLabel = 'SELL NOW';
+                if (modelFlipped) {
+                    advice = 'Updated model flipped to ' + updDirection + '. Original ' + origDirection + ' prediction losing ground — sell before it worsens.';
+                } else if (onWrongSide) {
+                    advice = 'Price on wrong side of strike. Sell to lock in remaining value before further decay.';
+                } else {
+                    advice = 'Win probability too low to justify holding. Sell to recover what you can.';
+                }
+            } else if (urgency >= 30 || (probForBet < 0.35 && minutesRemaining < 5)) {
+                level = 'consider_selling';
+                shortLabel = 'CONSIDER SELLING';
+                if (onWrongSide) {
+                    advice = 'Price slipped ' + (betIsUp ? 'below' : 'above') + ' strike. May recover, but risk is elevated.';
+                } else {
+                    advice = 'Position weakening — watch closely. Sell if probability drops further.';
+                }
+            } else if (onRightSide && probForBet >= 0.55) {
+                level = 'winning';
+                shortLabel = 'WINNING';
+                const rightSide = betIsUp ? 'above' : 'below';
+                advice = 'Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' + rightSide + ' strike. ' +
+                    (minutesRemaining < 3 ? 'Almost there — hold to close!' : 'Looking good — hold position.');
             } else {
-                level = 'hold'; shortLabel = 'HOLD';
+                level = 'hold';
+                shortLabel = 'HOLD';
+                advice = probForBet >= 0.50
+                    ? 'Position favored (' + (probForBet * 100).toFixed(0) + '% win prob). Hold.'
+                    : 'Close call (' + (probForBet * 100).toFixed(0) + '% win prob). Monitor closely.';
             }
 
-            return { level, urgency, reasons: reasons.length > 0 ? reasons : ['Position looks okay'], shortLabel, probForBet };
+            return {
+                level, urgency, reasons: reasons.length > 0 ? reasons : ['Position steady'],
+                shortLabel, probForBet, origProbForBet, advice, betDirection,
+                modelFlipped, onWrongSide, distancePct, distanceFromStrike
+            };
         }
 
         function renderSellSignal(containerId) {
@@ -3132,19 +3219,43 @@
             const minutesLeft = currentTarget ? Math.max(0, getSecondsUntilTarget(currentTarget) / 60) : 15;
             const currentPrice = latestData ? latestData.currentPrice : strike;
             const signal = assessSellSignal(originalPrediction, updatedPrediction, strike, currentPrice, minutesLeft);
-            if (!signal || signal.level === 'hold') { el.innerHTML = ''; return; }
+            if (!signal) { el.innerHTML = ''; return; }
 
-            const icons = { consider_selling: '&#9888;', sell_now: '&#9888;', lost_cause: '&#10006;' };
-            const probText = ' | ' + (signal.probForBet * 100).toFixed(0) + '% win prob';
+            const icons = {
+                winning: '&#10003;',
+                hold: '&#9679;',
+                consider_selling: '&#9888;',
+                sell_now: '&#9888;',
+                lost_cause: '&#10006;'
+            };
+
+            // P&L line: what would you gain/lose if you bought at original predicted price
+            const origPrice = originalPrediction.predictedPrice;
+            const pnlVsOrig = currentPrice - origPrice;
+            const pnlPct = (pnlVsOrig / origPrice) * 100;
+            const pnlColor = pnlVsOrig >= 0 ? '#3fb950' : '#f85149';
+            const pnlSign = pnlVsOrig >= 0 ? '+' : '';
+            const pnlLine = '<div class="sell-signal-pnl" style="color:' + pnlColor + '">' +
+                'If bought at prediction: ' + pnlSign + '$' + pnlVsOrig.toFixed(2) + ' (' + pnlSign + pnlPct.toFixed(3) + '%)' +
+                '</div>';
+
+            // Win probability bar
+            const probPct = (signal.probForBet * 100).toFixed(0);
+            const probColor = signal.probForBet >= 0.55 ? '#3fb950' : signal.probForBet >= 0.35 ? '#d29922' : '#f85149';
+
             el.innerHTML =
                 '<div class="sell-signal sell-' + signal.level + '">' +
                     '<div class="sell-signal-header">' +
                         '<span class="sell-signal-icon">' + (icons[signal.level] || '') + '</span>' +
                         '<span class="sell-signal-label">' + signal.shortLabel + '</span>' +
-                        '<span class="sell-signal-urgency">' + signal.urgency + '/100</span>' +
+                        '<span class="sell-signal-urgency" style="color:' + probColor + '">' + probPct + '% win</span>' +
                     '</div>' +
-                    '<div class="sell-signal-reason">' + signal.reasons[0] + probText + '</div>' +
-                    (signal.reasons.length > 1 ? '<div class="sell-signal-details">' + signal.reasons.slice(1).join(' &middot; ') + '</div>' : '') +
+                    '<div class="sell-signal-advice">' + signal.advice + '</div>' +
+                    (signal.reasons.length > 0 && signal.level !== 'hold' && signal.level !== 'winning'
+                        ? '<div class="sell-signal-reason">' + signal.reasons[0] + '</div>' +
+                          (signal.reasons.length > 1 ? '<div class="sell-signal-details">' + signal.reasons.slice(1).join(' &middot; ') + '</div>' : '')
+                        : '') +
+                    pnlLine +
                 '</div>';
         }
 
