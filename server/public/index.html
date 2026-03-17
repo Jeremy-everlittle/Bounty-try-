@@ -4125,9 +4125,50 @@
             }, 1000);
         }
 
-        // Price refresh — fetches new data every 500ms for real-time feel
+        // Price refresh — fetches new data every 500ms
         function startLiveRefresh() {
             setInterval(fetchAndPredict, 500);
+        }
+
+        // Fast UI ticker — re-renders current price & updated prediction every 100ms from cached data
+        function startFastUITicker() {
+            setInterval(() => {
+                if (!latestData || isTransitioning) return;
+                const data = latestData;
+                const displayStrike = kalshiStrike || periodStartPrice;
+
+                // Update current price display
+                document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
+
+                // Update price vs strike
+                const changeEl = document.getElementById('price-change-24h');
+                if (displayStrike !== null) {
+                    const strikeDelta = data.currentPrice - displayStrike;
+                    const direction = strikeDelta >= 0 ? 'Up' : 'Down';
+                    changeEl.textContent = `${direction} ${formatPrice(Math.abs(strikeDelta))} vs strike`;
+                    changeEl.style.color = strikeDelta >= 0 ? '#3fb950' : '#f85149';
+
+                    // Update period delta
+                    const deltaDollar = data.currentPrice - displayStrike;
+                    const delta = (deltaDollar / displayStrike) * 100;
+                    const deltaEl = document.getElementById('period-delta');
+                    deltaEl.textContent = `${deltaDollar >= 0 ? '+' : '-'}$${Math.abs(deltaDollar).toFixed(2)} (${delta >= 0 ? '+' : ''}${delta.toFixed(4)}%)`;
+                    deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
+                }
+
+                // Update updated prediction display
+                if (updatedPrediction && originalPrediction &&
+                    updatedPrediction.predictedPrice !== originalPrediction.predictedPrice) {
+                    document.getElementById('updated-predicted-price').textContent = formatPrice(updatedPrediction.predictedPrice);
+                    const updChangeDollar = updatedPrediction.predictedPrice - periodStartPrice;
+                    const updChangePct = (updChangeDollar / periodStartPrice) * 100;
+                    renderChangeTag(updChangePct, 'updated-predicted-change', updChangeDollar);
+
+                    const updConf = Math.round(updatedPrediction.confidence * 100);
+                    document.getElementById('updated-confidence-fill').style.width = updConf + '%';
+                    document.getElementById('updated-confidence-value').textContent = updConf + '%';
+                }
+            }, 100);
         }
 
         // Handle resize
@@ -4144,6 +4185,7 @@
         fetchAndPredict();
         startCountdown();
         startLiveRefresh();
+        startFastUITicker();
     </script>
 </body>
 </html>
