@@ -16,6 +16,8 @@ const microState = {
     deltaHistory: [],
     spreadHistory: [],
     vpinBucketSize: 0,
+    // Kyle's Lambda (price impact) tracking
+    lambdaHistory: [],  // [{timestamp, priceChange, signedVolume}]
 };
 
 // Anti-flip-flop state for updated predictions (persists within a period)
@@ -374,6 +376,46 @@ function computeSpreadAnalysis(orderBook) {
     volAdjustment = Math.max(0.7, Math.min(1.5, volAdjustment));
     const signal = spreadRatio < 0.8 ? 0.15 : spreadRatio > 1.5 ? -0.1 : 0;
     return { spreadBps, spreadRatio, volAdjustment, signal };
+}
+
+// ── Kyle's Lambda: price impact per unit of order flow ──
+// Rising lambda = liquidity thinning = trend fragile = reversal imminent
+// Research: lambda Z-score > 1.5 during trending = high-confidence exhaustion signal
+function computeKyleLambda(trades, prices) {
+    if (!trades || trades.length < 20 || !prices || prices.length < 5) {
+        return { lambda: 0, lambdaZScore: 0, liquidityThinning: false };
+    }
+    const cutoff = Date.now() - 120000; // last 2 minutes
+    let signedVolume = 0;
+    for (const t of trades) {
+        if (t.T < cutoff) continue;
+        const qty = parseFloat(t.q);
+        if (t.m) signedVolume -= qty; else signedVolume += qty;
+    }
+    const n = prices.length;
+    const priceChange = n > 2 ? (prices[n-1] - prices[n-3]) / prices[n-3] : 0;
+
+    // Lambda = price change / signed volume (price impact per unit flow)
+    const lambda = Math.abs(signedVolume) > 0.001 ? Math.abs(priceChange) / Math.abs(signedVolume) : 0;
+
+    const lh = microState.lambdaHistory;
+    lh.push({ timestamp: Date.now(), lambda });
+    while (lh.length > 30) lh.shift();
+
+    // Z-score of current lambda relative to recent history
+    let lambdaZScore = 0;
+    if (lh.length >= 5) {
+        const vals = lh.map(l => l.lambda);
+        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+        const variance = vals.reduce((s, v) => s + (v - mean) ** 2, 0) / vals.length;
+        const std = Math.sqrt(variance);
+        if (std > 0) lambdaZScore = (lambda - mean) / std;
+    }
+
+    // Liquidity thinning: lambda z-score > 1.5 means each unit of flow moves price much more
+    const liquidityThinning = lambdaZScore > 1.5;
+
+    return { lambda, lambdaZScore, liquidityThinning };
 }
 
 function computeCVD(trades) {
@@ -1439,6 +1481,7 @@ function predictPrice(marketData, minutesAhead, strike) {
 
     let tradeFlowSignal = 0;
     let vpinVolAdjust = 1.0;
+    let lambdaVolAdjust = 1.0;
     if (recentTrades && recentTrades.length > 0) {
         const clustering = computeTradeSizeClustering(recentTrades);
         const rawFlow = computeTradeFlowImbalance(recentTrades);
@@ -1448,11 +1491,19 @@ function predictPrice(marketData, minutesAhead, strike) {
         // VPIN Granger-causes price jumps (research) — strongest microstructure signal
         // More aggressive vol boost: VPIN > 0.35 starts affecting, > 0.6 = major stress
         if (vpin.vpin > 0.35) vpinVolAdjust = 1.0 + (vpin.vpin - 0.35) * 0.8;
+
+        // Kyle's Lambda: price impact rising = liquidity thinning = trend fragile
+        const kyleLambda = computeKyleLambda(recentTrades, prices);
+        if (kyleLambda.liquidityThinning) {
+            // When liquidity is thinning, boost vol estimate (wider uncertainty)
+            // and dampen momentum signals (trend is on fumes)
+            lambdaVolAdjust = 1.0 + Math.min(0.3, (kyleLambda.lambdaZScore - 1.5) * 0.15);
+        }
     }
 
     // Flow agreement boost removed — order flow decays to noise at 15-min horizon
 
-    const microVolAdjust = spreadVolAdjust * vpinVolAdjust * oiSignal.volMultiplier;
+    const microVolAdjust = spreadVolAdjust * vpinVolAdjust * lambdaVolAdjust * oiSignal.volMultiplier;
     const adjustedRemainingVol = remainingVol * microVolAdjust;
     const driftWithEarlyBias = minutesIntoPeriod <= 3 ? rawDrift * 0.75 + earlyMomentumSignal * 0.25 : rawDrift;
     const adjustedDrift = driftWithEarlyBias * driftMultiplier;
