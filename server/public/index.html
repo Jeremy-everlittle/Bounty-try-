@@ -4125,9 +4125,9 @@
             }, 1000);
         }
 
-        // Price refresh — fetches new data every 15 seconds for a live feel
+        // Price refresh — fetches new data every 500ms for real-time feel
         function startLiveRefresh() {
-            setInterval(fetchAndPredict, 15000);
+            setInterval(fetchAndPredict, 500);
         }
 
         // Handle resize

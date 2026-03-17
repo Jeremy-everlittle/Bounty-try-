@@ -586,6 +586,6 @@ server.listen(PORT, () => {
     // Initial fetch
     fetchAllData();
 
-    // Fetch every 10 seconds
-    setInterval(fetchAllData, 10000);
+    // Fetch every 5 seconds for fresher data
+    setInterval(fetchAllData, 5000);
 });
