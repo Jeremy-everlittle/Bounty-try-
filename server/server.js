@@ -9,16 +9,13 @@ const { execSync } = require('child_process');
 const store = require('./store');
 const engine = require('./prediction-engine');
 
-// Build version info at startup
-const BUILD_VERSION = (() => {
-    try {
-        const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim();
-        const date = execSync('git log -1 --format=%ci', { cwd: __dirname }).toString().trim();
-        return { hash, date, startedAt: new Date().toISOString() };
-    } catch (e) {
-        return { hash: 'unknown', date: 'unknown', startedAt: new Date().toISOString() };
-    }
-})();
+// Build version — updated each commit (Railway has no .git dir)
+const BUILD_VERSION = {
+    hash: process.env.RAILWAY_GIT_COMMIT_SHA
+        ? process.env.RAILWAY_GIT_COMMIT_SHA.substring(0, 7)
+        : (() => { try { return execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); } catch(e) { return 'dev'; } })(),
+    startedAt: new Date().toISOString()
+};
 
 const app = express();
 const server = http.createServer(app);
