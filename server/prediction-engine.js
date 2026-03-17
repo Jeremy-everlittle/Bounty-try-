@@ -1284,11 +1284,30 @@ function predictPrice(marketData, minutesAhead, strike) {
         finalProb = 0.5 + (finalProb - 0.5) / gammaRisk;
     }
 
+    // Apply self-learned corrections from error analysis
+    const learned = getLearnedCorrections();
+    // Overconfidence correction: dampen probability toward 0.5
+    if (learned.overconfidenceRatio !== 1.0) {
+        finalProb = 0.5 + (finalProb - 0.5) * learned.overconfidenceRatio;
+    }
+    // Direction bias correction
+    if (learned.directionBias !== 0) {
+        finalProb += learned.directionBias;
+        finalProb = Math.max(0.05, Math.min(0.95, finalProb));
+    }
+    // Vol regime correction from learned patterns
+    if (learned.volRegimeMultiplier[volRegime.regime] && learned.volRegimeMultiplier[volRegime.regime] !== 1.0) {
+        // Widen/narrow probability based on learned vol correction
+        const volCorr = learned.volRegimeMultiplier[volRegime.regime];
+        finalProb = 0.5 + (finalProb - 0.5) / volCorr;
+    }
+
     // Construct output
     const predictUp = finalProb > 0.5;
     const confidenceDistance = Math.abs(finalProb - 0.5) * 2;
     // Anchor to current price (martingale property) with small drift
-    const maxDrift = adjustedRemainingVol * settlementVolAdj * current * 0.15;
+    const priceScale = learned.priceErrorScale || 1.0;
+    const maxDrift = adjustedRemainingVol * settlementVolAdj * current * 0.15 * priceScale;
     const drift = maxDrift * confidenceDistance;
     const predictedPrice = predictUp ? current + Math.max(drift, 0.01) : current - Math.max(drift, 0.01);
     const changePercent = ((predictedPrice - current) / current) * 100;
@@ -1528,6 +1547,7 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
 
 function gradeBayesianPrediction(currentPrice, periodKey) {
     let updated = false;
+    let gradedRecord = null;
     store.updateBayesianState(bs => {
         for (let i = bs.records.length - 1; i >= 0; i--) {
             const rec = bs.records[i];
@@ -1546,10 +1566,15 @@ function gradeBayesianPrediction(currentPrice, periodKey) {
                 bs.timeBeta[rec.timeBucket] = betaUpdate(bs.timeBeta[rec.timeBucket], success);
             if (rec.calibrationBin !== undefined && bs.calibrationBins[rec.calibrationBin])
                 bs.calibrationBins[rec.calibrationBin] = betaUpdate(bs.calibrationBins[rec.calibrationBin], success);
+            gradedRecord = { ...rec };
             updated = true;
             break;
         }
     });
+    // Feed graded record to self-learning error analysis
+    if (gradedRecord) {
+        try { analyzeAndLearn(gradedRecord); } catch(e) { console.error('Error analysis failed:', e.message); }
+    }
     return updated;
 }
 
@@ -1590,6 +1615,244 @@ function computeNextPeriodPreview(marketData) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// SELF-LEARNING ERROR ANALYSIS
+// Analyzes each graded prediction, identifies error patterns,
+// and computes adaptive corrections to improve future predictions.
+// ═══════════════════════════════════════════════════════════════
+
+const ERROR_LOG_FILE = require('path').join(__dirname, 'data', 'error-analysis.log');
+
+function logErrorAnalysis(message) {
+    const timestamp = new Date().toISOString();
+    const line = `[${timestamp}] ${message}\n`;
+    try {
+        require('fs').appendFileSync(ERROR_LOG_FILE, line);
+    } catch(e) { /* ignore file errors */ }
+    console.log(`[ErrorAnalysis] ${message}`);
+}
+
+function getDistanceBucket(distancePct) {
+    if (distancePct < 0.05) return 'near_0-0.05%';
+    if (distancePct < 0.15) return 'close_0.05-0.15%';
+    if (distancePct < 0.30) return 'mid_0.15-0.30%';
+    return 'far_0.30%+';
+}
+
+function getHourBucket(timestamp) {
+    const h = new Date(timestamp).getUTCHours();
+    if (h < 6) return 'asia_0-6';
+    if (h < 12) return 'europe_6-12';
+    if (h < 18) return 'us_12-18';
+    return 'evening_18-24';
+}
+
+function analyzeAndLearn(gradedRecord) {
+    // gradedRecord: { periodKey, startPrice, predictedPrice, predictedDirection,
+    //                 rawProbability, volRegime, trendRegime, timestamp,
+    //                 actualPrice, actualDirection, correct }
+    if (!gradedRecord || gradedRecord.actualPrice === null) return;
+
+    const priceError = Math.abs(gradedRecord.predictedPrice - gradedRecord.actualPrice);
+    const pricePct = (priceError / gradedRecord.actualPrice) * 100;
+    const directionCorrect = gradedRecord.correct;
+    const distanceFromStrike = Math.abs(gradedRecord.startPrice - gradedRecord.actualPrice) / gradedRecord.startPrice * 100;
+    const distanceBucket = getDistanceBucket(distanceFromStrike);
+    const hourBucket = getHourBucket(gradedRecord.timestamp);
+    const probError = directionCorrect ? 0 : Math.abs(gradedRecord.rawProbability - 0.5) * 2;
+
+    // Compute how overconfident/underconfident we were
+    const confidenceLevel = Math.abs(gradedRecord.rawProbability - 0.5) * 2; // 0-1
+    const wasOverconfident = !directionCorrect && confidenceLevel > 0.3;
+    const wasUnderconfident = directionCorrect && confidenceLevel < 0.2;
+
+    const record = {
+        periodKey: gradedRecord.periodKey,
+        timestamp: gradedRecord.timestamp,
+        startPrice: gradedRecord.startPrice,
+        predictedPrice: gradedRecord.predictedPrice,
+        actualPrice: gradedRecord.actualPrice,
+        priceError, pricePct,
+        predictedDirection: gradedRecord.predictedDirection,
+        actualDirection: gradedRecord.actualDirection,
+        directionCorrect,
+        rawProbability: gradedRecord.rawProbability,
+        probError, confidenceLevel,
+        wasOverconfident, wasUnderconfident,
+        volRegime: gradedRecord.volRegime,
+        trendRegime: gradedRecord.trendRegime,
+        distanceBucket, hourBucket
+    };
+
+    store.updateErrorAnalysis(ea => {
+        ea.records.push(record);
+        ea.totalAnalyzed++;
+
+        // Update patterns
+        const p = ea.patterns;
+
+        // By vol regime
+        if (!p.byVolRegime[record.volRegime]) {
+            p.byVolRegime[record.volRegime] = { totalError: 0, count: 0, correctCount: 0, overconfidentCount: 0 };
+        }
+        const vr = p.byVolRegime[record.volRegime];
+        vr.totalError += priceError;
+        vr.count++;
+        if (directionCorrect) vr.correctCount++;
+        if (wasOverconfident) vr.overconfidentCount++;
+
+        // By trend regime
+        if (!p.byTrendRegime[record.trendRegime]) {
+            p.byTrendRegime[record.trendRegime] = { totalError: 0, count: 0, correctCount: 0, overconfidentCount: 0 };
+        }
+        const tr = p.byTrendRegime[record.trendRegime];
+        tr.totalError += priceError;
+        tr.count++;
+        if (directionCorrect) tr.correctCount++;
+        if (wasOverconfident) tr.overconfidentCount++;
+
+        // By time of day
+        if (!p.byTimeOfDay[hourBucket]) {
+            p.byTimeOfDay[hourBucket] = { totalError: 0, count: 0, correctCount: 0 };
+        }
+        const tod = p.byTimeOfDay[hourBucket];
+        tod.totalError += priceError;
+        tod.count++;
+        if (directionCorrect) tod.correctCount++;
+
+        // By distance from strike
+        if (!p.byDistanceBucket[distanceBucket]) {
+            p.byDistanceBucket[distanceBucket] = { totalError: 0, count: 0, correctCount: 0 };
+        }
+        const db = p.byDistanceBucket[distanceBucket];
+        db.totalError += priceError;
+        db.count++;
+        if (directionCorrect) db.correctCount++;
+
+        // By direction
+        const dir = p.byDirection[record.predictedDirection] ||
+            { totalError: 0, count: 0, correctCount: 0 };
+        dir.totalError += priceError;
+        dir.count++;
+        if (directionCorrect) dir.correctCount++;
+        p.byDirection[record.predictedDirection] = dir;
+
+        // Recompute adaptive corrections every 10 records
+        if (ea.totalAnalyzed % 10 === 0 && ea.records.length >= 10) {
+            recomputeCorrections(ea);
+        }
+
+        ea.lastAnalysis = Date.now();
+    });
+
+    // Log to file
+    const emoji = directionCorrect ? 'OK' : 'WRONG';
+    logErrorAnalysis(
+        `${emoji} | Period=${gradedRecord.periodKey} | ` +
+        `Predicted=${gradedRecord.predictedDirection.toUpperCase()} Actual=${gradedRecord.actualDirection.toUpperCase()} | ` +
+        `PriceErr=$${priceError.toFixed(2)} (${pricePct.toFixed(3)}%) | ` +
+        `Prob=${(gradedRecord.rawProbability*100).toFixed(1)}% Conf=${(confidenceLevel*100).toFixed(0)}% | ` +
+        `Vol=${gradedRecord.volRegime} Trend=${gradedRecord.trendRegime} | ` +
+        `${wasOverconfident ? 'OVERCONFIDENT' : wasUnderconfident ? 'UNDERCONFIDENT' : 'calibrated'}`
+    );
+}
+
+function recomputeCorrections(ea) {
+    const recent = ea.records.slice(-50); // last 50 predictions
+    if (recent.length < 10) return;
+
+    const c = ea.corrections;
+
+    // 1. Overconfidence ratio: if we're often wrong when confident, dampen
+    const confidentWrong = recent.filter(r => r.wasOverconfident).length;
+    const confidentTotal = recent.filter(r => r.confidenceLevel > 0.3).length;
+    if (confidentTotal > 5) {
+        const overconfRate = confidentWrong / confidentTotal;
+        // Target: < 30% wrong when confident. If higher, dampen.
+        if (overconfRate > 0.40) {
+            c.overconfidenceRatio = Math.max(0.5, c.overconfidenceRatio * 0.95);
+        } else if (overconfRate < 0.20) {
+            c.overconfidenceRatio = Math.min(1.5, c.overconfidenceRatio * 1.02);
+        }
+    }
+
+    // 2. Direction bias: if we systematically predict one direction too much
+    const upPreds = recent.filter(r => r.predictedDirection === 'up');
+    const downPreds = recent.filter(r => r.predictedDirection === 'down');
+    const upAccuracy = upPreds.length > 3 ? upPreds.filter(r => r.directionCorrect).length / upPreds.length : 0.5;
+    const downAccuracy = downPreds.length > 3 ? downPreds.filter(r => r.directionCorrect).length / downPreds.length : 0.5;
+    c.directionBias = (upAccuracy - downAccuracy) * 0.1; // small correction
+
+    // 3. Vol regime corrections: if we're worse in certain regimes
+    for (const [regime, stats] of Object.entries(ea.patterns.byVolRegime)) {
+        if (stats.count < 5) continue;
+        const avgError = stats.totalError / stats.count;
+        const accuracy = stats.correctCount / stats.count;
+        // If accuracy is low in this regime, boost vol (widen uncertainty)
+        if (accuracy < 0.45) {
+            c.volRegimeMultiplier[regime] = 1.15; // widen vol by 15%
+        } else if (accuracy > 0.65) {
+            c.volRegimeMultiplier[regime] = 0.95; // slightly tighten
+        } else {
+            c.volRegimeMultiplier[regime] = 1.0;
+        }
+    }
+
+    // 4. Price error scaling: if our predicted prices are systematically too far/close
+    const avgPriceError = recent.reduce((s, r) => s + r.pricePct, 0) / recent.length;
+    const medianMove = recent.reduce((s, r) => s + Math.abs(r.actualPrice - r.startPrice) / r.startPrice * 100, 0) / recent.length;
+    if (medianMove > 0.01) {
+        // If our error is much larger than typical moves, scale down predictions
+        const errorRatio = avgPriceError / medianMove;
+        if (errorRatio > 1.5) c.priceErrorScale = Math.max(0.3, c.priceErrorScale * 0.9);
+        else if (errorRatio < 0.8) c.priceErrorScale = Math.min(2.0, c.priceErrorScale * 1.05);
+    }
+
+    logErrorAnalysis(
+        `CORRECTIONS UPDATED (n=${recent.length}): ` +
+        `overconfRatio=${c.overconfidenceRatio.toFixed(3)} | ` +
+        `dirBias=${c.directionBias.toFixed(4)} | ` +
+        `priceScale=${c.priceErrorScale.toFixed(3)} | ` +
+        `volRegime=${JSON.stringify(c.volRegimeMultiplier)} | ` +
+        `upAcc=${(upAccuracy*100).toFixed(0)}% downAcc=${(downAccuracy*100).toFixed(0)}%`
+    );
+}
+
+// Get learned corrections for use in predictPrice
+function getLearnedCorrections() {
+    const ea = store.getErrorAnalysis();
+    if (!ea || !ea.corrections) {
+        return { overconfidenceRatio: 1.0, directionBias: 0, priceErrorScale: 1.0, volRegimeMultiplier: {} };
+    }
+    return ea.corrections;
+}
+
+// Generate a human-readable error analysis summary
+function getErrorSummary() {
+    const ea = store.getErrorAnalysis();
+    if (!ea || ea.totalAnalyzed < 5) {
+        return { message: 'Insufficient data for analysis (need 5+ graded predictions)', totalAnalyzed: ea ? ea.totalAnalyzed : 0 };
+    }
+
+    const recent = ea.records.slice(-50);
+    const accuracy = recent.filter(r => r.directionCorrect).length / recent.length;
+    const avgPriceError = recent.reduce((s, r) => s + r.priceError, 0) / recent.length;
+    const avgPricePct = recent.reduce((s, r) => s + r.pricePct, 0) / recent.length;
+    const overconfRate = recent.filter(r => r.wasOverconfident).length / recent.length;
+
+    return {
+        totalAnalyzed: ea.totalAnalyzed,
+        recentCount: recent.length,
+        directionAccuracy: accuracy,
+        avgPriceError: avgPriceError,
+        avgPricePctError: avgPricePct,
+        overconfidenceRate: overconfRate,
+        patterns: ea.patterns,
+        corrections: ea.corrections,
+        message: `Direction accuracy: ${(accuracy*100).toFixed(1)}% | Avg error: $${avgPriceError.toFixed(2)} (${avgPricePct.toFixed(3)}%) | Overconfident: ${(overconfRate*100).toFixed(0)}%`
+    };
+}
+
 module.exports = {
     predictPrice,
     handleNewPeriod,
@@ -1597,5 +1860,8 @@ module.exports = {
     gradeBayesianPrediction,
     gradePreviousPrediction,
     assessSellSignal,
-    computeNextPeriodPreview
+    computeNextPeriodPreview,
+    analyzeAndLearn,
+    getLearnedCorrections,
+    getErrorSummary
 };

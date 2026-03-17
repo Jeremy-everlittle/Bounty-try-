@@ -56,6 +56,30 @@ function createDefaultState() {
         // Sell signal
         sellSignal: null,
 
+        // Self-learning error analysis log
+        errorAnalysis: {
+            // Rolling window of detailed error records
+            records: [],
+            // Aggregated error patterns by category
+            patterns: {
+                byVolRegime: {},     // avg error by vol regime
+                byTrendRegime: {},   // avg error by trend regime
+                byTimeOfDay: {},     // avg error by hour bucket
+                byDistanceBucket: {},// avg error by distance-from-strike bucket
+                byDirection: { up: { totalError: 0, count: 0, correctCount: 0 },
+                              down: { totalError: 0, count: 0, correctCount: 0 } }
+            },
+            // Adaptive corrections learned from errors
+            corrections: {
+                volRegimeMultiplier: {},   // per-regime vol scaling
+                directionBias: 0,          // systematic direction bias
+                overconfidenceRatio: 1.0,  // how much to dampen confidence
+                priceErrorScale: 1.0       // predicted price error scaling
+            },
+            lastAnalysis: null,
+            totalAnalyzed: 0
+        },
+
         // Server uptime tracking
         serverStartTime: Date.now(),
         lastPredictionTime: null,
@@ -171,10 +195,25 @@ function incrementPredictionCount() {
     state.lastPredictionTime = Date.now();
 }
 
+function getErrorAnalysis() { return state.errorAnalysis; }
+
+function updateErrorAnalysis(updater) {
+    if (!state.errorAnalysis) {
+        state.errorAnalysis = createDefaultState().errorAnalysis;
+    }
+    updater(state.errorAnalysis);
+    // Keep records bounded
+    if (state.errorAnalysis.records.length > 500) {
+        state.errorAnalysis.records = state.errorAnalysis.records.slice(-500);
+    }
+    save();
+}
+
 module.exports = {
     load, save, forceSave, getState,
     getPredictionLog, getBayesianState, getCurrentPeriod,
     updateCurrentPeriod, recordPrediction, updatePredictionLog,
     updateBayesianState, setNextPeriodPreview, setSellSignal,
-    incrementPredictionCount
+    incrementPredictionCount,
+    getErrorAnalysis, updateErrorAnalysis
 };

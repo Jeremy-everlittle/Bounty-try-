@@ -482,7 +482,9 @@ async function fetchAllData() {
             nextPeriodPreview: store.getState().nextPeriodPreview,
             serverUptime: process.uptime(),
             serverVersion: BUILD_VERSION.hash,
-            totalPredictions: store.getState().totalPredictionsMade
+            totalPredictions: store.getState().totalPredictionsMade,
+            errorAnalysis: engine.getErrorSummary(),
+            learnedCorrections: engine.getLearnedCorrections()
         });
 
         console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | ${wss.clients.size} clients`);
@@ -528,8 +530,10 @@ wss.on('connection', (ws) => {
         sellSignal: store.getState().sellSignal,
         nextPeriodPreview: store.getState().nextPeriodPreview,
         serverUptime: process.uptime(),
-            serverVersion: BUILD_VERSION.hash,
-        totalPredictions: store.getState().totalPredictionsMade
+        serverVersion: BUILD_VERSION.hash,
+        totalPredictions: store.getState().totalPredictionsMade,
+        errorAnalysis: engine.getErrorSummary(),
+        learnedCorrections: engine.getLearnedCorrections()
     }));
 
     ws.on('close', () => {
@@ -568,8 +572,10 @@ app.get('/api/state', (req, res) => {
         sellSignal: store.getState().sellSignal,
         nextPeriodPreview: store.getState().nextPeriodPreview,
         serverUptime: process.uptime(),
-            serverVersion: BUILD_VERSION.hash,
-        totalPredictions: store.getState().totalPredictionsMade
+        serverVersion: BUILD_VERSION.hash,
+        totalPredictions: store.getState().totalPredictionsMade,
+        errorAnalysis: engine.getErrorSummary(),
+        learnedCorrections: engine.getLearnedCorrections()
     });
 });
 
@@ -587,6 +593,14 @@ app.get('/api/history', (req, res) => {
     res.json({
         predictionLog: store.getPredictionLog()
     });
+});
+
+app.get('/api/error-analysis', (req, res) => {
+    res.json(engine.getErrorSummary());
+});
+
+app.get('/api/learned-corrections', (req, res) => {
+    res.json(engine.getLearnedCorrections());
 });
 
 // ═══════════════════════════════════════════════════════════════
