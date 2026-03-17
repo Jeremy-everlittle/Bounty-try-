@@ -3861,24 +3861,56 @@
             const signal = assessPreBuy(strike, currentPrice, minutesLeft);
             if (!signal) { el.innerHTML = ''; return; }
 
+            // Server-side bet quality gate — override if available
+            const bq = serverData && serverData.betQuality ? serverData.betQuality : null;
+            let qualityOverride = null;
+            if (bq) {
+                if (!bq.shouldBet && signal.level === 'buy_now') {
+                    qualityOverride = {
+                        level: bq.waitForBetter ? 'wait' : 'skip',
+                        shortLabel: bq.waitForBetter ? 'WAIT' : 'SKIP',
+                        reason: bq.reason
+                    };
+                }
+            }
+
+            const finalLevel = qualityOverride ? qualityOverride.level : signal.level;
+            const finalLabel = qualityOverride ? qualityOverride.shortLabel : signal.shortLabel;
+
             const icons = { buy_now: '&#9650;', wait: '&#9679;', skip: '&#10006;' };
             const dirBg = signal.direction === 'UP' ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
 
+            // Quality bar showing edge strength
+            let qualityBar = '';
+            if (bq) {
+                const edgePct = (bq.edge * 100).toFixed(1);
+                const qPct = (bq.quality * 100).toFixed(0);
+                const qColor = bq.quality >= 0.7 ? '#3fb950' : bq.quality >= 0.55 ? '#d29922' : '#f85149';
+                qualityBar =
+                    '<div class="prebuy-metrics" style="margin-top:4px">' +
+                        '<span class="prebuy-metric" style="color:' + qColor + '">Quality: ' + qPct + '%</span>' +
+                        '<span class="prebuy-metric">Edge: ' + edgePct + '%</span>' +
+                        (bq.choppiness && bq.choppiness.choppy ? '<span class="prebuy-metric" style="color:#d29922">Choppy</span>' : '') +
+                        (bq.exhaustion && bq.exhaustion.exhaustion > 0.3 ? '<span class="prebuy-metric" style="color:#d29922">Exhausted</span>' : '') +
+                    '</div>';
+            }
+
             el.innerHTML =
-                '<div class="prebuy-signal prebuy-' + signal.level + '">' +
+                '<div class="prebuy-signal prebuy-' + finalLevel + '">' +
                     '<div class="prebuy-header">' +
-                        '<span style="font-size:16px">' + (icons[signal.level] || '') + '</span>' +
-                        '<span class="prebuy-label">' + signal.shortLabel + '</span>' +
+                        '<span style="font-size:16px">' + (icons[finalLevel] || '') + '</span>' +
+                        '<span class="prebuy-label">' + finalLabel + '</span>' +
                         '<span class="prebuy-direction" style="background:' + dirBg + ';color:' + signal.dirColor + '">' +
                             signal.direction + ' ' + (signal.probForBet * 100).toFixed(0) + '%</span>' +
                     '</div>' +
-                    '<div class="prebuy-advice">' + signal.advice + '</div>' +
+                    '<div class="prebuy-advice">' + (qualityOverride ? qualityOverride.reason : signal.advice) + '</div>' +
                     '<div class="prebuy-metrics">' +
                         '<span class="prebuy-metric">Conf: ' + (signal.confidence * 100).toFixed(0) + '%</span>' +
                         '<span class="prebuy-metric">Signals: ' + signal.signalScore + '/3</span>' +
                         '<span class="prebuy-metric">Time: ' + signal.minutesRemaining.toFixed(0) + 'm</span>' +
                         '<span class="prebuy-metric">Vol: ' + signal.remainingVolPct.toFixed(3) + '%</span>' +
                     '</div>' +
+                    qualityBar +
                     (signal.reasons.length > 0
                         ? '<div class="sell-signal-details" style="margin-top:4px">' + signal.reasons.join(' · ') + '</div>'
                         : '') +
@@ -3896,10 +3928,14 @@
             // Only show sell signal if user has a position
             if (!myPosition) { el.innerHTML = ''; return; }
 
-            const strike = kalshiStrike || periodStartPrice;
-            const minutesLeft = currentTarget ? Math.max(0, getSecondsUntilTarget(currentTarget) / 60) : 15;
-            const currentPrice = latestData ? latestData.currentPrice : strike;
-            const signal = assessSellSignal(originalPrediction, updatedPrediction, strike, currentPrice, minutesLeft);
+            // Prefer server-side sell signal (has momentum exhaustion, prob velocity, etc.)
+            let signal = serverData && serverData.sellSignal ? serverData.sellSignal : null;
+            if (!signal) {
+                const strike = kalshiStrike || periodStartPrice;
+                const minutesLeft = currentTarget ? Math.max(0, getSecondsUntilTarget(currentTarget) / 60) : 15;
+                const currentPrice = latestData ? latestData.currentPrice : strike;
+                signal = assessSellSignal(originalPrediction, updatedPrediction, strike, currentPrice, minutesLeft);
+            }
             if (!signal) { el.innerHTML = ''; return; }
 
             const icons = {
@@ -3931,6 +3967,32 @@
                     '</div>';
             }
 
+            // NEW: Probability velocity / exhaustion info line
+            let velocityLine = '';
+            if (signal.probVelocity) {
+                const pv = signal.probVelocity;
+                if (pv.trend === 'collapsing') {
+                    velocityLine = '<div class="sell-signal-details" style="color:#f85149">Prob velocity: COLLAPSING</div>';
+                } else if (pv.trend === 'deteriorating') {
+                    velocityLine = '<div class="sell-signal-details" style="color:#d29922">Prob velocity: declining</div>';
+                } else if (pv.trend === 'improving' && signal.level === 'hold') {
+                    velocityLine = '<div class="sell-signal-details" style="color:#3fb950">Prob velocity: improving</div>';
+                }
+            }
+
+            let exhaustionLine = '';
+            if (signal.exhaustion && signal.exhaustion.score > 0.3) {
+                const exColor = signal.exhaustion.score > 0.6 ? '#f85149' : '#d29922';
+                exhaustionLine = '<div class="sell-signal-details" style="color:' + exColor + '">' +
+                    'Momentum exhaustion: ' + (signal.exhaustion.score * 100).toFixed(0) + '% (' + signal.exhaustion.type + ')</div>';
+            }
+
+            let peakLine = '';
+            if (signal.peakProb && signal.peakProb > 0.65 && signal.probForBet < signal.peakProb - 0.1) {
+                peakLine = '<div class="sell-signal-details" style="color:#d29922">' +
+                    'Peak: ' + (signal.peakProb * 100).toFixed(0) + '% &rarr; now ' + probPct + '%</div>';
+            }
+
             el.innerHTML =
                 '<div class="sell-signal sell-' + signal.level + '">' +
                     '<div class="sell-signal-header">' +
@@ -3939,7 +4001,7 @@
                         '<span class="sell-signal-urgency" style="color:' + probColor + '">' + probPct + '% win</span>' +
                     '</div>' +
                     '<div class="sell-signal-advice">' + signal.advice + '</div>' +
-                    recoveryLine +
+                    recoveryLine + velocityLine + exhaustionLine + peakLine +
                     (signal.reasons.length > 0 && signal.level !== 'hold' && signal.level !== 'winning' && signal.level !== 'strong_hold'
                         ? '<div class="sell-signal-reason">' + signal.reasons[0] + '</div>' +
                           (signal.reasons.length > 1 ? '<div class="sell-signal-details">' + signal.reasons.slice(1).join(' &middot; ') + '</div>' : '')

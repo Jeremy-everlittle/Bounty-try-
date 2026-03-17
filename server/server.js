@@ -418,7 +418,9 @@ async function fetchAllData() {
                         isTransitioning: false
                     });
 
-                    console.log(`Prediction: ${prediction.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(prediction.probability * 100).toFixed(1)}% | Conf=${(prediction.confidence * 100).toFixed(0)}%`);
+                    const bq = prediction._betQuality;
+                    const qualStr = bq ? (bq.shouldBet ? 'BET' : 'SKIP') + ' (Q=' + (bq.quality*100).toFixed(0) + '% E=' + (bq.edge*100).toFixed(1) + '%)' : '';
+                    console.log(`Prediction: ${prediction.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(prediction.probability * 100).toFixed(1)}% | Conf=${(prediction.confidence * 100).toFixed(0)}% | ${qualStr}`);
                 } else {
                     store.updateCurrentPeriod({
                         periodKey,
@@ -484,7 +486,8 @@ async function fetchAllData() {
             serverVersion: BUILD_VERSION.hash,
             totalPredictions: store.getState().totalPredictionsMade,
             errorAnalysis: engine.getErrorSummary(),
-            learnedCorrections: engine.getLearnedCorrections()
+            learnedCorrections: engine.getLearnedCorrections(),
+            betQuality: store.getCurrentPeriod()?.originalPrediction?._betQuality || null
         });
 
         console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | ${wss.clients.size} clients`);

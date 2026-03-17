@@ -27,6 +27,18 @@ const stabilityState = {
     periodKey: null,
 };
 
+// ── Probability velocity & profit tracking (persists within a period) ──
+const probTracker = {
+    periodKey: null,
+    history: [],          // [{timestamp, prob, price}]
+    peakProb: 0,          // highest probForBet seen this period
+    peakPrice: 0,         // best price seen for our bet direction
+    troughProb: 1,        // lowest probForBet seen
+    entryProb: null,      // initial probForBet at bet entry
+    entryPrice: null,     // price at bet entry
+    momentumHistory: [],  // [{timestamp, momentum}] for exhaustion detection
+};
+
 // ── Standard normal CDF (Abramowitz & Stegun) ──
 function normCDF(x) {
     if (x > 8) return 1;
@@ -1031,6 +1043,290 @@ function computeBayesianPrior() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// MOMENTUM EXHAUSTION & REVERSAL DETECTION
+// Detects when a move is losing steam BEFORE the reversal
+// ═══════════════════════════════════════════════════════════════
+
+function detectMomentumExhaustion(prices, history) {
+    const n = prices.length;
+    if (n < 12) return { exhaustion: 0, signal: 0, type: 'none' };
+
+    // 1. Rate-of-change deceleration: first derivative positive but second derivative negative
+    //    = price still going up but acceleration is slowing → top forming
+    const roc3 = (prices[n-1] - prices[n-4]) / prices[n-4];
+    const roc3_prev = n > 7 ? (prices[n-4] - prices[n-7]) / prices[n-7] : roc3;
+    const roc3_prev2 = n > 10 ? (prices[n-7] - prices[n-10]) / prices[n-10] : roc3_prev;
+    const acceleration = roc3 - roc3_prev;
+    const jerk = (roc3 - roc3_prev) - (roc3_prev - roc3_prev2); // third derivative
+
+    // Deceleration: price moving in one direction but slowing down
+    const isDecelerating = (roc3 > 0 && acceleration < 0) || (roc3 < 0 && acceleration > 0);
+    const decelerationStrength = isDecelerating ? Math.abs(acceleration) / (Math.abs(roc3) + 1e-10) : 0;
+
+    // 2. Momentum divergence: price making new highs but momentum declining
+    const lookback = Math.min(15, n - 1);
+    let priceIsHigher = false, momIsLower = false;
+    let priceIsLower = false, momIsHigher = false;
+    if (n > 8) {
+        const recentHigh = Math.max(...prices.slice(-5));
+        const priorHigh = Math.max(...prices.slice(-lookback, -5));
+        const recentMom = Math.abs(roc3);
+        const priorMom = Math.abs(roc3_prev);
+
+        priceIsHigher = recentHigh > priorHigh;
+        momIsLower = recentMom < priorMom * 0.7; // momentum 30%+ weaker
+        priceIsLower = Math.min(...prices.slice(-5)) < Math.min(...prices.slice(-lookback, -5));
+        momIsHigher = recentMom < priorMom * 0.7;
+    }
+    const bearishDivergence = priceIsHigher && momIsLower; // price up, momentum fading
+    const bullishDivergence = priceIsLower && momIsHigher;  // price down, momentum fading
+
+    // 3. Volume climax: extremely high volume on the last few bars often marks exhaustion
+    let volumeClimax = 0;
+    const volumes = history.map(h => h.volume || 0).filter(v => v > 0);
+    if (volumes.length > 10) {
+        const avgVol = volumes.slice(-20, -2).reduce((a, b) => a + b, 0) / Math.min(18, volumes.length - 2);
+        const lastVol = volumes[volumes.length - 1];
+        if (avgVol > 0 && lastVol > avgVol * 3.0) {
+            volumeClimax = Math.min(1.0, (lastVol / avgVol - 3) / 3);
+        }
+    }
+
+    // 4. RSI divergence from price
+    const rsi = computeRSI(prices);
+    let rsiDivergence = 0;
+    if (rsi > 70 && roc3 > 0 && acceleration < 0) {
+        rsiDivergence = -0.3 * ((rsi - 70) / 30); // stronger as RSI gets more overbought
+    } else if (rsi < 30 && roc3 < 0 && acceleration > 0) {
+        rsiDivergence = 0.3 * ((30 - rsi) / 30);
+    }
+
+    // 5. Bollinger Band rejection: price touched band but couldn't hold
+    const bbPeriod = Math.min(20, n);
+    const slice = prices.slice(-bbPeriod);
+    const mean = slice.reduce((a, b) => a + b, 0) / bbPeriod;
+    const std = Math.sqrt(slice.reduce((s, p) => s + (p - mean) ** 2, 0) / bbPeriod);
+    const upperBand = mean + 2 * std;
+    const lowerBand = mean - 2 * std;
+    let bbRejection = 0;
+    if (n > 3 && std > 0) {
+        const prev2 = prices[n-3];
+        const prev1 = prices[n-2];
+        const curr = prices[n-1];
+        // Hit upper band then pulled back
+        if (prev1 >= upperBand * 0.999 && curr < prev1) bbRejection = -0.25;
+        // Hit lower band then bounced
+        else if (prev1 <= lowerBand * 1.001 && curr > prev1) bbRejection = 0.25;
+    }
+
+    // Combine exhaustion signals
+    let exhaustionScore = 0;
+    let type = 'none';
+
+    if (bearishDivergence) { exhaustionScore += 0.35; type = 'bearish_divergence'; }
+    if (bullishDivergence) { exhaustionScore += 0.35; type = 'bullish_divergence'; }
+    if (decelerationStrength > 0.3) {
+        exhaustionScore += Math.min(0.4, decelerationStrength * 0.5);
+        if (type === 'none') type = 'deceleration';
+    }
+    if (volumeClimax > 0) {
+        exhaustionScore += volumeClimax * 0.3;
+        if (type === 'none') type = 'volume_climax';
+    }
+    exhaustionScore += Math.abs(rsiDivergence);
+    exhaustionScore += Math.abs(bbRejection) * 0.5;
+
+    exhaustionScore = Math.min(1.0, exhaustionScore);
+
+    // Signal direction: negative = bearish exhaustion (was going up, about to reverse down)
+    let signal = 0;
+    if (exhaustionScore > 0.15) {
+        const direction = roc3 > 0 ? -1 : 1; // contra the current move
+        signal = direction * exhaustionScore * 0.4;
+        signal += rsiDivergence + bbRejection;
+    }
+
+    return {
+        exhaustion: exhaustionScore,
+        signal: Math.max(-1, Math.min(1, signal)),
+        type,
+        deceleration: decelerationStrength,
+        bearishDivergence,
+        bullishDivergence,
+        volumeClimax,
+        rsiDivergence,
+        bbRejection,
+        roc: roc3,
+        acceleration
+    };
+}
+
+// ── Detect choppy/range-bound market (ADX-like) ──
+function detectChoppiness(prices) {
+    const n = prices.length;
+    if (n < 15) return { choppy: false, adx: 50, choppiness: 0.5 };
+
+    // Simplified ADX: directional movement index
+    const lookback = Math.min(14, n - 1);
+    let sumPlusDM = 0, sumMinusDM = 0, sumTR = 0;
+    for (let i = n - lookback; i < n; i++) {
+        const high = prices[i];
+        const low = i > 0 ? Math.min(prices[i], prices[i-1]) : prices[i];
+        const prevHigh = i > 0 ? prices[i-1] : prices[i];
+        const prevLow = i > 1 ? Math.min(prices[i-1], prices[i-2]) : prevHigh;
+
+        const highDiff = high - prevHigh;
+        const lowDiff = prevLow - low;
+
+        if (highDiff > 0 && highDiff > lowDiff) sumPlusDM += highDiff;
+        if (lowDiff > 0 && lowDiff > highDiff) sumMinusDM += lowDiff;
+
+        const tr = Math.abs(prices[i] - (i > 0 ? prices[i-1] : prices[i]));
+        sumTR += tr;
+    }
+
+    if (sumTR === 0) return { choppy: true, adx: 0, choppiness: 1.0 };
+
+    const plusDI = (sumPlusDM / sumTR) * 100;
+    const minusDI = (sumMinusDM / sumTR) * 100;
+    const diSum = plusDI + minusDI;
+    const dx = diSum > 0 ? Math.abs(plusDI - minusDI) / diSum * 100 : 0;
+
+    // Choppiness Index: measures how range-bound vs trending
+    // High values = choppy, low values = trending
+    const range = Math.max(...prices.slice(-lookback)) - Math.min(...prices.slice(-lookback));
+    const choppiness = sumTR > 0 ? Math.log(sumTR / Math.max(range, 1e-10)) / Math.log(lookback) : 0.5;
+    const normalizedChop = Math.max(0, Math.min(1, choppiness));
+
+    return {
+        choppy: dx < 20 || normalizedChop > 0.6,
+        adx: dx,
+        choppiness: normalizedChop,
+        plusDI,
+        minusDI,
+        trending: dx > 25 && normalizedChop < 0.45
+    };
+}
+
+// ── Probability velocity: how fast is our edge changing? ──
+function updateProbTracker(periodKey, probForBet, currentPrice, betIsUp, strike) {
+    if (probTracker.periodKey !== periodKey) {
+        probTracker.periodKey = periodKey;
+        probTracker.history = [];
+        probTracker.peakProb = probForBet;
+        probTracker.peakPrice = currentPrice;
+        probTracker.troughProb = probForBet;
+        probTracker.entryProb = probForBet;
+        probTracker.entryPrice = currentPrice;
+        probTracker.momentumHistory = [];
+    }
+
+    probTracker.history.push({ timestamp: Date.now(), prob: probForBet, price: currentPrice });
+    if (probTracker.history.length > 60) probTracker.history.shift();
+
+    // Track peaks
+    if (probForBet > probTracker.peakProb) {
+        probTracker.peakProb = probForBet;
+        probTracker.peakPrice = currentPrice;
+    }
+    if (probForBet < probTracker.troughProb) {
+        probTracker.troughProb = probForBet;
+    }
+
+    const h = probTracker.history;
+    if (h.length < 3) return { velocity: 0, acceleration: 0, peakDrawdown: 0, profitAtRisk: 0, trend: 'stable' };
+
+    // Probability velocity (EMA-smoothed first derivative)
+    const dt = (h[h.length-1].timestamp - h[h.length-2].timestamp) / 1000; // seconds
+    const rawVelocity = dt > 0 ? (h[h.length-1].prob - h[h.length-2].prob) / dt : 0;
+
+    // Average velocity over last 5 readings
+    let avgVelocity = 0;
+    const velWindow = Math.min(5, h.length - 1);
+    for (let i = h.length - velWindow; i < h.length; i++) {
+        const dti = i > 0 ? (h[i].timestamp - h[i-1].timestamp) / 1000 : 1;
+        if (dti > 0) avgVelocity += (h[i].prob - h[i-1].prob) / dti;
+    }
+    avgVelocity /= velWindow;
+
+    // Acceleration (change in velocity)
+    let acceleration = 0;
+    if (h.length >= 6) {
+        const recentVel = (h[h.length-1].prob - h[h.length-3].prob) / 2;
+        const olderVel = (h[h.length-3].prob - h[h.length-5].prob) / 2;
+        acceleration = recentVel - olderVel;
+    }
+
+    // Peak drawdown: how far have we fallen from the best probability?
+    const peakDrawdown = probTracker.peakProb - probForBet;
+
+    // Profit at risk: if we're on right side with high prob, how much are we giving back?
+    const profitAtRisk = probTracker.peakProb > 0.6 ? peakDrawdown / probTracker.peakProb : 0;
+
+    // Trend detection on probability trajectory
+    let trend = 'stable';
+    if (avgVelocity > 0.005) trend = 'improving';
+    else if (avgVelocity < -0.005) trend = 'deteriorating';
+    if (avgVelocity < -0.01 && acceleration < 0) trend = 'collapsing'; // accelerating decline
+
+    return { velocity: avgVelocity, acceleration, peakDrawdown, profitAtRisk, trend, rawVelocity };
+}
+
+// ── Bet quality assessment: should we even enter this trade? ──
+function assessBetQuality(prediction, strike, marketData, minutesAhead) {
+    const probForBet = prediction.predictedPrice >= strike ? prediction.probability : (1 - prediction.probability);
+    const edge = probForBet - 0.5;
+    const confidence = prediction.confidence;
+    const prices = marketData.history.map(h => h.price);
+    const chop = detectChoppiness(prices);
+    const exhaustion = detectMomentumExhaustion(prices, marketData.history);
+
+    // Minimum edge threshold: need at least 3% edge after Kalshi fees
+    // Kalshi fees ≈ 7 cents per contract per side
+    // At 50c contracts, that's 14% round-trip. Need significant edge.
+    const minEdge = 0.035; // 3.5% minimum edge
+
+    // Quality factors
+    const factors = {
+        hasMinEdge: edge >= minEdge,
+        hasConfidence: confidence >= 0.45,
+        notChoppy: !chop.choppy,
+        notExhausted: exhaustion.exhaustion < 0.4,
+        hasTime: minutesAhead >= 3, // don't enter with < 3 min left
+        signalAgreement: prediction.ensembleConfidence?.level !== 'low',
+    };
+
+    // Score each factor
+    let score = 0;
+    let maxScore = 0;
+    const weights = { hasMinEdge: 3, hasConfidence: 2, notChoppy: 2, notExhausted: 2, hasTime: 1, signalAgreement: 1 };
+    for (const [key, weight] of Object.entries(weights)) {
+        maxScore += weight;
+        if (factors[key]) score += weight;
+    }
+
+    const quality = score / maxScore;
+    const shouldBet = quality >= 0.55; // need >55% of quality factors
+    const waitForBetter = !shouldBet && minutesAhead > 8; // still early, might improve
+
+    // Optimal entry timing: in choppy markets, wait for clearer signal
+    let suggestedWait = 0;
+    if (chop.choppy && minutesAhead > 8) suggestedWait = 3; // wait 3 min
+    if (exhaustion.exhaustion > 0.5) suggestedWait = Math.max(suggestedWait, 2); // wait for exhaustion to resolve
+
+    return {
+        quality, shouldBet, waitForBetter, suggestedWait,
+        edge, factors, choppiness: chop, exhaustion,
+        reason: !shouldBet ?
+            (!factors.hasMinEdge ? 'Edge too thin (' + (edge*100).toFixed(1) + '%)' :
+             !factors.notChoppy ? 'Market is choppy (ADX=' + chop.adx.toFixed(0) + ')' :
+             !factors.notExhausted ? 'Momentum exhaustion detected' :
+             !factors.hasTime ? 'Not enough time remaining' :
+             'Low signal quality') : 'Good entry'
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════
 // MAIN PREDICTION FUNCTION
 // ═══════════════════════════════════════════════════════════════
 
@@ -1232,19 +1528,30 @@ function predictPrice(marketData, minutesAhead, strike) {
     const cpSignal = changePoint.signal;
     const hurstH = computeHurstExponent(prices.slice(-Math.min(n, 90)));
 
+    // SIGNAL 22: MOMENTUM EXHAUSTION — leading reversal indicator
+    const momExhaustion = detectMomentumExhaustion(prices, history);
+    const exhaustionSignal = momExhaustion.signal;
+
+    // SIGNAL 23: CHOPPINESS DETECTION — reduce signal weight in choppy markets
+    const choppiness = detectChoppiness(prices);
+
     const earlyBoost = Math.max(0, 1 - timeProgress * 2);
     const urgencyFade = minutesAhead < 3 ? Math.max(0, (minutesAhead - 1) / 2) : 1.0;
     const immediateBoosted = minutesAhead < 3 ? 1 + (3 - minutesAhead) * 0.3 : 1.0;
 
+    // In choppy markets, reduce all signal weights (less conviction)
+    const chopDampen = choppiness.choppy ? 0.65 : 1.0;
+
     const allSignals = [
-        { value: driftZShift, weight: 0.20 }, { value: orderFlowSignal, weight: 0.10 },
-        { value: tradeFlowSignal, weight: 0.08 }, { value: vwapSignal, weight: 0.06 },
+        { value: driftZShift, weight: 0.18 }, { value: orderFlowSignal, weight: 0.09 },
+        { value: tradeFlowSignal, weight: 0.07 }, { value: vwapSignal, weight: 0.06 },
         { value: macdSignal, weight: 0.05 }, { value: linRegSignal, weight: 0.05 },
         { value: bbSqueeze.breakoutSignal, weight: 0.04 }, { value: haResult.signal, weight: 0.04 },
         { value: crossTF.signal, weight: 0.04 }, { value: rsiSignal, weight: 0.04 },
         { value: candlePattern.signal, weight: 0.04 }, { value: microMRSignal, weight: 0.08 },
         { value: breakoutSignal, weight: 0.06 }, { value: cpSignal, weight: 0.04 },
-        { value: ethLL.signal, weight: 0.04 }
+        { value: ethLL.signal, weight: 0.04 },
+        { value: exhaustionSignal, weight: 0.08 }
     ];
     const agreementMult = computeAgreementMultiplier(allSignals);
 
@@ -1272,10 +1579,14 @@ function predictPrice(marketData, minutesAhead, strike) {
         microMRSignal        * 0.12 * regM.reversion +
         breakoutSignal       * 0.06 * regM.momentum +
         cpSignal             * 0.04 * immediateBoosted +
-        ethLL.signal         * 0.04 * immediateBoosted * regM.momentum
+        ethLL.signal         * 0.04 * immediateBoosted * regM.momentum +
+        // Momentum exhaustion: contrarian signal that fades current trend when losing steam
+        // Increases weight as period progresses (more useful mid/late period)
+        exhaustionSignal     * (0.06 + (1 - earlyBoost) * 0.06) * regM.reversion
     );
     // Bayesian shrinkage: 80% of combined signal is noise at 15-min scale
-    const shrinkageFactor = 0.20;
+    // In choppy markets, apply extra dampening to prevent false signals
+    const shrinkageFactor = 0.20 * chopDampen;
     const totalZShift = Math.max(-0.8, Math.min(0.8, rawTotalZShift * agreementMult * shrinkageFactor));
 
     // Final probability
@@ -1341,7 +1652,9 @@ function predictPrice(marketData, minutesAhead, strike) {
         predictedPrice, changePercent, confidence, probability: finalProb,
         _remainingVol: remainingVol, ensembleConfidence: ensConf,
         signals: { momentum: momentumLabel, volatility: volLabel, trend: trendLabel, rsi: rsiLabel },
-        _regimeInfo: { volRegime: volRegime.regime, trendRegime: getBayesTrendLabel(trendRegime) }
+        _regimeInfo: { volRegime: volRegime.regime, trendRegime: getBayesTrendLabel(trendRegime) },
+        _exhaustion: momExhaustion,
+        _choppiness: choppiness
     };
 }
 
@@ -1366,18 +1679,36 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const origDirection = betIsUp ? 'UP' : 'DOWN';
     const updDirection = updPred.predictedPrice >= strike ? 'UP' : 'DOWN';
 
+    // ── NEW: Track probability velocity and profit trajectory ──
+    const periodKey = stabilityState.periodKey || 'unknown';
+    const probVel = updateProbTracker(periodKey, probForBet, currentPrice, betIsUp, strike);
+
+    // ── NEW: Get momentum exhaustion from updated prediction ──
+    const exhaustion = updPred._exhaustion || { exhaustion: 0, type: 'none' };
+    const choppiness = updPred._choppiness || { choppy: false, adx: 50 };
+
+    // ═══════════════════════════════════════════════════════════
+    // URGENCY SCORING — now with early warning signals
+    // ═══════════════════════════════════════════════════════════
+
+    // 1. POSITION SIDE ANALYSIS (same as before but with time scaling)
     if (onWrongSide) {
         const side = betIsUp ? 'below' : 'above';
-        if (distancePct > 0.15) { urgency += 40; reasons.push('Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' + side + ' strike (' + distancePct.toFixed(3) + '% away)'); }
-        else if (distancePct > 0.08) { urgency += 30; reasons.push('Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' + side + ' strike'); }
-        else if (distancePct > 0.03) { urgency += 18; reasons.push('Price drifting ' + side + ' strike by $' + Math.abs(distanceFromStrike).toFixed(2)); }
+        // Scale urgency by time remaining: being on wrong side matters more late
+        const timeMult = minutesRemaining < 3 ? 1.5 : minutesRemaining < 5 ? 1.2 : 1.0;
+        if (distancePct > 0.15) { urgency += 40 * timeMult; reasons.push('Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' + side + ' strike (' + distancePct.toFixed(3) + '% away)'); }
+        else if (distancePct > 0.08) { urgency += 30 * timeMult; reasons.push('Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' + side + ' strike'); }
+        else if (distancePct > 0.03) { urgency += 18 * timeMult; reasons.push('Price drifting ' + side + ' strike by $' + Math.abs(distanceFromStrike).toFixed(2)); }
         else { urgency += 8; reasons.push('Price barely ' + side + ' strike ($' + Math.abs(distanceFromStrike).toFixed(2) + ')'); }
     }
+
+    // 2. PROBABILITY COLLAPSE
     if (probForBet < 0.08) { urgency += 45; reasons.push('Win probability collapsed to ' + (probForBet * 100).toFixed(0) + '%'); }
     else if (probForBet < 0.15) { urgency += 35; reasons.push('Win probability critical: ' + (probForBet * 100).toFixed(0) + '%'); }
     else if (probForBet < 0.25) { urgency += 22; reasons.push('Win probability weak: ' + (probForBet * 100).toFixed(0) + '%'); }
     else if (probForBet < 0.35) { urgency += 12; reasons.push('Win probability softening: ' + (probForBet * 100).toFixed(0) + '%'); }
 
+    // 3. SIGNAL DISAGREEMENT
     const sigs = updPred.signals;
     let agreeing = 0, opposing = 0;
     if (sigs) {
@@ -1392,27 +1723,81 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
         if (sigs.volatility === 'High' && onWrongSide) { urgency += 5; reasons.push('High volatility amplifies loss risk'); }
     }
 
+    // 4. TIME PRESSURE (more aggressive time decay)
     if (onWrongSide || probForBet < 0.35) {
-        if (minutesRemaining < 1) { urgency += 30; reasons.push('Under 60 seconds - no time to recover'); }
-        else if (minutesRemaining < 2) { urgency += 22; reasons.push('Under 2 min left - recovery unlikely'); }
-        else if (minutesRemaining < 3.5) { urgency += 15; reasons.push('Under 3.5 min - time running out'); }
-        else if (minutesRemaining < 5) { urgency += 8; reasons.push('Under 5 min remaining'); }
+        if (minutesRemaining < 1) { urgency += 35; reasons.push('Under 60 seconds - no time to recover'); }
+        else if (minutesRemaining < 2) { urgency += 25; reasons.push('Under 2 min left - recovery unlikely'); }
+        else if (minutesRemaining < 3.5) { urgency += 18; reasons.push('Under 3.5 min - time running out'); }
+        else if (minutesRemaining < 5) { urgency += 10; reasons.push('Under 5 min remaining'); }
     }
+
+    // 5. MODEL FLIP
     if (modelFlipped) { urgency += 18; reasons.push('Model now predicts ' + updDirection + ' (was ' + origDirection + ')'); }
 
+    // 6. CONFIDENCE DROP
     const confDrop = origPred.confidence - updPred.confidence;
     if (confDrop > 0.35) { urgency += 15; reasons.push('Confidence crashed: ' + (origPred.confidence * 100).toFixed(0) + '% -> ' + (updPred.confidence * 100).toFixed(0) + '%'); }
     else if (confDrop > 0.20) { urgency += 8; reasons.push('Confidence dropped: ' + (origPred.confidence * 100).toFixed(0) + '% -> ' + (updPred.confidence * 100).toFixed(0) + '%'); }
 
+    // 7. PROBABILITY DROP from entry
     const probDrop = origProbForBet - probForBet;
-    if (probDrop > 0.30) { urgency += 12; reasons.push('Win prob fell from ' + (origProbForBet * 100).toFixed(0) + '% to ' + (probForBet * 100).toFixed(0) + '%'); }
+    if (probDrop > 0.30) { urgency += 15; reasons.push('Win prob fell from ' + (origProbForBet * 100).toFixed(0) + '% to ' + (probForBet * 100).toFixed(0) + '%'); }
+    else if (probDrop > 0.20) { urgency += 8; reasons.push('Win prob softening from ' + (origProbForBet * 100).toFixed(0) + '% to ' + (probForBet * 100).toFixed(0) + '%'); }
+
+    // ═══════════════════════════════════════════════════════════
+    // NEW EARLY WARNING SIGNALS — these trigger BEFORE the dump
+    // ═══════════════════════════════════════════════════════════
+
+    // 8. PROBABILITY VELOCITY: prob declining rapidly = exit early
+    if (probVel.trend === 'collapsing') {
+        urgency += 25; reasons.push('Win probability collapsing (velocity: ' + (probVel.velocity * 1000).toFixed(1) + '/s)');
+    } else if (probVel.trend === 'deteriorating') {
+        urgency += 12; reasons.push('Win probability deteriorating steadily');
+    }
+
+    // 9. PEAK DRAWDOWN: we had a much better prob and now it's falling back
+    if (probVel.peakDrawdown > 0.25 && probTracker.peakProb > 0.65) {
+        urgency += 20; reasons.push('Prob peaked at ' + (probTracker.peakProb * 100).toFixed(0) + '%, now ' + (probForBet * 100).toFixed(0) + '% (gave back ' + (probVel.peakDrawdown * 100).toFixed(0) + '%)');
+    } else if (probVel.peakDrawdown > 0.15 && probTracker.peakProb > 0.60) {
+        urgency += 10; reasons.push('Profit slipping: was ' + (probTracker.peakProb * 100).toFixed(0) + '% now ' + (probForBet * 100).toFixed(0) + '%');
+    }
+
+    // 10. MOMENTUM EXHAUSTION: the trend supporting our bet is losing steam
+    if (exhaustion.exhaustion > 0.5) {
+        // Exhaustion against our bet direction
+        const exhaustionAgainstUs = (betIsUp && exhaustion.roc > 0) || (!betIsUp && exhaustion.roc < 0);
+        if (exhaustionAgainstUs) {
+            // Move in our favor is exhausting — take profit!
+            urgency += 8; // mild urgency, but triggers take_profit
+            reasons.push('Momentum exhaustion: move in your favor losing steam (' + exhaustion.type + ')');
+        } else if (exhaustion.exhaustion > 0.6) {
+            // Move against us is exhausting — good for recovery
+            reasons.push('Counter-move exhausting (recovery signal)');
+        }
+    }
+
+    // 11. CHOPPINESS: in choppy markets, take profit earlier (harder to sustain position)
+    if (choppiness.choppy && onRightSide && probForBet > 0.55 && minutesRemaining > 5) {
+        urgency += 5;
+        reasons.push('Choppy market (ADX=' + choppiness.adx.toFixed(0) + ') - take profit sooner');
+    }
+
+    // 12. PROBABILITY ACCELERATION: prob accelerating downward is very bad
+    if (probVel.acceleration < -0.002) {
+        urgency += 15; reasons.push('Probability decline accelerating');
+    }
 
     urgency = Math.min(100, Math.max(0, urgency));
+
+    // ═══════════════════════════════════════════════════════════
+    // DECISION STATES — now with TAKE_PROFIT and smarter logic
+    // ═══════════════════════════════════════════════════════════
 
     let level, shortLabel, advice;
     const isDeepWrongSide = onWrongSide && distancePct > 0.08;
     const noTimeLeft = minutesRemaining < 1.5;
 
+    // ── LOSING POSITIONS ──
     if (urgency >= 75 || (probForBet < 0.08 && minutesRemaining < 2.5) || (isDeepWrongSide && noTimeLeft)) {
         level = 'lost_cause'; shortLabel = 'LOST CAUSE';
         advice = modelFlipped ? 'Both predictions failed. Sell immediately.' :
@@ -1423,15 +1808,47 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
         advice = modelFlipped ? 'Model flipped to ' + updDirection + '. Sell before it worsens.' :
             onWrongSide ? 'Price on wrong side of strike. Sell to lock in remaining value.' :
             'Win probability too low to justify holding.';
-    } else if (urgency >= 30 || (probForBet < 0.35 && minutesRemaining < 5)) {
+    } else if (urgency >= 35 || (probForBet < 0.35 && minutesRemaining < 5)) {
         level = 'consider_selling'; shortLabel = 'CONSIDER SELLING';
         advice = onWrongSide ? 'Price slipped past strike. May recover, but risk elevated.' :
             'Position weakening. Watch closely.';
-    } else if (onRightSide && probForBet >= 0.55) {
-        level = 'winning'; shortLabel = 'WINNING';
-        const rightSide = betIsUp ? 'above' : 'below';
-        advice = 'Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' + rightSide + ' strike. ' +
-            (minutesRemaining < 3 ? 'Almost there - hold to close!' : 'Looking good - hold position.');
+    }
+    // ── WINNING POSITIONS — with smart profit-taking ──
+    else if (onRightSide && probForBet >= 0.55) {
+        // NEW: TAKE PROFIT conditions — sell while ahead if reversal is likely
+        const shouldTakeProfit = (
+            // Condition 1: Momentum exhaustion in our favor's direction + high prob + enough time to sell
+            (exhaustion.exhaustion > 0.4 && probForBet > 0.65 && minutesRemaining > 3 &&
+             ((betIsUp && exhaustion.roc > 0) || (!betIsUp && exhaustion.roc < 0))) ||
+            // Condition 2: Probability peaked high and is now declining
+            (probVel.peakDrawdown > 0.12 && probTracker.peakProb > 0.70 && probVel.trend === 'deteriorating') ||
+            // Condition 3: Choppy market + good profit = lock it in before it chops back
+            (choppiness.choppy && probForBet > 0.70 && distancePct > 0.05 && minutesRemaining > 4) ||
+            // Condition 4: Probability velocity turning negative after a run-up
+            (probTracker.peakProb > 0.75 && probVel.velocity < -0.003 && probForBet > 0.60) ||
+            // Condition 5: Volume climax detected (often marks turning point)
+            (exhaustion.volumeClimax > 0.3 && probForBet > 0.65 && minutesRemaining > 3)
+        );
+
+        if (shouldTakeProfit && minutesRemaining > 2.5) {
+            level = 'take_profit'; shortLabel = 'TAKE PROFIT';
+            const rightSide = betIsUp ? 'above' : 'below';
+            advice = 'Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' + rightSide + ' strike with ' +
+                (probForBet * 100).toFixed(0) + '% win prob. ';
+            if (exhaustion.exhaustion > 0.4) advice += 'Momentum fading — lock in profit now. ';
+            if (probVel.peakDrawdown > 0.12) advice += 'Prob peaked at ' + (probTracker.peakProb * 100).toFixed(0) + '% and declining. ';
+            if (choppiness.choppy) advice += 'Choppy market — secure your gains. ';
+            if (exhaustion.volumeClimax > 0.3) advice += 'Volume climax detected — reversal likely. ';
+        } else if (minutesRemaining < 2) {
+            level = 'winning'; shortLabel = 'WINNING';
+            advice = 'Almost there — hold to close! Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' +
+                (betIsUp ? 'above' : 'below') + ' strike.';
+        } else {
+            level = 'winning'; shortLabel = 'WINNING';
+            const rightSide = betIsUp ? 'above' : 'below';
+            advice = 'Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' + rightSide + ' strike. ' +
+                (minutesRemaining < 3 ? 'Almost there — hold to close!' : 'Looking good — hold position.');
+        }
     } else {
         level = 'hold'; shortLabel = 'HOLD';
         advice = probForBet >= 0.50 ? 'Position favored (' + (probForBet * 100).toFixed(0) + '% win prob). Hold.' :
@@ -1441,7 +1858,13 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     return {
         level, urgency, reasons: reasons.length > 0 ? reasons : ['Position steady'],
         shortLabel, probForBet, origProbForBet, advice, betDirection,
-        modelFlipped, onWrongSide, distancePct, distanceFromStrike
+        modelFlipped, onWrongSide, distancePct, distanceFromStrike,
+        // NEW: additional data for frontend
+        probVelocity: probVel,
+        exhaustion: { score: exhaustion.exhaustion, type: exhaustion.type },
+        choppiness: { choppy: choppiness.choppy, adx: choppiness.adx },
+        peakProb: probTracker.peakProb,
+        profitAtRisk: probVel.profitAtRisk
     };
 }
 
@@ -1451,6 +1874,10 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
 
 function handleNewPeriod(periodKey, marketData, minutesAhead, strike, periodEnd) {
     const prediction = predictPrice(marketData, minutesAhead, strike);
+
+    // Assess bet quality — should we even take this trade?
+    const betQuality = assessBetQuality(prediction, strike, marketData, minutesAhead);
+    prediction._betQuality = betQuality;
 
     // Record Bayesian prediction
     store.updateBayesianState(bs => {
@@ -1877,8 +2304,11 @@ module.exports = {
     gradeBayesianPrediction,
     gradePreviousPrediction,
     assessSellSignal,
+    assessBetQuality,
     computeNextPeriodPreview,
     analyzeAndLearn,
     getLearnedCorrections,
-    getErrorSummary
+    getErrorSummary,
+    detectMomentumExhaustion,
+    detectChoppiness
 };
