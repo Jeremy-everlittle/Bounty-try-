@@ -3023,7 +3023,8 @@
                 // Combine: institutional flow 35%, raw flow 25%, CVD 25%, VPIN 15%
                 tradeFlowSignal = clustering.signal * 0.35 + rawFlow * 0.25 +
                                   cvd.signal * 0.25 + vpin.signal * 0.15;
-                if (vpin.vpin > 0.4) vpinVolAdjust = 1.0 + (vpin.vpin - 0.4) * 0.5;
+                // VPIN Granger-causes price jumps — strongest microstructure signal
+                if (vpin.vpin > 0.35) vpinVolAdjust = 1.0 + (vpin.vpin - 0.35) * 0.8;
             }
 
             // Apply microstructure-informed vol adjustment to remaining vol
@@ -3073,8 +3074,10 @@
             let fundingSignal = 0;
             if (fundingRateCache.rate && Date.now() - fundingRateCache.timestamp < 120000) {
                 const fr = fundingRateCache.rate;
-                if (Math.abs(fr) > 0.0005) {
-                    fundingSignal = -Math.sign(fr) * 0.15;
+                const deviation = fr - 0.0001; // deviation from 0.01%/8hr baseline
+                if (Math.abs(deviation) > 0.0003) {
+                    const magnitude = Math.min(0.25, Math.abs(deviation) * 200);
+                    fundingSignal = -Math.sign(deviation) * magnitude;
                 }
             }
 

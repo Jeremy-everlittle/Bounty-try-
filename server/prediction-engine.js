@@ -1143,7 +1143,9 @@ function predictPrice(marketData, minutesAhead, strike) {
         const cvd = computeCVD(recentTrades);
         const vpin = computeVPIN(recentTrades);
         tradeFlowSignal = clustering.signal * 0.35 + rawFlow * 0.25 + cvd.signal * 0.25 + vpin.signal * 0.15;
-        if (vpin.vpin > 0.4) vpinVolAdjust = 1.0 + (vpin.vpin - 0.4) * 0.5;
+        // VPIN Granger-causes price jumps (research) — strongest microstructure signal
+        // More aggressive vol boost: VPIN > 0.35 starts affecting, > 0.6 = major stress
+        if (vpin.vpin > 0.35) vpinVolAdjust = 1.0 + (vpin.vpin - 0.35) * 0.8;
     }
 
     // Flow agreement boost removed — order flow decays to noise at 15-min horizon
@@ -1178,8 +1180,17 @@ function predictPrice(marketData, minutesAhead, strike) {
 
     // SIGNAL 8: FUNDING RATE
     let fundingSignal = 0;
-    if (marketData.fundingRate && Math.abs(marketData.fundingRate) > 0.0005) {
-        fundingSignal = -Math.sign(marketData.fundingRate) * 0.15;
+    // Funding rate contrarian signal: baseline is ~0.0001 (0.01%/8hr)
+    // Trigger on deviation from baseline, not absolute level
+    // Research: > 0.05%/8hr = crowded longs, < -0.03%/8hr = panic shorting
+    if (marketData.fundingRate) {
+        const fr = marketData.fundingRate;
+        const deviation = fr - 0.0001; // deviation from normal baseline
+        if (Math.abs(deviation) > 0.0003) {
+            // Graduated contrarian signal based on deviation magnitude
+            const magnitude = Math.min(0.25, Math.abs(deviation) * 200);
+            fundingSignal = -Math.sign(deviation) * magnitude;
+        }
     }
 
     // SIGNAL 20: ETH LEAD-LAG (cross-asset)
