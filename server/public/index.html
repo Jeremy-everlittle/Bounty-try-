@@ -59,6 +59,33 @@
             50% { opacity: 0.6; box-shadow: 0 0 0 6px rgba(63, 185, 80, 0); }
         }
 
+        /* Position Tracker */
+        .position-tracker { margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); }
+        .position-tracker-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #8b949e; margin-bottom: 8px; }
+        .position-buttons { display: flex; gap: 8px; margin-bottom: 8px; }
+        .position-btn { flex: 1; padding: 10px 0; border: 2px solid rgba(255,255,255,0.15); border-radius: 8px; background: rgba(255,255,255,0.04); color: #c9d1d9; font-size: 13px; font-weight: 700; cursor: pointer; text-align: center; transition: all 0.2s; text-transform: uppercase; letter-spacing: 0.5px; }
+        .position-btn:active { transform: scale(0.96); }
+        .position-btn.buy-up { border-color: rgba(63,185,80,0.4); }
+        .position-btn.buy-up:hover, .position-btn.buy-up.active { background: rgba(63,185,80,0.2); border-color: #3fb950; color: #3fb950; }
+        .position-btn.buy-down { border-color: rgba(248,81,73,0.4); }
+        .position-btn.buy-down:hover, .position-btn.buy-down.active { background: rgba(248,81,73,0.2); border-color: #f85149; color: #f85149; }
+        .position-btn.sold { border-color: rgba(139,148,158,0.4); }
+        .position-btn.sold:hover, .position-btn.sold.active { background: rgba(139,148,158,0.15); border-color: #8b949e; color: #8b949e; }
+        .position-btn.exit-btn { border-color: rgba(210,153,34,0.4); }
+        .position-btn.exit-btn:hover, .position-btn.exit-btn.active { background: rgba(210,153,34,0.15); border-color: #d29922; color: #d29922; }
+        .position-info { padding: 8px 10px; border-radius: 8px; margin-top: 6px; font-size: 12px; }
+        .position-info .position-direction { font-weight: 700; font-size: 14px; }
+        .position-info .position-entry { font-size: 11px; color: #8b949e; margin-top: 2px; }
+        .position-info .position-pnl { font-size: 13px; font-weight: 700; margin-top: 4px; }
+        .position-advice { margin-top: 8px; padding: 10px 12px; border-radius: 8px; font-size: 12px; font-weight: 600; }
+        .position-advice.advice-hold { background: rgba(63,185,80,0.12); color: #3fb950; border: 1px solid rgba(63,185,80,0.25); }
+        .position-advice.advice-caution { background: rgba(210,153,34,0.12); color: #d29922; border: 1px solid rgba(210,153,34,0.25); }
+        .position-advice.advice-sell { background: rgba(248,81,73,0.15); color: #f85149; border: 1px solid rgba(248,81,73,0.35); }
+        .position-advice.advice-winning { background: rgba(63,185,80,0.18); color: #56d364; border: 1px solid rgba(63,185,80,0.4); }
+        .position-advice-icon { font-size: 16px; margin-right: 6px; }
+        .position-advice-text { line-height: 1.4; }
+        .position-advice-detail { font-size: 10px; font-weight: 400; opacity: 0.7; margin-top: 3px; }
+
         .sell-signal { padding: 10px 14px; border-radius: 10px; margin-top: 10px; }
         .sell-signal-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
         .sell-signal-icon { font-size: 16px; }
@@ -622,6 +649,18 @@
         </div>
 
         <div id="sell-signal-badge"></div>
+
+        <!-- Position Tracker -->
+        <div class="position-tracker" id="position-tracker">
+            <div class="position-tracker-label">My Position</div>
+            <div class="position-buttons" id="position-buttons">
+                <button class="position-btn buy-up" id="btn-buy-up" onclick="recordPosition('up')">Bought UP</button>
+                <button class="position-btn buy-down" id="btn-buy-down" onclick="recordPosition('down')">Bought DOWN</button>
+                <button class="position-btn sold exit-btn" id="btn-sold" onclick="recordPosition('sold')" style="display:none">I Sold</button>
+            </div>
+            <div id="position-info"></div>
+            <div id="position-advice"></div>
+        </div>
 
         <!-- Next Period Preview Card -->
         <div class="card next-period-card" id="next-period-card">
@@ -3382,6 +3421,193 @@
                 '</div>';
         }
 
+        // ── Position Tracker ──────────────────────────────────────────
+        let myPosition = null; // { direction: 'up'|'down', entryPrice: number, entryTime: Date, periodKey: string }
+
+        function recordPosition(action) {
+            if (action === 'sold') {
+                myPosition = null;
+                localStorage.removeItem('myPosition');
+                renderPositionUI();
+                return;
+            }
+
+            const price = latestData ? latestData.currentPrice : null;
+            if (!price) return;
+
+            myPosition = {
+                direction: action, // 'up' or 'down'
+                entryPrice: price,
+                entryTime: Date.now(),
+                periodKey: currentPeriodKey,
+                strike: kalshiStrike || periodStartPrice
+            };
+            localStorage.setItem('myPosition', JSON.stringify(myPosition));
+            renderPositionUI();
+        }
+
+        function loadPosition() {
+            try {
+                const saved = localStorage.getItem('myPosition');
+                if (saved) {
+                    myPosition = JSON.parse(saved);
+                    // Clear stale positions from previous periods
+                    if (myPosition.periodKey && currentPeriodKey && myPosition.periodKey !== currentPeriodKey) {
+                        myPosition = null;
+                        localStorage.removeItem('myPosition');
+                    }
+                }
+            } catch(e) { myPosition = null; }
+        }
+
+        function renderPositionUI() {
+            const infoEl = document.getElementById('position-info');
+            const adviceEl = document.getElementById('position-advice');
+            const btnUp = document.getElementById('btn-buy-up');
+            const btnDown = document.getElementById('btn-buy-down');
+            const btnSold = document.getElementById('btn-sold');
+
+            // Remove active classes
+            btnUp.classList.remove('active');
+            btnDown.classList.remove('active');
+
+            if (!myPosition) {
+                btnUp.style.display = '';
+                btnDown.style.display = '';
+                btnSold.style.display = 'none';
+                infoEl.innerHTML = '';
+                adviceEl.innerHTML = '';
+                return;
+            }
+
+            // Show sold button, hide buy buttons
+            btnUp.style.display = myPosition.direction === 'up' ? '' : 'none';
+            btnDown.style.display = myPosition.direction === 'down' ? '' : 'none';
+            if (myPosition.direction === 'up') btnUp.classList.add('active');
+            else btnDown.classList.add('active');
+            btnSold.style.display = '';
+
+            const currentPrice = latestData ? latestData.currentPrice : myPosition.entryPrice;
+            const strike = myPosition.strike || kalshiStrike || periodStartPrice;
+            const dirLabel = myPosition.direction === 'up' ? 'UP' : 'DOWN';
+            const dirColor = myPosition.direction === 'up' ? '#3fb950' : '#f85149';
+
+            // P&L based on contract value: if you bet UP and price is above strike, you're winning
+            const priceVsStrike = currentPrice - strike;
+            const onRightSide = (myPosition.direction === 'up' && priceVsStrike >= 0) ||
+                                (myPosition.direction === 'down' && priceVsStrike < 0);
+            const distFromStrike = Math.abs(priceVsStrike);
+            const distPct = strike > 0 ? (distFromStrike / strike) * 100 : 0;
+
+            const elapsed = Math.round((Date.now() - myPosition.entryTime) / 1000);
+            const elapsedStr = elapsed < 60 ? elapsed + 's' : Math.floor(elapsed / 60) + 'm ' + (elapsed % 60) + 's';
+
+            infoEl.innerHTML =
+                '<div class="position-info" style="background:' + (onRightSide ? 'rgba(63,185,80,0.08)' : 'rgba(248,81,73,0.08)') + ';border:1px solid ' + (onRightSide ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)') + '">' +
+                    '<div class="position-direction" style="color:' + dirColor + '">Bet ' + dirLabel + ' @ ' + formatPrice(myPosition.entryPrice) + '</div>' +
+                    '<div class="position-entry">Held for ' + elapsedStr + ' | Strike: ' + formatPrice(strike) + '</div>' +
+                    '<div class="position-pnl" style="color:' + (onRightSide ? '#3fb950' : '#f85149') + '">' +
+                        (onRightSide ? 'WINNING' : 'LOSING') + ' — Price ' +
+                        (priceVsStrike >= 0 ? '+' : '-') + '$' + distFromStrike.toFixed(2) +
+                        ' (' + distPct.toFixed(3) + '%) vs strike' +
+                    '</div>' +
+                '</div>';
+
+            // Generate position-aware advice
+            const advice = getPositionAdvice(myPosition, currentPrice, strike);
+            if (advice) {
+                adviceEl.innerHTML =
+                    '<div class="position-advice ' + advice.cssClass + '">' +
+                        '<span class="position-advice-icon">' + advice.icon + '</span>' +
+                        '<span class="position-advice-text">' + advice.text + '</span>' +
+                        (advice.detail ? '<div class="position-advice-detail">' + advice.detail + '</div>' : '') +
+                    '</div>';
+            }
+        }
+
+        function getPositionAdvice(position, currentPrice, strike) {
+            if (!position || !currentPrice || !strike) return null;
+            if (!originalPrediction) return null;
+
+            const minutesLeft = currentTarget ? Math.max(0, getSecondsUntilTarget(currentTarget) / 60) : 15;
+            const betIsUp = position.direction === 'up';
+            const priceVsStrike = currentPrice - strike;
+            const onRightSide = (betIsUp && priceVsStrike >= 0) || (!betIsUp && priceVsStrike < 0);
+            const distPct = Math.abs(priceVsStrike / strike) * 100;
+
+            // Get model's current view
+            const activePred = updatedPrediction || originalPrediction;
+            const probForBet = betIsUp ? activePred.probability : (1 - activePred.probability);
+            const modelAgrees = (betIsUp && activePred.predictedPrice >= strike) || (!betIsUp && activePred.predictedPrice < strike);
+
+            // Decision matrix
+            if (onRightSide && probForBet >= 0.60 && minutesLeft < 3) {
+                return {
+                    icon: '&#10003;', cssClass: 'advice-winning',
+                    text: 'HOLD TO CLOSE — You\'re winning with ' + (probForBet * 100).toFixed(0) + '% probability. Almost there!',
+                    detail: distPct.toFixed(3) + '% on right side with ' + minutesLeft.toFixed(1) + ' min left'
+                };
+            }
+            if (onRightSide && probForBet >= 0.55) {
+                return {
+                    icon: '&#10003;', cssClass: 'advice-hold',
+                    text: 'HOLD — Price on your side, model agrees (' + (probForBet * 100).toFixed(0) + '% win prob).',
+                    detail: 'Comfortable margin of $' + Math.abs(priceVsStrike).toFixed(2) + ' from strike'
+                };
+            }
+            if (onRightSide && probForBet >= 0.40) {
+                return {
+                    icon: '&#9679;', cssClass: 'advice-caution',
+                    text: 'HOLD WITH CAUTION — On right side but probability weakening (' + (probForBet * 100).toFixed(0) + '%).',
+                    detail: 'Watch for price crossing strike. Consider selling if prob drops below 35%'
+                };
+            }
+
+            // On wrong side scenarios
+            if (!onRightSide && minutesLeft < 1.5) {
+                return {
+                    icon: '&#10006;', cssClass: 'advice-sell',
+                    text: 'SELL NOW — Wrong side with <90 seconds left. Recovery very unlikely.',
+                    detail: '$' + Math.abs(priceVsStrike).toFixed(2) + ' on wrong side, ' + (probForBet * 100).toFixed(0) + '% win prob'
+                };
+            }
+            if (!onRightSide && distPct > 0.10 && minutesLeft < 5) {
+                return {
+                    icon: '&#9888;', cssClass: 'advice-sell',
+                    text: 'SELL — Deep on wrong side ($' + Math.abs(priceVsStrike).toFixed(2) + ') with limited time.',
+                    detail: 'Only ' + minutesLeft.toFixed(1) + ' min to recover ' + distPct.toFixed(3) + '% — odds are ' + (probForBet * 100).toFixed(0) + '%'
+                };
+            }
+            if (!onRightSide && probForBet < 0.25) {
+                return {
+                    icon: '&#9888;', cssClass: 'advice-sell',
+                    text: 'CONSIDER SELLING — Win probability only ' + (probForBet * 100).toFixed(0) + '%. Model turning against you.',
+                    detail: modelAgrees ? 'Model still agrees but probability is low' : 'Model has flipped against your position'
+                };
+            }
+            if (!onRightSide && probForBet >= 0.35) {
+                return {
+                    icon: '&#9679;', cssClass: 'advice-caution',
+                    text: 'HOLD — Wrong side but recoverable. Model gives ' + (probForBet * 100).toFixed(0) + '% chance.',
+                    detail: 'Only $' + Math.abs(priceVsStrike).toFixed(2) + ' from strike with ' + minutesLeft.toFixed(1) + ' min left'
+                };
+            }
+            if (!onRightSide) {
+                return {
+                    icon: '&#9888;', cssClass: 'advice-sell',
+                    text: 'SELL — ' + (probForBet * 100).toFixed(0) + '% win prob. Price on wrong side.',
+                    detail: !modelAgrees ? 'Model has flipped to opposite direction' : 'Model agrees but conditions unfavorable'
+                };
+            }
+
+            // Fallback
+            return {
+                icon: '&#9679;', cssClass: 'advice-hold',
+                text: 'HOLD — Position steady. ' + (probForBet * 100).toFixed(0) + '% win probability.',
+                detail: null
+            };
+        }
+
         // ── Next Period Preview ───────────────────────────────────────
         let nextPeriodPrediction = null;
         let nextPeriodShown = false;
@@ -3743,6 +3969,9 @@
             // Sell signal
             renderSellSignal('sell-signal-badge');
 
+            // Update position tracker
+            renderPositionUI();
+
             // Chart
             const chartPred = originalPrediction ? originalPrediction.predictedPrice : data.currentPrice;
             const targetLabel = formatTargetTime(periodEnd);
@@ -3845,6 +4074,12 @@
             kalshiCloseTime = null;
             kalshiMarketTicker = null;
             strikeIsPending = false;
+
+            // Clear position on period transition
+            myPosition = null;
+            localStorage.removeItem('myPosition');
+            renderPositionUI();
+
             clearNextPeriodPreview();
             saveSessionState();
 
@@ -4030,24 +4265,25 @@
                     // Same period, original exists — only update the secondary prediction
                     const rawUpdated = predictPrice(data, minutesAhead);
 
-                    // ── Anti flip-flop: EMA smoothing + hysteresis ──
+                    // ── Anti flip-flop: Stronger EMA smoothing + higher hysteresis ──
                     const strike = kalshiStrike || periodStartPrice;
                     if (lockedDirection === null && originalPrediction) {
                         lockedDirection = originalPrediction.predictedPrice >= strike ? 'up' : 'down';
                     }
 
-                    // Smooth probability (lower alpha near expiry = more stable)
-                    const alpha = minutesAhead <= 3 ? 0.20 : 0.35;
+                    // Smooth probability — lower alpha = more stable, especially near expiry
+                    const alpha = minutesAhead <= 2 ? 0.12 : minutesAhead <= 5 ? 0.18 : 0.25;
                     if (smoothedProbability === null) {
                         smoothedProbability = rawUpdated.probability;
                     } else {
                         smoothedProbability = alpha * rawUpdated.probability + (1 - alpha) * smoothedProbability;
                     }
 
-                    // Hysteresis: require strong signal to flip direction
-                    const flipThreshold = minutesAhead <= 2 ? 0.35
-                                        : minutesAhead <= 5 ? 0.20
-                                        : 0.12;
+                    // Hysteresis: require STRONG sustained signal to flip direction
+                    const flipThreshold = minutesAhead <= 2 ? 0.40
+                                        : minutesAhead <= 5 ? 0.28
+                                        : minutesAhead <= 10 ? 0.18
+                                        : 0.14;
 
                     if (lockedDirection === 'up' && smoothedProbability < (0.5 - flipThreshold)) {
                         lockedDirection = 'down';
@@ -4057,7 +4293,7 @@
                         console.log(`FLIP -> UP (smoothedP=${(smoothedProbability*100).toFixed(1)}%)`);
                     }
 
-                    // Override predicted price to locked side if direction was stabilized
+                    // Override predicted price to locked side if raw disagrees
                     const rawIsUp = rawUpdated.predictedPrice >= strike;
                     if ((lockedDirection === 'up') !== rawIsUp) {
                         const confDist = Math.abs(smoothedProbability - 0.5) * 2;
@@ -4067,6 +4303,9 @@
                             : strike - Math.max(offset, 0.01);
                         rawUpdated.changePercent = ((rawUpdated.predictedPrice - strike) / strike) * 100;
                     }
+
+                    // Use smoothed probability for display stability
+                    rawUpdated.probability = smoothedProbability;
 
                     updatedPrediction = rawUpdated;
 
@@ -4193,6 +4432,9 @@
                     document.getElementById('updated-confidence-fill').style.width = updConf + '%';
                     document.getElementById('updated-confidence-value').textContent = updConf + '%';
                 }
+
+                // Update position tracker in real-time
+                if (myPosition) renderPositionUI();
             }, 100);
         }
 
@@ -4205,6 +4447,7 @@
         });
 
         // ── Boot ──────────────────────────────────────────────────────
+        loadPosition();
         connectWebSocket(); // Connect to always-on server
         renderPredictionHistory();
         fetchAndPredict();

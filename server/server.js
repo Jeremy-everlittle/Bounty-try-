@@ -400,7 +400,7 @@ async function fetchAllData() {
                     recentTrades: state.recentTrades,
                     fundingRate: state.fundingRate
                 };
-                const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike);
+                const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike, periodKey);
                 store.updateCurrentPeriod({ updatedPrediction: updated });
 
                 // Compute sell signal

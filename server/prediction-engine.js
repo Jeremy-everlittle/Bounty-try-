@@ -18,6 +18,15 @@ const microState = {
     vpinBucketSize: 0,
 };
 
+// Anti-flip-flop state for updated predictions (persists within a period)
+const stabilityState = {
+    smoothedProbability: null,
+    lockedDirection: null,
+    consecutiveSameDirection: 0,
+    lastRawProb: null,
+    periodKey: null,
+};
+
 // ── Standard normal CDF (Abramowitz & Stegun) ──
 function normCDF(x) {
     if (x > 8) return 1;
@@ -950,28 +959,38 @@ function predictPrice(marketData, minutesAhead, strike) {
     else if (trendRegime.meanReverting) driftMultiplier = 0.3;
     else if (trendRegime.trending) driftMultiplier = 1.3;
 
-    // Early period momentum bias
+    // Early period momentum bias — stronger and starts immediately
     const minutesIntoPeriod = 15 - minutesAhead;
     let earlyMomentumSignal = 0;
-    if (minutesIntoPeriod <= 3 && strike > 0) {
+    if (minutesIntoPeriod <= 5 && strike > 0) {
         const openingMove = (current - strike) / strike;
         const openingMoveZ = perMinuteVol > 0 ? openingMove / (perMinuteVol * Math.sqrt(minutesIntoPeriod + 0.5)) : 0;
-        const earlyConf = Math.min(1.0, minutesIntoPeriod / 2.5);
-        if (Math.abs(openingMoveZ) > 0.5) {
-            earlyMomentumSignal = Math.sign(openingMoveZ) * Math.min(Math.abs(openingMoveZ) * 0.15, 0.4) * earlyConf;
+        // Confidence ramps up faster and starts sooner
+        const earlyConf = Math.min(1.0, minutesIntoPeriod / 1.5);
+        if (Math.abs(openingMoveZ) > 0.3) {
+            earlyMomentumSignal = Math.sign(openingMoveZ) * Math.min(Math.abs(openingMoveZ) * 0.20, 0.5) * earlyConf;
         }
     }
+
+    // Multi-timeframe momentum consensus — boost signal when all timeframes agree
+    const momSign3 = Math.sign(mom3);
+    const momSign5 = Math.sign(mom5);
+    const momSign10 = Math.sign(mom10);
+    const momConsensus = (momSign3 === momSign5 && momSign5 === momSign10 && momSign3 !== 0);
+    const momConsensusBoost = momConsensus ? 1.3 : 1.0;
 
     // SIGNAL 4: ORDER FLOW & MICROSTRUCTURE
     let orderFlowSignal = 0;
     let spreadVolAdjust = 1.0;
+    let orderFlowRaw = 0;
     if (orderBook) {
         const pressure = computeOrderBookPressureGradient(orderBook);
         const obDelta = computeOrderBookDelta(pressure.imbalance);
         const spread = computeSpreadAnalysis(orderBook);
         spreadVolAdjust = spread.volAdjustment;
-        orderFlowSignal = pressure.imbalance * 0.30 + pressure.gradient * 2.0 * 0.15 +
+        orderFlowRaw = pressure.imbalance * 0.30 + pressure.gradient * 2.0 * 0.15 +
                           obDelta.signal * 0.25 + spread.signal * 0.10;
+        orderFlowSignal = orderFlowRaw;
     }
 
     let tradeFlowSignal = 0;
@@ -985,10 +1004,17 @@ function predictPrice(marketData, minutesAhead, strike) {
         if (vpin.vpin > 0.4) vpinVolAdjust = 1.0 + (vpin.vpin - 0.4) * 0.5;
     }
 
+    // Order flow + trade flow agreement boost — when both sources agree, signal is much stronger
+    if (Math.sign(orderFlowSignal) === Math.sign(tradeFlowSignal) && Math.sign(orderFlowSignal) !== 0) {
+        const flowAgreementBoost = 1.25;
+        orderFlowSignal *= flowAgreementBoost;
+        tradeFlowSignal *= flowAgreementBoost;
+    }
+
     const microVolAdjust = spreadVolAdjust * vpinVolAdjust;
     const adjustedRemainingVol = remainingVol * microVolAdjust;
-    const driftWithEarlyBias = minutesIntoPeriod <= 3 ? rawDrift * 0.6 + earlyMomentumSignal * 0.4 : rawDrift;
-    const adjustedDrift = driftWithEarlyBias * driftMultiplier;
+    const driftWithEarlyBias = minutesIntoPeriod <= 5 ? rawDrift * 0.5 + earlyMomentumSignal * 0.5 : rawDrift;
+    const adjustedDrift = driftWithEarlyBias * driftMultiplier * momConsensusBoost;
     const driftZShift = adjustedRemainingVol > 0 ? adjustedDrift / adjustedRemainingVol : 0;
 
     // SIGNAL 5: RSI
@@ -1066,24 +1092,24 @@ function predictPrice(marketData, minutesAhead, strike) {
     const regM = getRegimeMultipliers(trendRegime, volRegime, blendedAC1);
 
     const rawTotalZShift = (
-        driftZShift          * (0.22 + earlyBoost * 0.08) * immediateBoosted * regM.momentum +
-        orderFlowSignal      * (0.12 + earlyBoost * 0.06) * immediateBoosted * regM.flow +
-        tradeFlowSignal      * (0.09 + earlyBoost * 0.04) * immediateBoosted * regM.flow +
+        driftZShift          * (0.25 + earlyBoost * 0.10) * immediateBoosted * regM.momentum +
+        orderFlowSignal      * (0.14 + earlyBoost * 0.08) * immediateBoosted * regM.flow +
+        tradeFlowSignal      * (0.10 + earlyBoost * 0.05) * immediateBoosted * regM.flow +
         rsiSignal            * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.reversion +
-        candlePattern.signal * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.pattern +
-        volumeSurgeSignal    * (0.05 + earlyBoost * 0.03) * regM.volume +
+        candlePattern.signal * (0.03 - earlyBoost * 0.01) * urgencyFade * regM.pattern +
+        volumeSurgeSignal    * (0.06 + earlyBoost * 0.04) * regM.volume +
         fundingSignal        * (0.02 - earlyBoost * 0.01) * urgencyFade +
-        momAccel * 20        * (0.02 + earlyBoost * 0.02) * immediateBoosted * regM.momentum +
+        momAccel * 20        * (0.03 + earlyBoost * 0.03) * immediateBoosted * regM.momentum +
         vwapSignal           * (0.06 + earlyBoost * 0.04) * regM.reversion +
         macdSignal           * (0.05 + earlyBoost * 0.03) * regM.momentum +
-        linRegSignal         * (0.04 + earlyBoost * 0.02) * regM.momentum +
-        bayesianPrior        * earlyBoost * 0.08 +
+        linRegSignal         * (0.05 + earlyBoost * 0.03) * regM.momentum +
+        bayesianPrior        * earlyBoost * 0.10 +
         bbSqueeze.breakoutSignal * 0.04 * regM.pattern +
         srSignal             * 0.04 * regM.reversion +
         haResult.signal      * (0.04 - earlyBoost * 0.01) * regM.pattern +
-        crossTF.signal       * (0.04 + earlyBoost * 0.03) * immediateBoosted * regM.momentum +
-        microMRSignal        * 0.08 * regM.reversion +
-        breakoutSignal       * 0.06 * regM.momentum +
+        crossTF.signal       * (0.05 + earlyBoost * 0.04) * immediateBoosted * regM.momentum +
+        microMRSignal        * 0.07 * regM.reversion +
+        breakoutSignal       * 0.07 * regM.momentum +
         cpSignal             * 0.04 * immediateBoosted
     );
     const totalZShift = rawTotalZShift * agreementMult;
@@ -1273,8 +1299,80 @@ function handleNewPeriod(periodKey, marketData, minutesAhead, strike, periodEnd)
     return prediction;
 }
 
-function handleSamePeriod(marketData, minutesAhead, strike) {
-    return predictPrice(marketData, minutesAhead, strike);
+function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
+    const raw = predictPrice(marketData, minutesAhead, strike);
+
+    // Reset stability state on new period
+    if (periodKey && periodKey !== stabilityState.periodKey) {
+        stabilityState.periodKey = periodKey;
+        stabilityState.smoothedProbability = null;
+        stabilityState.lockedDirection = null;
+        stabilityState.consecutiveSameDirection = 0;
+        stabilityState.lastRawProb = null;
+    }
+
+    // Initialize locked direction from first prediction of the period
+    if (stabilityState.lockedDirection === null) {
+        stabilityState.lockedDirection = raw.predictedPrice >= strike ? 'up' : 'down';
+        stabilityState.smoothedProbability = raw.probability;
+        stabilityState.lastRawProb = raw.probability;
+        return raw;
+    }
+
+    // EMA smooth the probability — lower alpha = more stable, especially near expiry
+    const alpha = minutesAhead <= 2 ? 0.12 : minutesAhead <= 5 ? 0.18 : 0.25;
+    stabilityState.smoothedProbability = alpha * raw.probability + (1 - alpha) * stabilityState.smoothedProbability;
+    const smoothedP = stabilityState.smoothedProbability;
+
+    // Track consecutive same-direction readings to build conviction
+    const rawIsUp = raw.predictedPrice >= strike;
+    const rawDir = rawIsUp ? 'up' : 'down';
+    if (rawDir === stabilityState.lockedDirection) {
+        stabilityState.consecutiveSameDirection = Math.min(stabilityState.consecutiveSameDirection + 1, 20);
+    } else {
+        // Decay counter when raw disagrees, but don't reset immediately
+        stabilityState.consecutiveSameDirection = Math.max(0, stabilityState.consecutiveSameDirection - 2);
+    }
+
+    // Hysteresis: require VERY strong sustained signal to flip direction
+    // Higher thresholds = more committed to original direction
+    const flipThreshold = minutesAhead <= 2 ? 0.40
+                        : minutesAhead <= 5 ? 0.28
+                        : minutesAhead <= 10 ? 0.18
+                        : 0.14;
+
+    // Need sustained conviction: both smoothed probability AND consecutive readings
+    const convictionRequired = Math.max(3, Math.floor(stabilityState.consecutiveSameDirection * 0.5));
+    const canFlip = stabilityState.consecutiveSameDirection <= 1;
+
+    if (canFlip && stabilityState.lockedDirection === 'up' && smoothedP < (0.5 - flipThreshold)) {
+        stabilityState.lockedDirection = 'down';
+        stabilityState.consecutiveSameDirection = 0;
+        console.log(`SERVER FLIP -> DOWN (smoothedP=${(smoothedP*100).toFixed(1)}%)`);
+    } else if (canFlip && stabilityState.lockedDirection === 'down' && smoothedP > (0.5 + flipThreshold)) {
+        stabilityState.lockedDirection = 'up';
+        stabilityState.consecutiveSameDirection = 0;
+        console.log(`SERVER FLIP -> UP (smoothedP=${(smoothedP*100).toFixed(1)}%)`);
+    }
+
+    // Override predicted price to match locked direction if raw disagrees
+    if ((stabilityState.lockedDirection === 'up') !== rawIsUp) {
+        const confDist = Math.abs(smoothedP - 0.5) * 2;
+        const offset = (raw._remainingVol || 0.002) * strike * confDist * 0.5;
+        raw.predictedPrice = stabilityState.lockedDirection === 'up'
+            ? strike + Math.max(offset, 0.01)
+            : strike - Math.max(offset, 0.01);
+        raw.changePercent = ((raw.predictedPrice - strike) / strike) * 100;
+    }
+
+    // Use smoothed probability instead of raw for more stable output
+    raw.probability = smoothedP;
+    raw._rawProbability = stabilityState.lastRawProb;
+    raw._lockedDirection = stabilityState.lockedDirection;
+    raw._consecutiveSame = stabilityState.consecutiveSameDirection;
+    stabilityState.lastRawProb = raw.probability;
+
+    return raw;
 }
 
 function gradeBayesianPrediction(currentPrice, periodKey) {
