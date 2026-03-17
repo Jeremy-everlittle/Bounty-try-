@@ -76,6 +76,26 @@
         @keyframes sellPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.85; } }
         @keyframes sellPulseUrgent { 0%, 100% { opacity: 1; } 50% { opacity: 0.9; box-shadow: 0 0 12px 2px rgba(248, 81, 73, 0.25); } }
 
+        /* Next Period Preview Card */
+        .next-period-card { display: none; border: 1px solid rgba(138, 180, 248, 0.3); background: linear-gradient(135deg, #161b22 0%, #1a2332 100%); }
+        .next-period-card.visible { display: block; animation: slideIn 0.4s ease-out; }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+        .next-period-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .next-period-label { font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px; color: #8ab4f8; font-weight: 600; }
+        .next-period-time { font-size: 11px; color: #b0b8c1; font-weight: 500; }
+        .next-period-badge { display: inline-block; font-size: 20px; font-weight: 800; letter-spacing: 2px; text-transform: uppercase; padding: 8px 20px; border-radius: 10px; margin: 8px 0; text-align: center; }
+        .next-period-badge.next-up { background: rgba(63, 185, 80, 0.15); color: #3fb950; border: 2px solid rgba(63, 185, 80, 0.3); }
+        .next-period-badge.next-down { background: rgba(248, 81, 73, 0.15); color: #f85149; border: 2px solid rgba(248, 81, 73, 0.3); }
+        .next-period-details { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+        .next-period-stat { background: rgba(255,255,255,0.04); border-radius: 8px; padding: 8px 10px; }
+        .next-period-stat-label { font-size: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 2px; }
+        .next-period-stat-value { font-size: 14px; font-weight: 700; }
+        .next-period-note { font-size: 10px; color: #8b949e; margin-top: 8px; text-align: center; font-style: italic; }
+        .next-period-signals { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+        .next-period-sig { font-size: 10px; padding: 3px 8px; border-radius: 6px; font-weight: 600; background: rgba(255,255,255,0.06); color: #b0b8c1; }
+        .next-period-sig.bullish { background: rgba(63, 185, 80, 0.12); color: #3fb950; }
+        .next-period-sig.bearish { background: rgba(248, 81, 73, 0.12); color: #f85149; }
+
         .card {
             background: #161b22;
             border: 1px solid #30363d;
@@ -602,6 +622,37 @@
         </div>
 
         <div id="sell-signal-badge"></div>
+
+        <!-- Next Period Preview Card -->
+        <div class="card next-period-card" id="next-period-card">
+            <div class="next-period-header">
+                <span class="next-period-label">Next Period Preview</span>
+                <span class="next-period-time" id="next-period-time"></span>
+            </div>
+            <div style="text-align:center;">
+                <div class="next-period-badge" id="next-period-badge">--</div>
+            </div>
+            <div class="next-period-details">
+                <div class="next-period-stat">
+                    <div class="next-period-stat-label">Predicted Price</div>
+                    <div class="next-period-stat-value" id="next-period-price">--</div>
+                </div>
+                <div class="next-period-stat">
+                    <div class="next-period-stat-label">Confidence</div>
+                    <div class="next-period-stat-value" id="next-period-confidence">--</div>
+                </div>
+                <div class="next-period-stat">
+                    <div class="next-period-stat-label">Win Probability</div>
+                    <div class="next-period-stat-value" id="next-period-prob">--</div>
+                </div>
+                <div class="next-period-stat">
+                    <div class="next-period-stat-label">Expected Move</div>
+                    <div class="next-period-stat-value" id="next-period-move">--</div>
+                </div>
+            </div>
+            <div class="next-period-signals" id="next-period-signals"></div>
+            <div class="next-period-note" id="next-period-note">Based on current trends — will update when next period opens</div>
+        </div>
 
         <div class="countdown" id="countdown">
             <span>Next period in</span>
@@ -3259,6 +3310,145 @@
                 '</div>';
         }
 
+        // ── Next Period Preview ───────────────────────────────────────
+        let nextPeriodPrediction = null;
+        let nextPeriodShown = false;
+
+        function computeNextPeriodPreview() {
+            if (!latestData || !latestData.currentPrice) return null;
+
+            // The next period's strike will be approximately the current price
+            // at the time the next period opens (i.e., roughly the current price)
+            const currentPrice = latestData.currentPrice;
+            const pseudoStrike = currentPrice;
+
+            // Save current kalshiStrike, temporarily set to current price
+            const savedStrike = kalshiStrike;
+            const savedPeriodStart = periodStartPrice;
+            kalshiStrike = pseudoStrike;
+            periodStartPrice = pseudoStrike;
+
+            try {
+                // Predict 15 minutes ahead (full next period)
+                const prediction = predictPrice(latestData, 15);
+                // Restore
+                kalshiStrike = savedStrike;
+                periodStartPrice = savedPeriodStart;
+
+                const isUp = prediction.predictedPrice >= pseudoStrike;
+                const move = prediction.predictedPrice - pseudoStrike;
+                const movePct = (move / pseudoStrike) * 100;
+
+                return {
+                    direction: isUp ? 'UP' : 'DOWN',
+                    predictedPrice: prediction.predictedPrice,
+                    confidence: prediction.confidence,
+                    probability: prediction.probability,
+                    move: move,
+                    movePct: movePct,
+                    signals: prediction.signals,
+                    strike: pseudoStrike,
+                    probForDirection: isUp ? prediction.probability : (1 - prediction.probability)
+                };
+            } catch(e) {
+                // Restore on error
+                kalshiStrike = savedStrike;
+                periodStartPrice = savedPeriodStart;
+                console.warn('Next period preview failed:', e);
+                return null;
+            }
+        }
+
+        function renderNextPeriodPreview() {
+            const card = document.getElementById('next-period-card');
+            if (!card) return;
+
+            const secs = currentTarget ? getSecondsUntilTarget(currentTarget) : 999;
+            const shouldShow = secs <= 180 && secs > 0 && !isTransitioning;
+
+            if (!shouldShow) {
+                if (nextPeriodShown) {
+                    card.classList.remove('visible');
+                    nextPeriodShown = false;
+                    nextPeriodPrediction = null;
+                }
+                return;
+            }
+
+            // Compute preview (recompute every 30s for freshness)
+            if (!nextPeriodPrediction || (secs % 30 === 0)) {
+                nextPeriodPrediction = computeNextPeriodPreview();
+            }
+            if (!nextPeriodPrediction) return;
+
+            const pred = nextPeriodPrediction;
+
+            // Show the card
+            if (!nextPeriodShown) {
+                card.classList.add('visible');
+                nextPeriodShown = true;
+            }
+
+            // Time window for next period
+            const nextStart = currentTarget;
+            const nextEnd = new Date(nextStart.getTime() + 15 * 60 * 1000);
+            document.getElementById('next-period-time').textContent =
+                formatTargetTime(nextStart) + ' \u2013 ' + formatTargetTime(nextEnd);
+
+            // Direction badge
+            const badge = document.getElementById('next-period-badge');
+            badge.textContent = pred.direction;
+            badge.className = 'next-period-badge ' + (pred.direction === 'UP' ? 'next-up' : 'next-down');
+
+            // Stats
+            document.getElementById('next-period-price').textContent = formatPrice(pred.predictedPrice);
+            document.getElementById('next-period-price').style.color = pred.direction === 'UP' ? '#3fb950' : '#f85149';
+
+            document.getElementById('next-period-confidence').textContent = (pred.confidence * 100).toFixed(0) + '%';
+            document.getElementById('next-period-confidence').style.color =
+                pred.confidence >= 0.65 ? '#3fb950' : pred.confidence >= 0.45 ? '#d29922' : '#f85149';
+
+            const probPct = (pred.probForDirection * 100).toFixed(0);
+            document.getElementById('next-period-prob').textContent = probPct + '%';
+            document.getElementById('next-period-prob').style.color =
+                pred.probForDirection >= 0.55 ? '#3fb950' : pred.probForDirection >= 0.40 ? '#d29922' : '#f85149';
+
+            const moveSign = pred.move >= 0 ? '+' : '';
+            document.getElementById('next-period-move').textContent =
+                moveSign + '$' + pred.move.toFixed(2) + ' (' + moveSign + pred.movePct.toFixed(3) + '%)';
+            document.getElementById('next-period-move').style.color = pred.move >= 0 ? '#3fb950' : '#f85149';
+
+            // Signal chips
+            const sigEl = document.getElementById('next-period-signals');
+            if (pred.signals) {
+                const chips = [];
+                const s = pred.signals;
+                if (s.momentum && s.momentum !== 'Neutral')
+                    chips.push('<span class="next-period-sig ' + (s.momentum === 'Bullish' ? 'bullish' : 'bearish') + '">' + s.momentum + ' momentum</span>');
+                if (s.trend && s.trend !== 'Neutral')
+                    chips.push('<span class="next-period-sig ' + (s.trend === 'Bullish' ? 'bullish' : 'bearish') + '">' + s.trend + ' trend</span>');
+                if (s.rsi && s.rsi !== 'Neutral')
+                    chips.push('<span class="next-period-sig ' + (s.rsi === 'Oversold' ? 'bullish' : 'bearish') + '">' + s.rsi + '</span>');
+                if (s.volatility)
+                    chips.push('<span class="next-period-sig">' + s.volatility + ' vol</span>');
+                sigEl.innerHTML = chips.join('');
+            } else {
+                sigEl.innerHTML = '';
+            }
+
+            // Note with freshness indicator
+            const freshness = secs <= 30 ? 'Finalizing...' : 'Updates every 30s';
+            document.getElementById('next-period-note').textContent =
+                'Preview based on current trends \u2014 ' + freshness + ' \u2014 strike may differ at open';
+        }
+
+        function clearNextPeriodPreview() {
+            nextPeriodPrediction = null;
+            nextPeriodShown = false;
+            const card = document.getElementById('next-period-card');
+            if (card) card.classList.remove('visible');
+        }
+
         // ── Chart ─────────────────────────────────────────────────────
 
         function drawChart(history, currentPrice, predictedPrice, targetLabel) {
@@ -3581,6 +3771,7 @@
             kalshiCloseTime = null;
             kalshiMarketTicker = null;
             strikeIsPending = false;
+            clearNextPeriodPreview();
             saveSessionState();
 
             // Update UI to show transition
@@ -3850,8 +4041,12 @@
                 const secs = getSecondsUntilTarget(currentTarget);
                 document.getElementById('countdown-time').textContent = formatCountdown(secs);
 
+                // Show/update next period preview in last 3 minutes
+                renderNextPeriodPreview();
+
                 // When we cross into a new quarter, enter transition state
                 if (secs <= 0) {
+                    clearNextPeriodPreview();
                     enterTransitionState();
                     retryForNewTicker();
                 }
