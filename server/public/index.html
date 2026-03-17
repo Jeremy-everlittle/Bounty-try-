@@ -2899,8 +2899,13 @@
             const blendedVol = longVol * volBlendRatio + shortVol * (1 - volBlendRatio);
             // Leverage effect: negative recent returns → vol boost (EGARCH)
             const recentReturn = n > 1 ? Math.log(prices[n-1] / prices[n-2]) : 0;
-            const leverageAdj = recentReturn < -0.001 ? 1.0 + Math.min(0.4, Math.abs(recentReturn) * 50) : 1.0;
-            const leverageAdjVol = rawPerMinVol * leverageAdj;
+            // BTC leverage effect is weak (EGARCH gamma ≈ -0.038), unlike equities
+            const leverageAdj = recentReturn < -0.002 ? 1.0 + Math.min(0.15, Math.abs(recentReturn) * 20) : 1.0;
+            // Weekend vol is ~20% lower than weekday (research confirmed)
+            const dayOfWeek = new Date().getUTCDay();
+            const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+            const weekendAdj = isWeekend ? 0.80 : 1.0;
+            const leverageAdjVol = rawPerMinVol * leverageAdj * weekendAdj;
             const perMinuteVol = Math.max(leverageAdjVol, blendedVol * 0.9);
 
             // Variance-ratio-adjusted time scaling (T^H instead of sqrt(T))

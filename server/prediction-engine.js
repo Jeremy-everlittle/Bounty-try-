@@ -1054,8 +1054,14 @@ function predictPrice(marketData, minutesAhead, strike) {
     // Leverage effect: negative recent returns → vol boost (EGARCH finding)
     // BTC has ~2x vol increase after negative shocks
     const recentReturn = n > 1 ? Math.log(prices[n-1] / prices[n-2]) : 0;
-    const leverageAdj = recentReturn < -0.001 ? 1.0 + Math.min(0.4, Math.abs(recentReturn) * 50) : 1.0;
-    const leverageAdjVol = rawPerMinVol * leverageAdj;
+    // Leverage effect is WEAK in BTC (EGARCH gamma ≈ -0.038, unlike equities)
+    // Reduced from 40% max to 15% max boost on negative returns
+    const leverageAdj = recentReturn < -0.002 ? 1.0 + Math.min(0.15, Math.abs(recentReturn) * 20) : 1.0;
+    // Weekend vol reduction: weekday vol is substantially higher than weekends
+    const dayOfWeek = new Date().getUTCDay();
+    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+    const weekendAdj = isWeekend ? 0.80 : 1.0; // 20% lower vol on weekends
+    const leverageAdjVol = rawPerMinVol * leverageAdj * weekendAdj;
     const shortVol = computeRealizedVol(prices, Math.min(8, n - 1));
     const longVol = computeRealizedVol(prices, Math.min(60, n - 1));
     const volBlendRatio = minutesAhead / 15;
