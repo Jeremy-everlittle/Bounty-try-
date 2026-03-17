@@ -207,6 +207,22 @@ function extractStrike(m) {
     return null;
 }
 
+// ── ETH Price (for cross-asset lead-lag signal) ──
+async function fetchEthPrice() {
+    const data = await fetchJSON('https://api.binance.com/api/v3/ticker/bookTicker?symbol=ETHUSDT');
+    if (data && data.bidPrice && data.askPrice) {
+        return (parseFloat(data.bidPrice) + parseFloat(data.askPrice)) / 2;
+    }
+    return null;
+}
+
+// ── BTC Futures Open Interest (volatility predictor) ──
+async function fetchOpenInterest() {
+    const data = await fetchJSON('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT');
+    if (data && data.openInterest) return parseFloat(data.openInterest);
+    return null;
+}
+
 // ── Binance Order Book ──
 async function fetchOrderBook() {
     return await fetchJSON('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=20');
@@ -252,6 +268,10 @@ const state = {
     orderBook: null,
     recentTrades: null,
     fundingRate: null,
+    ethPrice: null,
+    ethPriceHistory: [], // last 15 ETH prices for lead-lag
+    openInterest: null,
+    openInterestHistory: [], // last 15 OI values for rate-of-change
     history: [],
     lastUpdate: null,
     periodKey: null,
@@ -295,13 +315,15 @@ async function fetchAllData() {
     console.log(`\n--- Fetch cycle @ ${new Date().toLocaleTimeString()} ---`);
     try {
         // Parallel fetch all data sources
-        const [brti, kalshi, orderBook, trades, fundingRate, history] = await Promise.allSettled([
+        const [brti, kalshi, orderBook, trades, fundingRate, history, ethPrice, openInterest] = await Promise.allSettled([
             fetchBRTIApprox(),
             fetchKalshiData(),
             fetchOrderBook(),
             fetchRecentTrades(),
             fetchFundingRate(),
-            fetchHistory()
+            fetchHistory(),
+            fetchEthPrice(),
+            fetchOpenInterest()
         ]);
 
         if (brti.status === 'fulfilled' && brti.value) {
@@ -332,6 +354,18 @@ async function fetchAllData() {
 
         if (fundingRate.status === 'fulfilled' && fundingRate.value !== null) {
             state.fundingRate = fundingRate.value;
+        }
+
+        if (ethPrice.status === 'fulfilled' && ethPrice.value !== null) {
+            state.ethPrice = ethPrice.value;
+            state.ethPriceHistory.push(ethPrice.value);
+            if (state.ethPriceHistory.length > 15) state.ethPriceHistory.shift();
+        }
+
+        if (openInterest.status === 'fulfilled' && openInterest.value !== null) {
+            state.openInterest = openInterest.value;
+            state.openInterestHistory.push(openInterest.value);
+            if (state.openInterestHistory.length > 15) state.openInterestHistory.shift();
         }
 
         if (history.status === 'fulfilled' && history.value) {
@@ -366,7 +400,11 @@ async function fetchAllData() {
                         history: state.history,
                         orderBook: state.orderBook,
                         recentTrades: state.recentTrades,
-                        fundingRate: state.fundingRate
+                        fundingRate: state.fundingRate,
+                        ethPrice: state.ethPrice,
+                        ethPriceHistory: state.ethPriceHistory,
+                        openInterest: state.openInterest,
+                        openInterestHistory: state.openInterestHistory
                     };
                     const prediction = engine.handleNewPeriod(periodKey, marketData, minutesAhead, state.kalshiStrike, periodEnd);
                     store.updateCurrentPeriod({

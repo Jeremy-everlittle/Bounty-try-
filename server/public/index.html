@@ -1904,6 +1904,103 @@
             return 0.5 * (1.0 + sign * y);
         }
 
+        // ── Student-t CDF approximation (for fat tails) ──
+        // BTC 15-min returns have kurtosis ~8-12, well-modeled by Student-t(df=4-5)
+        // Using regularized incomplete beta function approximation
+        function studentTCDF(x, df) {
+            if (df <= 0) return normCDF(x);
+            if (df > 30) return normCDF(x); // converges to normal
+            // Use the regularized incomplete beta function relationship:
+            // t_CDF(x, df) = 1 - 0.5 * I(df/(df+x^2), df/2, 0.5) for x > 0
+            const t2 = x * x;
+            const u = df / (df + t2);
+            // Approximation of regularized incomplete beta via continued fraction
+            // For our use case (df=4-5), this is accurate to ~4 decimal places
+            const a = df / 2, b = 0.5;
+            let betaInc;
+            if (u >= (a + 1) / (a + b + 2)) {
+                betaInc = 1 - incompleteBetaApprox(1 - u, b, a);
+            } else {
+                betaInc = incompleteBetaApprox(u, a, b);
+            }
+            const p = 0.5 * betaInc;
+            return x >= 0 ? 1 - p : p;
+        }
+
+        // Simple incomplete beta via series expansion (accurate for small x or when a is small)
+        function incompleteBetaApprox(x, a, b) {
+            if (x <= 0) return 0;
+            if (x >= 1) return 1;
+            // Use Lentz's continued fraction for regularized incomplete beta
+            const lnBeta = lnGamma(a) + lnGamma(b) - lnGamma(a + b);
+            const front = Math.exp(Math.log(x) * a + Math.log(1 - x) * b - lnBeta) / a;
+            // Modified Lentz's method
+            let f = 1, c = 1, d = 1 - (a + b) * x / (a + 1);
+            if (Math.abs(d) < 1e-30) d = 1e-30;
+            d = 1 / d;
+            f = d;
+            for (let m = 1; m <= 100; m++) {
+                // Even step
+                let numerator = m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m));
+                d = 1 + numerator * d;
+                if (Math.abs(d) < 1e-30) d = 1e-30;
+                c = 1 + numerator / c;
+                if (Math.abs(c) < 1e-30) c = 1e-30;
+                d = 1 / d;
+                f *= c * d;
+                // Odd step
+                numerator = -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1));
+                d = 1 + numerator * d;
+                if (Math.abs(d) < 1e-30) d = 1e-30;
+                c = 1 + numerator / c;
+                if (Math.abs(c) < 1e-30) c = 1e-30;
+                d = 1 / d;
+                const delta = c * d;
+                f *= delta;
+                if (Math.abs(delta - 1) < 1e-8) break;
+            }
+            return front * f;
+        }
+
+        // Log gamma via Stirling approximation (accurate for a > 0.5)
+        function lnGamma(z) {
+            if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - lnGamma(1 - z);
+            z -= 1;
+            const g = 7;
+            const c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+                771.32342877765313, -176.61502916214059, 12.507343278686905,
+                -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+            let x = c[0];
+            for (let i = 1; i < g + 2; i++) x += c[i] / (z + i);
+            const t = z + g + 0.5;
+            return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x);
+        }
+
+        // Fat-tail-aware CDF: uses Student-t(df) instead of normal
+        // df is estimated from sample kurtosis: df ≈ 6/excess_kurtosis + 4
+        function fatTailCDF(x, prices) {
+            if (!prices || prices.length < 20) return normCDF(x);
+            // Estimate excess kurtosis from recent returns
+            const n = Math.min(prices.length, 60);
+            const returns = [];
+            for (let i = prices.length - n; i < prices.length; i++) {
+                if (i > 0) returns.push(Math.log(prices[i] / prices[i - 1]));
+            }
+            if (returns.length < 15) return normCDF(x);
+            const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+            const m2 = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length;
+            const m4 = returns.reduce((s, r) => s + (r - mean) ** 4, 0) / returns.length;
+            const kurtosis = m2 > 0 ? m4 / (m2 * m2) : 3;
+            const excessKurtosis = kurtosis - 3;
+
+            if (excessKurtosis <= 0.5) return normCDF(x); // near-normal, use normal
+
+            // Estimate df from excess kurtosis: excess_kurt = 6/(df-4) for df>4
+            // Solving: df = 6/excess_kurt + 4
+            const df = Math.max(3.5, Math.min(30, 6 / Math.max(excessKurtosis, 0.3) + 4));
+            return studentTCDF(x, df);
+        }
+
         // ── Realized volatility from log returns ──
         function computeRealizedVol(prices, window) {
             if (prices.length < 3) return 0.001;
@@ -2808,10 +2905,37 @@
             const todMult = getIntradayVolMultiplier();
             const remainingVol = rawRemainingVol * (0.70 + 0.30 * todMult);
 
+            // Settlement-aware volatility compression
+            // Kalshi settles to 60-second trimmed average of CF Benchmarks RTI
+            // (top/bottom 20% excluded = 36 values averaged)
+            // Variance of trimmed mean ≈ var(spot) / effective_n
+            // For 20% trimming: effective_n ≈ 36 (not 60, due to trimming)
+            // But observations are autocorrelated (AR ~0.95 at 1-sec), so effective_n ≈ 12-15
+            // Net: settlement vol ≈ spot vol / sqrt(12) ≈ 0.29x spot vol in final minute
+            let settlementVolAdj = 1.0;
+            if (minutesAhead <= 1) {
+                // Linear ramp: at T-60s, factor=0.45; at T-0s, factor=0.29
+                const secAhead = minutesAhead * 60;
+                const fraction = Math.max(0, Math.min(1, secAhead / 60));
+                settlementVolAdj = 0.29 + fraction * 0.16; // 0.29 at expiry, 0.45 at T-1min
+            } else if (minutesAhead <= 2) {
+                // Gradual transition: 0.65 at T-2min to 0.45 at T-1min
+                const frac = (minutesAhead - 1); // 0 at T-1min, 1 at T-2min
+                settlementVolAdj = 0.45 + frac * 0.20;
+            } else if (minutesAhead <= 3) {
+                const frac = (minutesAhead - 2);
+                settlementVolAdj = 0.65 + frac * 0.15; // 0.65 to 0.80
+            } else if (minutesAhead <= 5) {
+                const frac = (minutesAhead - 3) / 2;
+                settlementVolAdj = 0.80 + frac * 0.20; // 0.80 to 1.00
+            }
+            const settlementVol = remainingVol * settlementVolAdj;
+
             // Z-score: how many sigma is price from strike?
-            const zScore = remainingVol > 0 ? Math.log(current / strike) / remainingVol : 0;
-            // P(finish above strike) from z-score alone
-            const positionalProb = normCDF(zScore);
+            const zScore = settlementVol > 0 ? Math.log(current / strike) / settlementVol : 0;
+            // P(finish above strike) — uses fat-tail CDF (Student-t) to account for
+            // BTC's excess kurtosis (~8-12 at 15-min scale)
+            const positionalProb = fatTailCDF(zScore, prices);
 
             // ────────────────────────────────────────────────────────────
             // SIGNAL 2: MOMENTUM / DRIFT
@@ -3076,7 +3200,7 @@
 
             // Final probability: combine in log-odds space (mathematically correct)
             // Scale drift contribution: 0.8x — momentum is evidence, not law
-            const driftAdjustedProb = normCDF(zScore + totalZShift * (1 - positionalWeight) * 0.8);
+            const driftAdjustedProb = fatTailCDF(zScore + totalZShift * (1 - positionalWeight) * 0.8, prices);
 
             // Log-odds combination: more principled than linear blend
             function toLogOdds(p) { return Math.log(Math.max(p, 0.001) / Math.max(1 - p, 0.001)); }
@@ -3119,7 +3243,7 @@
             // Old approach extrapolated from strike — caused massive overshoots
             const confidenceDistance = Math.abs(finalProb - 0.5) * 2; // 0-1
             // Max drift: 15% of 1-sigma from current price (very conservative)
-            const maxDrift = adjustedRemainingVol * current * 0.15;
+            const maxDrift = adjustedRemainingVol * settlementVolAdj * current * 0.15;
             const drift = maxDrift * confidenceDistance;
             const predictedPrice = predictUp
                 ? current + Math.max(drift, 0.01)

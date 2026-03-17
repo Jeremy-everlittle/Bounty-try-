@@ -40,6 +40,82 @@ function normCDF(x) {
     return 0.5 * (1.0 + sign * y);
 }
 
+// ── Student-t CDF for fat-tail correction ──
+function studentTCDF(x, df) {
+    if (df <= 0 || df > 30) return normCDF(x);
+    const t2 = x * x;
+    const u = df / (df + t2);
+    const a = df / 2, b = 0.5;
+    let betaInc;
+    if (u >= (a + 1) / (a + b + 2)) {
+        betaInc = 1 - incompleteBetaApprox(1 - u, b, a);
+    } else {
+        betaInc = incompleteBetaApprox(u, a, b);
+    }
+    const p = 0.5 * betaInc;
+    return x >= 0 ? 1 - p : p;
+}
+
+function incompleteBetaApprox(x, a, b) {
+    if (x <= 0) return 0;
+    if (x >= 1) return 1;
+    const lnBeta = lnGamma(a) + lnGamma(b) - lnGamma(a + b);
+    const front = Math.exp(Math.log(x) * a + Math.log(1 - x) * b - lnBeta) / a;
+    let f = 1, c = 1, d = 1 - (a + b) * x / (a + 1);
+    if (Math.abs(d) < 1e-30) d = 1e-30;
+    d = 1 / d;
+    f = d;
+    for (let m = 1; m <= 100; m++) {
+        let numerator = m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m));
+        d = 1 + numerator * d;
+        if (Math.abs(d) < 1e-30) d = 1e-30;
+        c = 1 + numerator / c;
+        if (Math.abs(c) < 1e-30) c = 1e-30;
+        d = 1 / d;
+        f *= c * d;
+        numerator = -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1));
+        d = 1 + numerator * d;
+        if (Math.abs(d) < 1e-30) d = 1e-30;
+        c = 1 + numerator / c;
+        if (Math.abs(c) < 1e-30) c = 1e-30;
+        d = 1 / d;
+        const delta = c * d;
+        f *= delta;
+        if (Math.abs(delta - 1) < 1e-8) break;
+    }
+    return front * f;
+}
+
+function lnGamma(z) {
+    if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - lnGamma(1 - z);
+    z -= 1;
+    const c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+        771.32342877765313, -176.61502916214059, 12.507343278686905,
+        -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+    let x = c[0];
+    for (let i = 1; i < 9; i++) x += c[i] / (z + i);
+    const t = z + 7.5;
+    return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x);
+}
+
+function fatTailCDF(x, prices) {
+    if (!prices || prices.length < 20) return normCDF(x);
+    const n = Math.min(prices.length, 60);
+    const returns = [];
+    for (let i = prices.length - n; i < prices.length; i++) {
+        if (i > 0) returns.push(Math.log(prices[i] / prices[i - 1]));
+    }
+    if (returns.length < 15) return normCDF(x);
+    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+    const m2 = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length;
+    const m4 = returns.reduce((s, r) => s + (r - mean) ** 4, 0) / returns.length;
+    const kurtosis = m2 > 0 ? m4 / (m2 * m2) : 3;
+    const excessKurtosis = kurtosis - 3;
+    if (excessKurtosis <= 0.5) return normCDF(x);
+    const df = Math.max(3.5, Math.min(30, 6 / Math.max(excessKurtosis, 0.3) + 4));
+    return studentTCDF(x, df);
+}
+
 function computeRealizedVol(prices, window) {
     if (prices.length < 3) return 0.001;
     window = Math.min(window, prices.length - 1);
@@ -459,24 +535,26 @@ function computeSRNearStrike(history, strike) {
 
 function getRegimeMultipliers(trendRegime, volRegime, ac1) {
     const m = { momentum: 1.0, flow: 1.0, reversion: 1.0, pattern: 1.0, volume: 1.0 };
-    if (ac1 > 0.15 || trendRegime.trending) {
-        m.momentum = 1.4; m.flow = 1.3; m.reversion = 0.3; m.pattern = 0.8;
-    } else if (ac1 < -0.15 || trendRegime.meanReverting) {
-        m.momentum = 0.5; m.flow = 0.8; m.reversion = 1.8; m.pattern = 1.2;
+    // Trending: trust momentum but don't amplify — no boost above 1.0
+    if (ac1 > 0.35 || trendRegime.trending) {
+        m.momentum = 1.0; m.flow = 1.0; m.reversion = 0.65; m.pattern = 0.85;
+    } else if (ac1 < -0.35 || trendRegime.meanReverting) {
+        m.momentum = 0.35; m.flow = 0.60; m.reversion = 1.80; m.pattern = 0.80;
     }
     if (volRegime.regime === 'volatile' || volRegime.regime === 'expanding') {
-        m.flow *= 1.3; m.volume *= 1.5; m.momentum *= 0.8;
+        m.flow *= 1.15; m.volume *= 1.25; m.momentum *= 0.90;
     } else if (volRegime.regime === 'quiet') {
-        m.flow *= 0.6; m.momentum *= 1.2;
+        m.flow *= 0.6; m.momentum *= 1.0;
     }
     return m;
 }
 
 function timePolarize(prob, minutesAhead, totalMinutes, maxExponent) {
     if (typeof totalMinutes === 'undefined') totalMinutes = 15;
-    if (typeof maxExponent === 'undefined') maxExponent = 3.0;
+    if (typeof maxExponent === 'undefined') maxExponent = 1.5;
     const timeProgress = 1 - Math.max(0, Math.min(1, minutesAhead / totalMinutes));
-    const exponent = 1 + (maxExponent - 1) * timeProgress * timeProgress;
+    // Linear ramp: gentler polarization — old quadratic pushed extremes too hard
+    const exponent = 1 + (maxExponent - 1) * timeProgress;
     const d = 2 * prob - 1;
     const sign = d >= 0 ? 1 : -1;
     const polarizedD = sign * Math.pow(Math.abs(d), 1 / exponent);
@@ -629,6 +707,43 @@ function detectBreakout(prices, history) {
     return { signal: Math.max(-1, Math.min(1, signal)), breakout: true };
 }
 
+// ── Cross-asset signals ──
+function computeEthLeadLag(btcPrices, ethPriceHistory) {
+    // ETH often leads BTC by 1-2 ticks at intraday scale
+    // Compare ETH's recent momentum with BTC's — divergence is a signal
+    if (!ethPriceHistory || ethPriceHistory.length < 3 || btcPrices.length < 3) {
+        return { signal: 0, ethMom: 0, btcMom: 0 };
+    }
+    const n = ethPriceHistory.length;
+    const ethMom = (ethPriceHistory[n-1] - ethPriceHistory[n-3]) / ethPriceHistory[n-3];
+    const bn = btcPrices.length;
+    const btcMom = (btcPrices[bn-1] - btcPrices[bn-3]) / btcPrices[bn-3];
+    // If ETH is moving but BTC hasn't followed yet, that's a lead signal
+    const divergence = ethMom - btcMom;
+    // Clamp to ±0.3
+    const signal = Math.max(-0.3, Math.min(0.3, divergence * 100));
+    return { signal, ethMom, btcMom };
+}
+
+function computeOIVolSignal(openInterestHistory) {
+    // Rapid OI changes predict higher volatility (not direction)
+    // Use rate-of-change of OI to adjust vol estimate
+    if (!openInterestHistory || openInterestHistory.length < 3) {
+        return { volMultiplier: 1.0, oiChange: 0 };
+    }
+    const n = openInterestHistory.length;
+    const recent = openInterestHistory[n-1];
+    const prior = openInterestHistory[Math.max(0, n-3)];
+    if (prior <= 0) return { volMultiplier: 1.0, oiChange: 0 };
+    const oiChange = Math.abs(recent - prior) / prior;
+    // OI change > 2% in 3 ticks (30 sec) → vol boost
+    let volMultiplier = 1.0;
+    if (oiChange > 0.05) volMultiplier = 1.30; // 5% OI change → 30% vol boost
+    else if (oiChange > 0.02) volMultiplier = 1.15;
+    else if (oiChange > 0.01) volMultiplier = 1.05;
+    return { volMultiplier, oiChange };
+}
+
 function detectChangePoints(prices) {
     const n = prices.length;
     if (n < 10) return { detected: false, recentShift: false, signal: 0, currentRegimeLength: n };
@@ -676,11 +791,12 @@ function computeAgreementMultiplier(signals) {
     }
     if (totalWeight === 0) return 1.0;
     const dominantPct = Math.max(positiveWeight, negativeWeight) / totalWeight;
-    if (dominantPct > 0.80) return 1.30;
-    if (dominantPct > 0.65) return 1.10;
-    if (dominantPct < 0.50) return 0.60;
-    if (dominantPct < 0.60) return 0.80;
-    return 1.0;
+    // In mean-reverting market, agreement = momentum chasing, not confirmation
+    if (dominantPct > 0.80) return 1.05;
+    if (dominantPct > 0.65) return 1.0;
+    if (dominantPct < 0.50) return 0.55;
+    if (dominantPct < 0.60) return 0.70;
+    return 0.90;
 }
 
 function computeHeikinAshi(history) {
@@ -929,12 +1045,29 @@ function predictPrice(marketData, minutesAhead, strike) {
     const longVol = computeRealizedVol(prices, Math.min(60, n - 1));
     const volBlendRatio = minutesAhead / 15;
     const blendedVol = longVol * volBlendRatio + shortVol * (1 - volBlendRatio);
-    const perMinuteVol = Math.max(rawPerMinVol, blendedVol * 0.8);
+    const perMinuteVol = Math.max(rawPerMinVol, blendedVol * 0.9);
     const { remainingVol: rawRemainingVol, H } = computeAdjustedRemainingVol(perMinuteVol, minutesAhead, prices);
     const todMult = getIntradayVolMultiplier();
     const remainingVol = rawRemainingVol * (0.70 + 0.30 * todMult);
-    const zScore = remainingVol > 0 ? Math.log(current / strike) / remainingVol : 0;
-    const positionalProb = normCDF(zScore);
+    // Settlement-aware volatility compression
+    // Kalshi settles to 60-second trimmed average of CF Benchmarks RTI
+    // (top/bottom 20% excluded = 36 values averaged)
+    // With autocorrelation, effective_n ≈ 12-15 → settlement vol ≈ spot vol * 0.29
+    let settlementVolAdj = 1.0;
+    if (minutesAhead <= 1) {
+        const secAhead = minutesAhead * 60;
+        const fraction = Math.max(0, Math.min(1, secAhead / 60));
+        settlementVolAdj = 0.29 + fraction * 0.16;
+    } else if (minutesAhead <= 2) {
+        settlementVolAdj = 0.45 + (minutesAhead - 1) * 0.20;
+    } else if (minutesAhead <= 3) {
+        settlementVolAdj = 0.65 + (minutesAhead - 2) * 0.15;
+    } else if (minutesAhead <= 5) {
+        settlementVolAdj = 0.80 + (minutesAhead - 3) / 2 * 0.20;
+    }
+    const settlementVol = remainingVol * settlementVolAdj;
+    const zScore = settlementVol > 0 ? Math.log(current / strike) / settlementVol : 0;
+    const positionalProb = fatTailCDF(zScore, prices);
 
     // SIGNAL 2: MOMENTUM / DRIFT
     const mom3 = n > 3 ? (prices[n-1] - prices[n-4]) / prices[n-4] : 0;
@@ -947,37 +1080,31 @@ function predictPrice(marketData, minutesAhead, strike) {
     const recentMom = mom3;
     const priorMom = n > 6 ? (prices[n-4] - prices[n-7]) / prices[n-7] : 0;
     const momAccel = recentMom - priorMom;
-    const rawDrift = mom3 * 0.35 + mom5 * 0.25 + vwMom5 * 0.20 + mom10 * 0.10 + emaTrend * 0.10;
+    const rawDrift = mom3 * 0.15 + mom5 * 0.20 + vwMom5 * 0.25 + mom10 * 0.25 + emaTrend * 0.15;
 
     // SIGNAL 3: REGIME DETECTION
     const volRegime = detectVolRegime(prices);
     const trendRegime = detectTrendRegime(prices, n);
     const ac1 = computeAutocorrelation(prices, 1);
     let driftMultiplier = 1.0;
-    if (ac1 < -0.15) driftMultiplier = -0.3;
-    else if (ac1 > 0.15) driftMultiplier = 1.5;
-    else if (trendRegime.meanReverting) driftMultiplier = 0.3;
-    else if (trendRegime.trending) driftMultiplier = 1.3;
+    if (ac1 < -0.35) driftMultiplier = 0.15;
+    else if (ac1 > 0.35) driftMultiplier = 0.95;
+    else if (trendRegime.meanReverting) driftMultiplier = 0.25;
+    else if (trendRegime.trending) driftMultiplier = 1.0;
 
     // Early period momentum bias — stronger and starts immediately
     const minutesIntoPeriod = 15 - minutesAhead;
     let earlyMomentumSignal = 0;
-    if (minutesIntoPeriod <= 5 && strike > 0) {
+    if (minutesIntoPeriod <= 3 && strike > 0) {
         const openingMove = (current - strike) / strike;
         const openingMoveZ = perMinuteVol > 0 ? openingMove / (perMinuteVol * Math.sqrt(minutesIntoPeriod + 0.5)) : 0;
-        // Confidence ramps up faster and starts sooner
-        const earlyConf = Math.min(1.0, minutesIntoPeriod / 1.5);
-        if (Math.abs(openingMoveZ) > 0.3) {
-            earlyMomentumSignal = Math.sign(openingMoveZ) * Math.min(Math.abs(openingMoveZ) * 0.20, 0.5) * earlyConf;
+        const earlyConf = Math.min(1.0, minutesIntoPeriod / 2.5);
+        if (Math.abs(openingMoveZ) > 0.5) {
+            earlyMomentumSignal = Math.sign(openingMoveZ) * Math.min(Math.abs(openingMoveZ) * 0.10, 0.25) * earlyConf;
         }
     }
 
-    // Multi-timeframe momentum consensus — boost signal when all timeframes agree
-    const momSign3 = Math.sign(mom3);
-    const momSign5 = Math.sign(mom5);
-    const momSign10 = Math.sign(mom10);
-    const momConsensus = (momSign3 === momSign5 && momSign5 === momSign10 && momSign3 !== 0);
-    const momConsensusBoost = momConsensus ? 1.3 : 1.0;
+    // Momentum consensus removed — in mean-reverting market, agreement = momentum chasing
 
     // SIGNAL 4: ORDER FLOW & MICROSTRUCTURE
     let orderFlowSignal = 0;
@@ -1004,26 +1131,21 @@ function predictPrice(marketData, minutesAhead, strike) {
         if (vpin.vpin > 0.4) vpinVolAdjust = 1.0 + (vpin.vpin - 0.4) * 0.5;
     }
 
-    // Order flow + trade flow agreement boost — when both sources agree, signal is much stronger
-    if (Math.sign(orderFlowSignal) === Math.sign(tradeFlowSignal) && Math.sign(orderFlowSignal) !== 0) {
-        const flowAgreementBoost = 1.25;
-        orderFlowSignal *= flowAgreementBoost;
-        tradeFlowSignal *= flowAgreementBoost;
-    }
+    // Flow agreement boost removed — order flow decays to noise at 15-min horizon
 
-    const microVolAdjust = spreadVolAdjust * vpinVolAdjust;
+    const microVolAdjust = spreadVolAdjust * vpinVolAdjust * oiSignal.volMultiplier;
     const adjustedRemainingVol = remainingVol * microVolAdjust;
-    const driftWithEarlyBias = minutesIntoPeriod <= 5 ? rawDrift * 0.5 + earlyMomentumSignal * 0.5 : rawDrift;
-    const adjustedDrift = driftWithEarlyBias * driftMultiplier * momConsensusBoost;
+    const driftWithEarlyBias = minutesIntoPeriod <= 3 ? rawDrift * 0.75 + earlyMomentumSignal * 0.25 : rawDrift;
+    const adjustedDrift = driftWithEarlyBias * driftMultiplier;
     const driftZShift = adjustedRemainingVol > 0 ? adjustedDrift / adjustedRemainingVol : 0;
 
     // SIGNAL 5: RSI
     const rsi = computeRSI(prices);
     let rsiSignal = 0;
-    if (rsi > 80) rsiSignal = -0.4;
-    else if (rsi > 70) rsiSignal = -0.2;
-    else if (rsi < 20) rsiSignal = 0.4;
-    else if (rsi < 30) rsiSignal = 0.2;
+    if (rsi > 75) rsiSignal = -0.5;
+    else if (rsi > 65) rsiSignal = -0.25;
+    else if (rsi < 25) rsiSignal = 0.5;
+    else if (rsi < 35) rsiSignal = 0.25;
 
     // SIGNAL 6: CANDLE PATTERNS
     const candlePattern = detectCandlePatterns(history);
@@ -1045,13 +1167,19 @@ function predictPrice(marketData, minutesAhead, strike) {
         fundingSignal = -Math.sign(marketData.fundingRate) * 0.15;
     }
 
+    // SIGNAL 20: ETH LEAD-LAG (cross-asset)
+    const ethLL = computeEthLeadLag(prices, marketData.ethPriceHistory);
+
+    // SIGNAL 21: OPEN INTEREST VOL ADJUSTMENT
+    const oiSignal = computeOIVolSignal(marketData.openInterestHistory);
+
     // COMBINE SIGNALS
     const timeProgress = Math.max(0, Math.min(1, 1 - (minutesAhead / 15)));
-    const sigK = 6, sigMid = 0.5;
+    const sigK = 4, sigMid = 0.6;
     const sigRaw = 1 / (1 + Math.exp(-sigK * (timeProgress - sigMid)));
     const sigMin = 1 / (1 + Math.exp(sigK * sigMid));
     const sigMax = 1 / (1 + Math.exp(-sigK * sigMid));
-    const positionalWeight = 0.35 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.62;
+    const positionalWeight = 0.75 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.23;
 
     const vwapResult = computeAnchoredVWAP(history);
     const vwapSignal = Math.max(-0.5, Math.min(0.5, vwapResult.deviation * 1000));
@@ -1083,7 +1211,8 @@ function predictPrice(marketData, minutesAhead, strike) {
         { value: bbSqueeze.breakoutSignal, weight: 0.04 }, { value: haResult.signal, weight: 0.04 },
         { value: crossTF.signal, weight: 0.04 }, { value: rsiSignal, weight: 0.04 },
         { value: candlePattern.signal, weight: 0.04 }, { value: microMRSignal, weight: 0.08 },
-        { value: breakoutSignal, weight: 0.06 }, { value: cpSignal, weight: 0.04 }
+        { value: breakoutSignal, weight: 0.06 }, { value: cpSignal, weight: 0.04 },
+        { value: ethLL.signal, weight: 0.04 }
     ];
     const agreementMult = computeAgreementMultiplier(allSignals);
 
@@ -1092,54 +1221,61 @@ function predictPrice(marketData, minutesAhead, strike) {
     const regM = getRegimeMultipliers(trendRegime, volRegime, blendedAC1);
 
     const rawTotalZShift = (
-        driftZShift          * (0.25 + earlyBoost * 0.10) * immediateBoosted * regM.momentum +
-        orderFlowSignal      * (0.14 + earlyBoost * 0.08) * immediateBoosted * regM.flow +
-        tradeFlowSignal      * (0.10 + earlyBoost * 0.05) * immediateBoosted * regM.flow +
-        rsiSignal            * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.reversion +
-        candlePattern.signal * (0.03 - earlyBoost * 0.01) * urgencyFade * regM.pattern +
-        volumeSurgeSignal    * (0.06 + earlyBoost * 0.04) * regM.volume +
+        driftZShift          * (0.10 + earlyBoost * 0.02) * immediateBoosted * regM.momentum +
+        orderFlowSignal      * (0.03 + earlyBoost * 0.01) * immediateBoosted * regM.flow +
+        tradeFlowSignal      * (0.03 + earlyBoost * 0.01) * immediateBoosted * regM.flow +
+        rsiSignal            * (0.12 - earlyBoost * 0.02) * urgencyFade * regM.reversion +
+        candlePattern.signal * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.pattern +
+        volumeSurgeSignal    * (0.05 + earlyBoost * 0.03) * regM.volume +
         fundingSignal        * (0.02 - earlyBoost * 0.01) * urgencyFade +
-        momAccel * 20        * (0.03 + earlyBoost * 0.03) * immediateBoosted * regM.momentum +
+        momAccel * 20        * (0.02 + earlyBoost * 0.02) * immediateBoosted * regM.momentum +
         vwapSignal           * (0.06 + earlyBoost * 0.04) * regM.reversion +
         macdSignal           * (0.05 + earlyBoost * 0.03) * regM.momentum +
-        linRegSignal         * (0.05 + earlyBoost * 0.03) * regM.momentum +
-        bayesianPrior        * earlyBoost * 0.10 +
+        linRegSignal         * (0.04 + earlyBoost * 0.02) * regM.momentum +
+        bayesianPrior        * earlyBoost * 0.08 +
         bbSqueeze.breakoutSignal * 0.04 * regM.pattern +
         srSignal             * 0.04 * regM.reversion +
         haResult.signal      * (0.04 - earlyBoost * 0.01) * regM.pattern +
-        crossTF.signal       * (0.05 + earlyBoost * 0.04) * immediateBoosted * regM.momentum +
-        microMRSignal        * 0.07 * regM.reversion +
-        breakoutSignal       * 0.07 * regM.momentum +
-        cpSignal             * 0.04 * immediateBoosted
+        crossTF.signal       * (0.04 + earlyBoost * 0.03) * immediateBoosted * regM.momentum +
+        microMRSignal        * 0.12 * regM.reversion +
+        breakoutSignal       * 0.06 * regM.momentum +
+        cpSignal             * 0.04 * immediateBoosted +
+        ethLL.signal         * 0.04 * immediateBoosted * regM.momentum
     );
-    const totalZShift = rawTotalZShift * agreementMult;
+    // Bayesian shrinkage: 80% of combined signal is noise at 15-min scale
+    const shrinkageFactor = 0.20;
+    const totalZShift = Math.max(-0.8, Math.min(0.8, rawTotalZShift * agreementMult * shrinkageFactor));
 
     // Final probability
-    const driftAdjustedProb = normCDF(zScore + totalZShift * (1 - positionalWeight) * 3);
+    const driftAdjustedProb = fatTailCDF(zScore + totalZShift * (1 - positionalWeight) * 0.8, prices);
     function toLogOdds(p) { return Math.log(Math.max(p, 0.001) / Math.max(1 - p, 0.001)); }
     function fromLogOdds(lo) { return 1 / (1 + Math.exp(-lo)); }
     const posLO = toLogOdds(positionalProb) * positionalWeight;
     const driftLO = toLogOdds(driftAdjustedProb) * (1 - positionalWeight);
     const combinedProb = fromLogOdds(posLO + driftLO);
     const polarizedProb = timePolarize(combinedProb, minutesAhead);
-    const clampedProb = 0.03 + 0.94 / (1 + Math.exp(-10 * (polarizedProb - 0.5)));
+    const clampedProb = 0.08 + 0.84 / (1 + Math.exp(-5 * (polarizedProb - 0.5)));
     const ensConf = ensembleConfidence(zScore, totalZShift, positionalWeight, positionalProb, minutesAhead);
 
     const bayesResult = bayesianAdjust(clampedProb, volRegime.regime, getBayesTrendLabel(trendRegime));
     let finalProb = bayesResult.adjustedProb;
 
-    // Gamma-aware confidence dampening
+    // Gamma-aware confidence dampening — extended to 10 min window and 1.0σ threshold
     const isNearStrike = Math.abs(zScore) < 1.0;
-    if (isNearStrike && minutesAhead < 3) {
-        const gammaRisk = 1 + (1 - Math.abs(zScore)) * (3 - minutesAhead) * 0.15;
+    if (isNearStrike && minutesAhead < 10) {
+        const proximityFactor = 1 - Math.abs(zScore) / 1.0;
+        const timeFactor = (10 - minutesAhead) / 10;
+        const gammaRisk = 1 + proximityFactor * timeFactor * 0.50;
         finalProb = 0.5 + (finalProb - 0.5) / gammaRisk;
     }
 
     // Construct output
     const predictUp = finalProb > 0.5;
     const confidenceDistance = Math.abs(finalProb - 0.5) * 2;
-    const priceOffset = adjustedRemainingVol * current * confidenceDistance * 0.5;
-    const predictedPrice = predictUp ? strike + Math.max(priceOffset, 0.01) : strike - Math.max(priceOffset, 0.01);
+    // Anchor to current price (martingale property) with small drift
+    const maxDrift = adjustedRemainingVol * settlementVolAdj * current * 0.15;
+    const drift = maxDrift * confidenceDistance;
+    const predictedPrice = predictUp ? current + Math.max(drift, 0.01) : current - Math.max(drift, 0.01);
     const changePercent = ((predictedPrice - current) / current) * 100;
     const sigmoidInput = (confidenceDistance - 0.35) * 8;
     const sigmoidVal = 1 / (1 + Math.exp(-sigmoidInput));
