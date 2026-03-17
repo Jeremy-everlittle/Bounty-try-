@@ -709,8 +709,9 @@ function detectBreakout(prices, history) {
 
 // ── Cross-asset signals ──
 function computeEthLeadLag(btcPrices, ethPriceHistory) {
-    // ETH often leads BTC by 1-2 ticks at intraday scale
-    // Compare ETH's recent momentum with BTC's — divergence is a signal
+    // Research: BTC leads altcoins (Easley et al., Cornell), NOT the reverse.
+    // ETH following confirms BTC's move; ETH diverging suggests BTC's move may fade.
+    // Use as a confirmation/dampening signal, not a directional predictor.
     if (!ethPriceHistory || ethPriceHistory.length < 3 || btcPrices.length < 3) {
         return { signal: 0, ethMom: 0, btcMom: 0 };
     }
@@ -718,10 +719,17 @@ function computeEthLeadLag(btcPrices, ethPriceHistory) {
     const ethMom = (ethPriceHistory[n-1] - ethPriceHistory[n-3]) / ethPriceHistory[n-3];
     const bn = btcPrices.length;
     const btcMom = (btcPrices[bn-1] - btcPrices[bn-3]) / btcPrices[bn-3];
-    // If ETH is moving but BTC hasn't followed yet, that's a lead signal
-    const divergence = ethMom - btcMom;
-    // Clamp to ±0.3
-    const signal = Math.max(-0.3, Math.min(0.3, divergence * 100));
+    // If both moving same direction → confirmation → small boost to BTC direction
+    // If ETH diverging from BTC → BTC move may fade → dampen signal
+    const sameDirection = Math.sign(ethMom) === Math.sign(btcMom) && Math.sign(btcMom) !== 0;
+    let signal = 0;
+    if (sameDirection) {
+        // ETH confirms BTC direction — small boost in BTC's direction
+        signal = Math.sign(btcMom) * 0.08;
+    } else if (Math.abs(ethMom) > 0.001 && Math.abs(btcMom) > 0.001) {
+        // Active divergence — BTC move may be fading, slight contrarian
+        signal = -Math.sign(btcMom) * 0.05;
+    }
     return { signal, ethMom, btcMom };
 }
 
@@ -1038,14 +1046,21 @@ function predictPrice(marketData, minutesAhead, strike) {
     const volWindow = Math.round(8 + 52 * (minutesAhead / 15));
     const adaptiveWindow = Math.max(2, Math.min(volWindow, n - 1));
     const ccVol = computeRealizedVol(prices, adaptiveWindow);
-    const ewmaVol = computeEWMAVol(prices, 0.97);
+    // GARCH research: BTC alpha ≈ 0.20 (lambda = 1-alpha = 0.80)
+    // Old lambda=0.97 was too smooth, reacted too slowly to vol shocks
+    const ewmaVol = computeEWMAVol(prices, 0.80);
     const gkVol = computeGarmanKlassVol(history, adaptiveWindow);
     const rawPerMinVol = 0.25 * ccVol + 0.40 * ewmaVol + 0.35 * gkVol;
+    // Leverage effect: negative recent returns → vol boost (EGARCH finding)
+    // BTC has ~2x vol increase after negative shocks
+    const recentReturn = n > 1 ? Math.log(prices[n-1] / prices[n-2]) : 0;
+    const leverageAdj = recentReturn < -0.001 ? 1.0 + Math.min(0.4, Math.abs(recentReturn) * 50) : 1.0;
+    const leverageAdjVol = rawPerMinVol * leverageAdj;
     const shortVol = computeRealizedVol(prices, Math.min(8, n - 1));
     const longVol = computeRealizedVol(prices, Math.min(60, n - 1));
     const volBlendRatio = minutesAhead / 15;
     const blendedVol = longVol * volBlendRatio + shortVol * (1 - volBlendRatio);
-    const perMinuteVol = Math.max(rawPerMinVol, blendedVol * 0.9);
+    const perMinuteVol = Math.max(leverageAdjVol, blendedVol * 0.9);
     const { remainingVol: rawRemainingVol, H } = computeAdjustedRemainingVol(perMinuteVol, minutesAhead, prices);
     const todMult = getIntradayVolMultiplier();
     const remainingVol = rawRemainingVol * (0.70 + 0.30 * todMult);

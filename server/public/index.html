@@ -2016,7 +2016,7 @@
         }
 
         // ── EWMA Volatility (RiskMetrics-style, responsive to regime changes) ──
-        function computeEWMAVol(prices, lambda = 0.97) {
+        function computeEWMAVol(prices, lambda = 0.80) {
             if (prices.length < 5) return 0.001;
             const returns = [];
             for (let i = 1; i < prices.length; i++) {
@@ -2885,7 +2885,8 @@
 
             // Composite vol: blend close-to-close, EWMA (responsive), Garman-Klass (efficient)
             const ccVol = computeRealizedVol(prices, adaptiveWindow);
-            const ewmaVol = computeEWMAVol(prices, 0.97);
+            // GARCH research: BTC alpha ≈ 0.20 (lambda = 0.80), not equity-style 0.97
+            const ewmaVol = computeEWMAVol(prices, 0.80);
             const gkVol = computeGarmanKlassVol(history, adaptiveWindow);
             // Cap EWMA at 1.5x realized vol to prevent momentum inflating vol estimate
             const ewmaVolCapped = Math.min(ewmaVol, ccVol * 1.5);
@@ -2896,7 +2897,11 @@
             const longVol = computeRealizedVol(prices, Math.min(60, n - 1));
             const volBlendRatio = minutesAhead / 15;
             const blendedVol = longVol * volBlendRatio + shortVol * (1 - volBlendRatio);
-            const perMinuteVol = Math.max(rawPerMinVol, blendedVol * 0.9);
+            // Leverage effect: negative recent returns → vol boost (EGARCH)
+            const recentReturn = n > 1 ? Math.log(prices[n-1] / prices[n-2]) : 0;
+            const leverageAdj = recentReturn < -0.001 ? 1.0 + Math.min(0.4, Math.abs(recentReturn) * 50) : 1.0;
+            const leverageAdjVol = rawPerMinVol * leverageAdj;
+            const perMinuteVol = Math.max(leverageAdjVol, blendedVol * 0.9);
 
             // Variance-ratio-adjusted time scaling (T^H instead of sqrt(T))
             const { remainingVol: rawRemainingVol, H } = computeAdjustedRemainingVol(
