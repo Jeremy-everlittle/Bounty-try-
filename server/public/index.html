@@ -2882,8 +2882,10 @@
             // remaining-time volatility? This is the digital-option insight:
             // P(S_T > K) = N(d2) where d2 = ln(S/K) / (sigma * sqrt(T))
 
-            // Adaptive vol window: shrinks near expiry to capture current regime
-            const volWindow = Math.round(8 + 52 * (minutesAhead / 15));
+            // Adaptive vol window: GROWS near expiry for stability (more data = more reliable vol)
+            // At period start, use recent regime (small window). Near expiry, use longer history
+            // to avoid noisy vol estimates when the market is thinnest.
+            const volWindow = Math.round(8 + 52 * ((15 - minutesAhead) / 15));
             const adaptiveWindow = Math.max(2, Math.min(volWindow, n - 1));
 
             // Composite vol: blend close-to-close, EWMA (responsive), Garman-Klass (efficient)
@@ -3057,13 +3059,15 @@
             const timeProgress = Math.max(0, Math.min(1, 1 - (minutesAhead / 15)));
 
             // Sigmoid positional weight: models digital option delta profile
-            // Slow shift early, rapid mid-period transition, saturation near end
-            const sigK = 6, sigMid = 0.5;
+            // Less aggressive saturation — keep drift signals alive in final minutes
+            // Old: sigK=6, sigMid=0.5, range 0.35-0.97 — killed all drift at expiry
+            // New: sigK=4, sigMid=0.6, range 0.35-0.88 — always keeps 12%+ drift weight
+            const sigK = 4, sigMid = 0.6;
             const sigRaw = 1 / (1 + Math.exp(-sigK * (timeProgress - sigMid)));
             const sigMin = 1 / (1 + Math.exp(sigK * sigMid));
             const sigMax = 1 / (1 + Math.exp(-sigK * sigMid));
-            const positionalWeight = 0.35 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.62;
-            // t=0: ~0.35 | t=0.5: ~0.66 | t=0.8: ~0.90 | t=1.0: ~0.97
+            const positionalWeight = 0.35 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.53;
+            // t=0: ~0.35 | t=0.5: ~0.52 | t=0.8: ~0.75 | t=1.0: ~0.88
 
             // SIGNAL 9: VWAP DEVIATION
             const vwapResult = computeAnchoredVWAP(history);
@@ -3166,8 +3170,11 @@
                 cpSignal             * 0.04 * immediateBoosted
             );
 
-            // Apply agreement multiplier: amplify when signals agree, dampen when conflicting
-            const totalZShift = rawTotalZShift * agreementMult;
+            // Apply agreement multiplier and cap to prevent extreme z-shifts
+            // Signal weights sum to ~1.5-2.0 before regime multipliers, which can push
+            // rawTotalZShift to ±3.0+. Capping at ±1.2 prevents catastrophic overshoot
+            // while preserving signal directionality.
+            const totalZShift = Math.max(-1.2, Math.min(1.2, rawTotalZShift * agreementMult));
 
             // Final probability: combine in log-odds space (mathematically correct)
             // Scale drift contribution: 1.5x is enough — higher causes overshoot
