@@ -3763,6 +3763,7 @@
         let periodStartPrice = null;      // 15m kline open price (= Kalshi strike)
         let originalPrediction = null;     // locked prediction for the period
         let updatedPrediction = null;      // recalculated on each refresh
+        // Note: displayedUpdPred (smooth interpolation state) is declared near startFastUITicker
         let smoothedProbability = null;     // EMA-smoothed probability for anti-flip
         let lockedDirection = null;         // 'up' or 'down' — committed direction
         let currentPeriodKey = null;       // e.g. "14:30" to detect period change
@@ -3835,6 +3836,7 @@
             // Clear prediction data so stale values never linger
             originalPrediction = null;
             updatedPrediction = null;
+            displayedUpdPred = null;
             currentPrediction = null;
             smoothedProbability = null;
             lockedDirection = null;
@@ -4130,37 +4132,60 @@
             setInterval(fetchAndPredict, 500);
         }
 
-        // Fast UI ticker — re-renders current price & updated prediction every 100ms from cached data
+        // ── Smooth price interpolation ──────────────────────────────
+        // Displayed values lerp toward targets each tick for a Kalshi-like smooth feel
+        let displayedPrice = null;       // currently rendered price (smoothed)
+        let displayedUpdPred = null;     // currently rendered updated prediction (smoothed)
+        const LERP_SPEED = 0.25;         // fraction of gap closed per 100ms tick (0-1)
+
+        function lerp(current, target, alpha) {
+            const diff = target - current;
+            // Snap if close enough (< 1 cent)
+            if (Math.abs(diff) < 0.005) return target;
+            return current + diff * alpha;
+        }
+
+        // Fast UI ticker — smoothly interpolates prices every 100ms
         function startFastUITicker() {
             setInterval(() => {
                 if (!latestData || isTransitioning) return;
-                const data = latestData;
+                const targetPrice = latestData.currentPrice;
                 const displayStrike = kalshiStrike || periodStartPrice;
 
+                // Initialize displayed price on first tick
+                if (displayedPrice === null) displayedPrice = targetPrice;
+
+                // Smoothly interpolate toward target price
+                displayedPrice = lerp(displayedPrice, targetPrice, LERP_SPEED);
+
                 // Update current price display
-                document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
+                document.getElementById('current-price').textContent = formatPrice(displayedPrice);
 
                 // Update price vs strike
                 const changeEl = document.getElementById('price-change-24h');
                 if (displayStrike !== null) {
-                    const strikeDelta = data.currentPrice - displayStrike;
+                    const strikeDelta = displayedPrice - displayStrike;
                     const direction = strikeDelta >= 0 ? 'Up' : 'Down';
                     changeEl.textContent = `${direction} ${formatPrice(Math.abs(strikeDelta))} vs strike`;
                     changeEl.style.color = strikeDelta >= 0 ? '#3fb950' : '#f85149';
 
                     // Update period delta
-                    const deltaDollar = data.currentPrice - displayStrike;
+                    const deltaDollar = displayedPrice - displayStrike;
                     const delta = (deltaDollar / displayStrike) * 100;
                     const deltaEl = document.getElementById('period-delta');
                     deltaEl.textContent = `${deltaDollar >= 0 ? '+' : '-'}$${Math.abs(deltaDollar).toFixed(2)} (${delta >= 0 ? '+' : ''}${delta.toFixed(4)}%)`;
                     deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
                 }
 
-                // Update updated prediction display
+                // Smoothly interpolate updated prediction
                 if (updatedPrediction && originalPrediction &&
                     updatedPrediction.predictedPrice !== originalPrediction.predictedPrice) {
-                    document.getElementById('updated-predicted-price').textContent = formatPrice(updatedPrediction.predictedPrice);
-                    const updChangeDollar = updatedPrediction.predictedPrice - periodStartPrice;
+                    const targetUpdPred = updatedPrediction.predictedPrice;
+                    if (displayedUpdPred === null) displayedUpdPred = targetUpdPred;
+                    displayedUpdPred = lerp(displayedUpdPred, targetUpdPred, LERP_SPEED);
+
+                    document.getElementById('updated-predicted-price').textContent = formatPrice(displayedUpdPred);
+                    const updChangeDollar = displayedUpdPred - periodStartPrice;
                     const updChangePct = (updChangeDollar / periodStartPrice) * 100;
                     renderChangeTag(updChangePct, 'updated-predicted-change', updChangeDollar);
 
