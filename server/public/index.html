@@ -2472,12 +2472,12 @@
             // prevents overfitting to noisy regime detection on short timeframes
             const m = { momentum: 1.0, flow: 1.0, reversion: 1.0, pattern: 1.0, volume: 1.0 };
             // Trending: moderate momentum boost, mild reversion suppression
-            if (ac1 > 0.15 || trendRegime.trending) {
-                m.momentum = 1.20; m.flow = 1.15; m.reversion = 0.50; m.pattern = 0.85;
+            if (ac1 > 0.25 || trendRegime.trending) {
+                m.momentum = 1.20; m.flow = 1.15; m.reversion = 0.55; m.pattern = 0.85;
             }
             // Mean-reverting: moderate reversion boost, mild momentum suppression
-            else if (ac1 < -0.15 || trendRegime.meanReverting) {
-                m.momentum = 0.60; m.flow = 0.85; m.reversion = 1.35; m.pattern = 1.10;
+            else if (ac1 < -0.25 || trendRegime.meanReverting) {
+                m.momentum = 0.65; m.flow = 0.85; m.reversion = 1.30; m.pattern = 1.10;
             }
             // Volatile: mild flow/volume boost
             if (volRegime.regime === 'volatile' || volRegime.regime === 'expanding') {
@@ -2939,12 +2939,13 @@
             const ac1 = computeAutocorrelation(prices, 1);
 
             // Adapt: mean-reverting = fade momentum, trending = amplify
-            // More conservative range to prevent overshoot
+            // Tightened AC1 thresholds: ±0.15 was too loose for noisy 15-min windows
+            // Natural AC1 noise is ±0.10-0.20, so old thresholds triggered on noise
             let driftMultiplier = 1.0;
-            if (ac1 < -0.15) {
-                driftMultiplier = 0.15; // mean-reverting: strong fade (was -0.3, sign flip too aggressive)
-            } else if (ac1 > 0.15) {
-                driftMultiplier = 1.3;  // trending: moderate amplify (was 1.5)
+            if (ac1 < -0.25) {
+                driftMultiplier = 0.20; // mean-reverting: strong fade
+            } else if (ac1 > 0.25) {
+                driftMultiplier = 1.25; // trending: moderate amplify
             } else if (trendRegime.meanReverting) {
                 driftMultiplier = 0.4;
             } else if (trendRegime.trending) {
@@ -3000,7 +3001,7 @@
             const adjustedRemainingVol = remainingVol * microVolAdjust;
 
             const driftWithEarlyBias = minutesIntoPeriod <= 3
-                ? rawDrift * 0.6 + earlyMomentumSignal * 0.4 : rawDrift;
+                ? rawDrift * 0.75 + earlyMomentumSignal * 0.25 : rawDrift;
             const adjustedDrift = driftWithEarlyBias * driftMultiplier;
             const driftZShift = adjustedRemainingVol > 0 ? adjustedDrift / adjustedRemainingVol : 0;
 
@@ -3142,10 +3143,11 @@
             const regM = getRegimeMultipliers(trendRegime, volRegime, blendedAC1);
 
             // Combine drift signals into a single z-shift (16 signals, regime-adapted)
+            // Reduced drift/flow dominance, increased mean-reversion weight for balance
             const rawTotalZShift = (
-                driftZShift          * (0.22 + earlyBoost * 0.08) * immediateBoosted * regM.momentum +
-                orderFlowSignal      * (0.12 + earlyBoost * 0.06) * immediateBoosted * regM.flow +
-                tradeFlowSignal      * (0.09 + earlyBoost * 0.04) * immediateBoosted * regM.flow +
+                driftZShift          * (0.16 + earlyBoost * 0.04) * immediateBoosted * regM.momentum +
+                orderFlowSignal      * (0.09 + earlyBoost * 0.04) * immediateBoosted * regM.flow +
+                tradeFlowSignal      * (0.08 + earlyBoost * 0.03) * immediateBoosted * regM.flow +
                 rsiSignal            * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.reversion +
                 candlePattern.signal * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.pattern +
                 volumeSurgeSignal    * (0.05 + earlyBoost * 0.03) * regM.volume +
@@ -3159,7 +3161,7 @@
                 srSignal             * 0.04 * regM.reversion +
                 haResult.signal      * (0.04 - earlyBoost * 0.01) * regM.pattern +
                 crossTF.signal       * (0.04 + earlyBoost * 0.03) * immediateBoosted * regM.momentum +
-                microMRSignal        * 0.08 * regM.reversion +
+                microMRSignal        * 0.12 * regM.reversion +
                 breakoutSignal       * 0.06 * regM.momentum +
                 cpSignal             * 0.04 * immediateBoosted
             );
