@@ -2958,16 +2958,15 @@
             // At period end, positional edge is everything.
             const timeProgress = Math.max(0, Math.min(1, 1 - (minutesAhead / 15)));
 
-            // Sigmoid positional weight: models digital option delta profile
-            // Less aggressive saturation — keep drift signals alive in final minutes
-            // Old: sigK=6, sigMid=0.5, range 0.35-0.97 — killed all drift at expiry
-            // New: sigK=4, sigMid=0.6, range 0.35-0.88 — always keeps 12%+ drift weight
+            // Positional weight: z-score (position vs strike) should dominate
+            // Research: BTC is ~random walk at 15-min scale, drift signals are mostly noise
+            // Floor raised from 0.35 to 0.75 — position is 75%+ of the signal at all times
             const sigK = 4, sigMid = 0.6;
             const sigRaw = 1 / (1 + Math.exp(-sigK * (timeProgress - sigMid)));
             const sigMin = 1 / (1 + Math.exp(sigK * sigMid));
             const sigMax = 1 / (1 + Math.exp(-sigK * sigMid));
-            const positionalWeight = 0.35 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.53;
-            // t=0: ~0.35 | t=0.5: ~0.52 | t=0.8: ~0.75 | t=1.0: ~0.88
+            const positionalWeight = 0.75 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.23;
+            // t=0: ~0.75 | t=0.5: ~0.85 | t=0.8: ~0.93 | t=1.0: ~0.98
 
             // SIGNAL 9: VWAP DEVIATION
             const vwapResult = computeAnchoredVWAP(history);
@@ -3050,8 +3049,8 @@
             // Reduced drift/flow dominance, increased mean-reversion weight for balance
             const rawTotalZShift = (
                 driftZShift          * (0.10 + earlyBoost * 0.02) * immediateBoosted * regM.momentum +
-                orderFlowSignal      * (0.09 + earlyBoost * 0.04) * immediateBoosted * regM.flow +
-                tradeFlowSignal      * (0.08 + earlyBoost * 0.03) * immediateBoosted * regM.flow +
+                orderFlowSignal      * (0.03 + earlyBoost * 0.01) * immediateBoosted * regM.flow +
+                tradeFlowSignal      * (0.03 + earlyBoost * 0.01) * immediateBoosted * regM.flow +
                 rsiSignal            * (0.12 - earlyBoost * 0.02) * urgencyFade * regM.reversion +
                 candlePattern.signal * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.pattern +
                 volumeSurgeSignal    * (0.05 + earlyBoost * 0.03) * regM.volume +
@@ -3070,11 +3069,10 @@
                 cpSignal             * 0.04 * immediateBoosted
             );
 
-            // Apply agreement multiplier and cap to prevent extreme z-shifts
-            // Signal weights sum to ~1.5-2.0 before regime multipliers, which can push
-            // rawTotalZShift to ±3.0+. Capping at ±1.2 prevents catastrophic overshoot
-            // while preserving signal directionality.
-            const totalZShift = Math.max(-1.2, Math.min(1.2, rawTotalZShift * agreementMult));
+            // Bayesian shrinkage: research shows 80-90% of combined signal is noise at 15-min scale
+            // Apply agreement multiplier, shrinkage factor, and hard cap
+            const shrinkageFactor = 0.20; // trust only 20% of signal (was 100%)
+            const totalZShift = Math.max(-0.8, Math.min(0.8, rawTotalZShift * agreementMult * shrinkageFactor));
 
             // Final probability: combine in log-odds space (mathematically correct)
             // Scale drift contribution: 0.8x — momentum is evidence, not law
@@ -3116,15 +3114,16 @@
             // ════════════════════════════════════════════════════════════
             const predictUp = finalProb > 0.5;
 
-            // Place predicted price on correct side of strike;
-            // distance reflects confidence
+            // Predicted price: anchor to CURRENT price with small drift toward predicted side
+            // Research: BTC is ~martingale at 15-min scale; best prediction ≈ current price
+            // Old approach extrapolated from strike — caused massive overshoots
             const confidenceDistance = Math.abs(finalProb - 0.5) * 2; // 0-1
-            // Cap offset to 1.5x expected vol — prevents runaway predictions
-            const maxOffset = adjustedRemainingVol * current * 1.5;
-            const priceOffset = Math.min(adjustedRemainingVol * current * confidenceDistance * 0.5, maxOffset);
+            // Max drift: 15% of 1-sigma from current price (very conservative)
+            const maxDrift = adjustedRemainingVol * current * 0.15;
+            const drift = maxDrift * confidenceDistance;
             const predictedPrice = predictUp
-                ? strike + Math.max(priceOffset, 0.01)
-                : strike - Math.max(priceOffset, 0.01);
+                ? current + Math.max(drift, 0.01)
+                : current - Math.max(drift, 0.01);
 
             const changePercent = ((predictedPrice - current) / current) * 100;
 
