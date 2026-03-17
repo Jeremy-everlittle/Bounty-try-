@@ -387,10 +387,14 @@ async function fetchAllData() {
 
             // Detect period transitions
             if (periodKey !== currentPeriod.periodKey) {
-                // Grade previous predictions
+                // Grade previous predictions — pass the NEW periodKey so the
+                // just-completed period isn't excluded from grading.
+                // (These functions skip entries matching the passed periodKey,
+                //  treating it as "still active". We want to exclude the NEW
+                //  period, not the old one that just ended.)
                 if (currentPeriod.periodKey !== null && state.brtiPrice) {
-                    engine.gradeBayesianPrediction(state.brtiPrice, currentPeriod.periodKey);
-                    engine.gradePreviousPrediction(state.brtiPrice, currentPeriod.periodKey);
+                    engine.gradeBayesianPrediction(state.brtiPrice, periodKey);
+                    engine.gradePreviousPrediction(state.brtiPrice, periodKey);
                 }
 
                 // New period - wait for Kalshi strike

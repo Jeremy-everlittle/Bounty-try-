@@ -4730,12 +4730,18 @@
 
                 // Detect new 15-min period
                 if (periodKey !== currentPeriodKey) {
+                    // Update currentPeriodKey BEFORE grading so that the
+                    // just-completed period isn't excluded from grading.
+                    // (gradePreviousPrediction skips entries matching
+                    //  currentPeriodKey, treating it as "still active".)
+                    const completedPeriodKey = currentPeriodKey;
+                    currentPeriodKey = periodKey;
+
                     // Grade the previous period's prediction with current price
-                    if (currentPeriodKey !== null) {
+                    if (completedPeriodKey !== null) {
                         gradePreviousPrediction(data.currentPrice);
                         gradeBayesianPrediction(data.currentPrice);
                     }
-                    currentPeriodKey = periodKey;
 
                     // Only start prediction if we have Kalshi strike
                     if (kalshiStrike) {
