@@ -1062,7 +1062,8 @@
             const textFields = [
                 'yes_sub_title', 'subtitle', 'no_sub_title',
                 'rules_primary', 'rules_secondary',
-                'strike_description', 'settlement_sources_description'
+                'strike_description', 'settlement_sources_description',
+                'title', 'event_title'
             ];
 
             for (const field of textFields) {
@@ -1080,6 +1081,16 @@
                         strike = parseFloat(match[1].replace(/,/g, ''));
                         source = field + ' (or above)';
                         break;
+                    }
+                    // Try "above $XX,XXX" or "above XX,XXX" pattern
+                    match = m[field].match(/above\s+\$?([\d,]+\.?\d*)/i);
+                    if (match) {
+                        const val = parseFloat(match[1].replace(/,/g, ''));
+                        if (val > 50000 && val < 150000) {
+                            strike = val;
+                            source = field + ' (above)';
+                            break;
+                        }
                     }
                     // Try generic dollar amount in BTC range ($50k-$150k)
                     match = m[field].match(/\$?([\d,]+\.?\d*)/);
@@ -1101,11 +1112,43 @@
                 else if (raw > 5000000) { strike = raw / 100; source = 'custom_strike/100'; }
             }
 
-            // Priority 3: floor_strike (may be in cents — last resort)
+            // Priority 3: floor_strike (may be in cents)
             if (!strike && m.floor_strike !== undefined && m.floor_strike !== null) {
                 const raw = parseFloat(m.floor_strike);
-                strike = raw > 200000 ? raw / 100 : raw;
-                source = raw > 200000 ? 'floor_strike/100' : 'floor_strike';
+                if (!isNaN(raw) && raw > 0) {
+                    strike = raw > 200000 ? raw / 100 : raw;
+                    source = raw > 200000 ? 'floor_strike/100' : 'floor_strike';
+                }
+            }
+
+            // Priority 4: cap_strike (some markets use this instead)
+            if (!strike && m.cap_strike !== undefined && m.cap_strike !== null) {
+                const raw = parseFloat(m.cap_strike);
+                if (!isNaN(raw) && raw > 0) {
+                    strike = raw > 200000 ? raw / 100 : raw;
+                    source = raw > 200000 ? 'cap_strike/100' : 'cap_strike';
+                }
+            }
+
+            // Priority 5: strike_type + any numeric field in additional_metadata
+            if (!strike && m.additional_metadata) {
+                try {
+                    const meta = typeof m.additional_metadata === 'string'
+                        ? JSON.parse(m.additional_metadata) : m.additional_metadata;
+                    if (meta.floor_strike) {
+                        const raw = parseFloat(meta.floor_strike);
+                        if (!isNaN(raw) && raw > 0) {
+                            strike = raw > 200000 ? raw / 100 : raw;
+                            source = 'metadata.floor_strike';
+                        }
+                    }
+                } catch(e) {}
+            }
+
+            // Log all fields for debugging when extraction fails
+            if (!strike) {
+                console.log('Strike extraction FAILED. Market fields:', Object.keys(m).join(', '));
+                console.log('Market data dump:', JSON.stringify(m).substring(0, 2000));
             }
 
             console.log('Strike extraction:', source, '=', strike);
@@ -1536,13 +1579,22 @@
 
             const currentPrice = brtiResult.price;
 
-            // Strike comes ONLY from Kalshi — no fallback
+            // Strike from Kalshi preferred; fall back to BRTI price if Kalshi market
+            // exists but strike couldn't be extracted (floor_strike not yet populated)
             let periodOpenPrice = null;
             if (kStrike && kStrike > 0) {
                 kalshiStrike = kStrike;
                 periodOpenPrice = kStrike;
                 dataSourceName = `BRTI~(${brtiResult.sources}) + Kalshi strike`;
                 // Hide error banner when Kalshi is working
+                document.getElementById('kalshi-error-banner').style.display = 'none';
+            } else if (kalshiCloseTime && currentPrice > 0) {
+                // Kalshi market found (we have a close time) but strike is missing —
+                // use current BRTI price as fallback strike
+                kalshiStrike = currentPrice;
+                periodOpenPrice = currentPrice;
+                dataSourceName = `BRTI~(${brtiResult.sources}) + BRTI strike (Kalshi fallback)`;
+                console.log('Using BRTI price as fallback strike:', currentPrice);
                 document.getElementById('kalshi-error-banner').style.display = 'none';
             } else {
                 dataSourceName = `BRTI~(${brtiResult.sources})`;
