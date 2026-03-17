@@ -4,9 +4,21 @@ const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
+const { execSync } = require('child_process');
 
 const store = require('./store');
 const engine = require('./prediction-engine');
+
+// Build version info at startup
+const BUILD_VERSION = (() => {
+    try {
+        const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim();
+        const date = execSync('git log -1 --format=%ci', { cwd: __dirname }).toString().trim();
+        return { hash, date, startedAt: new Date().toISOString() };
+    } catch (e) {
+        return { hash: 'unknown', date: 'unknown', startedAt: new Date().toISOString() };
+    }
+})();
 
 const app = express();
 const server = http.createServer(app);
@@ -434,6 +446,7 @@ async function fetchAllData() {
             sellSignal: store.getState().sellSignal,
             nextPeriodPreview: store.getState().nextPeriodPreview,
             serverUptime: process.uptime(),
+            serverVersion: BUILD_VERSION.hash,
             totalPredictions: store.getState().totalPredictionsMade
         });
 
@@ -480,6 +493,7 @@ wss.on('connection', (ws) => {
         sellSignal: store.getState().sellSignal,
         nextPeriodPreview: store.getState().nextPeriodPreview,
         serverUptime: process.uptime(),
+            serverVersion: BUILD_VERSION.hash,
         totalPredictions: store.getState().totalPredictionsMade
     }));
 
@@ -499,6 +513,7 @@ wss.on('connection', (ws) => {
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
+        version: BUILD_VERSION,
         uptime: process.uptime(),
         lastUpdate: state.lastUpdate,
         brtiPrice: state.brtiPrice,
@@ -518,6 +533,7 @@ app.get('/api/state', (req, res) => {
         sellSignal: store.getState().sellSignal,
         nextPeriodPreview: store.getState().nextPeriodPreview,
         serverUptime: process.uptime(),
+            serverVersion: BUILD_VERSION.hash,
         totalPredictions: store.getState().totalPredictionsMade
     });
 });

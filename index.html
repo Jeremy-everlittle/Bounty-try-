@@ -820,10 +820,11 @@
             var uptimeStr = uptimeHrs > 0
                 ? uptimeHrs + 'h ' + (uptimeMin % 60) + 'm'
                 : uptimeMin + 'm';
+            var versionTag = data.serverVersion ? ' &middot; v' + data.serverVersion : '';
             document.getElementById('status-bar').innerHTML =
                 '<span class="live-dot"></span> Server running ' + uptimeStr +
                 ' &middot; ' + (data.totalPredictions || 0) + ' predictions' +
-                ' &middot; Updated ' + formatLocalTime(new Date());
+                ' &middot; Updated ' + formatLocalTime(new Date()) + versionTag;
         }
 
         // ── Clear history (asks server) ──
