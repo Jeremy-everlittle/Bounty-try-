@@ -80,6 +80,9 @@ function createDefaultState() {
             totalAnalyzed: 0
         },
 
+        // Online ML state (logistic regression, ensemble, calibrator, HMM)
+        onlineML: null,
+
         // Server uptime tracking
         serverStartTime: Date.now(),
         lastPredictionTime: null,
