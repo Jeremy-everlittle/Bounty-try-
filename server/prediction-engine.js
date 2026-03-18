@@ -2565,11 +2565,19 @@ function gradeBayesianPrediction(currentPrice, periodKey) {
     let updated = false;
     const gradedRecords = [];
     store.updateBayesianState(bs => {
-        // Grade ALL ungraded entries from completed periods (not just one).
+        // Grade ungraded entries from completed periods.
+        // Only grade the most recent ungraded period — older records used currentPrice
+        // which is wrong (should be closing price of THEIR period, not the current one).
         for (let i = bs.records.length - 1; i >= 0; i--) {
             const rec = bs.records[i];
             if (rec.actualPrice !== null) continue;
             if (rec.periodKey === periodKey) continue;
+            // Skip records more than 1 period old — grading with current price is inaccurate
+            if (rec.timestamp && Date.now() - rec.timestamp > 20 * 60 * 1000) {
+                rec.actualPrice = -1; // mark as stale, skip grading
+                rec.staleGraded = true;
+                continue;
+            }
             rec.actualPrice = currentPrice;
             rec.actualDirection = currentPrice >= rec.startPrice ? 'up' : 'down';
             rec.correct = rec.predictedDirection === rec.actualDirection;

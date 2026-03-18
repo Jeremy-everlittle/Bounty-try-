@@ -114,6 +114,13 @@ function load() {
             if (saved.currentPeriod) {
                 state.currentPeriod = { ...createDefaultState().currentPeriod, ...saved.currentPeriod };
             }
+            // Deep merge errorAnalysis to handle new sub-fields
+            if (saved.errorAnalysis) {
+                const defaults = createDefaultState().errorAnalysis;
+                state.errorAnalysis = { ...defaults, ...saved.errorAnalysis };
+                state.errorAnalysis.patterns = { ...defaults.patterns, ...saved.errorAnalysis.patterns };
+                state.errorAnalysis.corrections = { ...defaults.corrections, ...saved.errorAnalysis.corrections };
+            }
             console.log(`Store loaded: ${state.predictionLog.length} predictions, ${state.bayesianState.records.length} Bayesian records`);
         } else {
             console.log('No existing store found, starting fresh');

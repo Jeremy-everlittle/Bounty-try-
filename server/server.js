@@ -557,6 +557,7 @@ async function fetchAllData() {
                         isTransitioning: false
                     });
 
+                    store.incrementPredictionCount();
                     const bq = prediction._betQuality;
                     const qualStr = bq ? (bq.shouldBet ? 'BET' : 'SKIP') + ' (Q=' + (bq.quality*100).toFixed(0) + '% E=' + (bq.edge*100).toFixed(1) + '%)' : '';
                     console.log(`Prediction: ${prediction.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(prediction.probability * 100).toFixed(1)}% | Conf=${(prediction.confidence * 100).toFixed(0)}% | ${qualStr}`);
@@ -634,7 +635,6 @@ async function fetchAllData() {
                 console.log(`Prediction: ${updated.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(updated.probability * 100).toFixed(1)}% | Conf=${(updated.confidence * 100).toFixed(0)}%`);
             }
 
-            store.incrementPredictionCount();
         } catch (predErr) {
             console.error('Prediction engine error:', predErr.message);
         }
@@ -807,6 +807,17 @@ process.on('SIGINT', () => {
     process.exit(0);
 });
 
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception, saving state:', err.message);
+    store.forceSave();
+    process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled rejection, saving state:', reason);
+    store.forceSave();
+});
+
 // ═══════════════════════════════════════════════════════════════
 // START
 // ═══════════════════════════════════════════════════════════════
@@ -823,9 +834,10 @@ server.listen(PORT, () => {
     console.log(`Predictions: http://localhost:${PORT}/api/predictions`);
     console.log(`History: http://localhost:${PORT}/api/history`);
 
-    // Initial fetch
-    fetchAllData();
-
-    // Fetch every 5 seconds for fresher data
-    setInterval(fetchAllData, 5000);
+    // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
+    async function fetchLoop() {
+        await fetchAllData();
+        setTimeout(fetchLoop, 5000);
+    }
+    fetchLoop();
 });
