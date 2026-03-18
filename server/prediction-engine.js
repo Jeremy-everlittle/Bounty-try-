@@ -2390,45 +2390,58 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     }
 
     // ── CASE 5: WINNING — on right side ──
-    else if (onRightSide && probForBet >= 0.55) {
-        if (minutesRemaining < 2) {
+    // When price is clearly on our side, trust reality over the model.
+    // A model saying 13% when price is $116 above strike is wrong — override it.
+    else if (onRightSide) {
+        // Compute a reality-based win probability: if price is on right side,
+        // the actual win prob is at least based on how far we are from strike
+        const realityProb = Math.max(probForBet,
+            sigmaDistance < 0.3 ? 0.55 :
+            sigmaDistance < 0.5 ? 0.60 :
+            sigmaDistance < 0.8 ? 0.65 :
+            sigmaDistance < 1.0 ? 0.70 :
+            sigmaDistance < 1.5 ? 0.78 : 0.85
+        );
+        const displayProb = realityProb;
+
+        if (distancePct > 0.10 && minutesRemaining < 3 && displayProb >= 0.70) {
+            level = 'take_profit'; shortLabel = 'TAKE PROFIT';
+            urgency = 5;
+            advice = 'Strong position: $' + Math.abs(distanceFromStrike).toFixed(2) + ' on right side with ' +
+                (displayProb * 100).toFixed(0) + '% win prob and only ' + minutesRemaining.toFixed(1) +
+                ' min left. Can sell now to lock in profit, or hold to expiry.';
+        } else if (minutesRemaining < 2) {
             level = 'winning'; shortLabel = 'WINNING';
             urgency = 0;
             advice = 'Almost there — hold to close! Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' +
-                (betIsUp ? 'above' : 'below') + ' strike with ' + (probForBet * 100).toFixed(0) + '% win prob.';
-        } else if (probForBet >= 0.70) {
+                (betIsUp ? 'above' : 'below') + ' strike with ' + (displayProb * 100).toFixed(0) + '% win prob.';
+        } else if (displayProb >= 0.70) {
             level = 'strong_hold'; shortLabel = 'STRONG HOLD';
             urgency = 0;
-            advice = 'Dominant position: ' + (probForBet * 100).toFixed(0) + '% win prob, $' +
+            advice = 'Dominant position: ' + (displayProb * 100).toFixed(0) + '% win prob, $' +
                 Math.abs(distanceFromStrike).toFixed(2) + ' on right side. Hold confidently.';
             if (agreeing >= 2) reasons.push(agreeing + ' signals agree with ' + betDirection);
-        } else {
+        } else if (displayProb >= 0.55) {
             level = 'winning'; shortLabel = 'WINNING';
             urgency = 0;
             const rightSide = betIsUp ? 'above' : 'below';
             advice = 'Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' ' + rightSide + ' strike. ' +
-                (probForBet * 100).toFixed(0) + '% win prob. Looking good — hold position.';
+                (displayProb * 100).toFixed(0) + '% win prob. Looking good — hold position.';
+        } else {
+            level = 'hold'; shortLabel = 'HOLD';
+            urgency = 10;
+            advice = 'Price on your side by $' + Math.abs(distanceFromStrike).toFixed(2) +
+                '. Model cautious at ' + (displayProb * 100).toFixed(0) + '% but position is favored. Hold.';
         }
+        // Override probForBet for display
+        probForBet = displayProb;
     }
 
-    // ── CASE 6: HOLD — on right side but weak, or neutral ──
+    // ── CASE 6: FALLBACK ──
     else {
         level = 'hold'; shortLabel = 'HOLD';
         urgency = 10;
-        advice = probForBet >= 0.50
-            ? 'Position favored (' + (probForBet * 100).toFixed(0) + '% win prob). Hold.'
-            : 'Close call (' + (probForBet * 100).toFixed(0) + '% win prob). Normal fluctuation — hold position.';
-    }
-
-    // ── TAKE PROFIT — only suggest when truly winning big and near end ──
-    // Removed most take_profit triggers as they were causing premature exits.
-    // Only suggest take profit when near expiry with a comfortable lead.
-    if (level === 'winning' && onRightSide && distancePct > 0.10 && probForBet >= 0.70 && minutesRemaining < 3 && minutesRemaining > 1) {
-        level = 'take_profit'; shortLabel = 'TAKE PROFIT';
-        urgency = 5;
-        advice = 'Strong position: $' + Math.abs(distanceFromStrike).toFixed(2) + ' on right side with ' +
-            (probForBet * 100).toFixed(0) + '% win prob and only ' + minutesRemaining.toFixed(1) +
-            ' min left. You could sell now to lock in profit, or hold to expiry.';
+        advice = 'Position at ' + (probForBet * 100).toFixed(0) + '% win probability. Normal fluctuation — hold position.';
     }
 
     urgency = Math.min(100, Math.max(0, urgency));

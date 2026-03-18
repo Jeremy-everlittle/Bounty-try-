@@ -3649,52 +3649,59 @@
                 if (isChoppy) reasons.push('Choppy market — dips are normal');
             }
 
-            // ── CASE 5: TAKE PROFIT — on right side near end ──
-            else if (onRightSide && distancePct > 0.10 && probForBet >= 0.70 && minutesRemaining < 3 && minutesRemaining > 1) {
-                level = 'take_profit';
-                shortLabel = 'TAKE PROFIT';
-                urgency = 5;
-                advice = 'Strong position: $' + Math.abs(distanceFromStrike).toFixed(2) + ' on right side with ' +
-                    (probForBet * 100).toFixed(0) + '% win prob and ' + minutesRemaining.toFixed(1) +
-                    ' min left. Can sell now or hold to expiry — you\'re in great shape.';
-                reasons.push('Comfortable margin');
-            }
+            // ── CASE 5: WINNING — on right side ──
+            // When price is on our side, trust reality over model probability.
+            else if (onRightSide) {
+                const remainingVolEst = updPred._remainingVol || 0.002;
+                const remainingVolEstPct = remainingVolEst * 100;
+                const localSigma = remainingVolEstPct > 0 ? distancePct / remainingVolEstPct : 99;
+                const realityProb = Math.max(probForBet,
+                    localSigma < 0.3 ? 0.55 :
+                    localSigma < 0.5 ? 0.60 :
+                    localSigma < 0.8 ? 0.65 :
+                    localSigma < 1.0 ? 0.70 :
+                    localSigma < 1.5 ? 0.78 : 0.85
+                );
+                const displayProb = realityProb;
 
-            // ── CASE 6: WINNING — on right side ──
-            else if (onRightSide && probForBet >= 0.55) {
-                if (minutesRemaining < 3) {
+                if (distancePct > 0.10 && minutesRemaining < 3 && displayProb >= 0.70) {
+                    level = 'take_profit';
+                    shortLabel = 'TAKE PROFIT';
+                    urgency = 5;
+                    advice = 'Strong position: $' + Math.abs(distanceFromStrike).toFixed(2) + ' on right side with ' +
+                        (displayProb * 100).toFixed(0) + '% win prob and only ' + minutesRemaining.toFixed(1) +
+                        ' min left. Can sell now or hold to expiry.';
+                } else if (minutesRemaining < 2) {
                     level = 'winning';
                     shortLabel = 'WINNING';
                     urgency = 0;
-                    advice = 'Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' on your side. ' +
-                        (probForBet * 100).toFixed(0) + '% win prob. Almost there — hold to close!';
-                } else if (probForBet >= 0.70) {
+                    advice = 'Almost there — hold to close! Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' on your side with ' +
+                        (displayProb * 100).toFixed(0) + '% win prob.';
+                } else if (displayProb >= 0.70) {
                     level = 'strong_hold';
                     shortLabel = 'STRONG HOLD';
                     urgency = 0;
-                    advice = 'Dominant position: ' + (probForBet * 100).toFixed(0) + '% win prob, $' +
+                    advice = 'Dominant position: ' + (displayProb * 100).toFixed(0) + '% win prob, $' +
                         Math.abs(distanceFromStrike).toFixed(2) + ' on right side. Hold confidently.';
                     if (agreeing >= 2) reasons.push(agreeing + ' signals agree');
-                } else {
+                } else if (displayProb >= 0.55) {
                     level = 'winning';
                     shortLabel = 'WINNING';
                     urgency = 0;
                     advice = 'Price $' + Math.abs(distanceFromStrike).toFixed(2) + ' on your side. ' +
-                        (probForBet * 100).toFixed(0) + '% win prob. Looking good — hold.';
+                        (displayProb * 100).toFixed(0) + '% win prob. Looking good — hold.';
+                } else {
+                    level = 'hold';
+                    shortLabel = 'HOLD';
+                    urgency = 10;
+                    advice = 'Price on your side by $' + Math.abs(distanceFromStrike).toFixed(2) +
+                        '. Model cautious at ' + (displayProb * 100).toFixed(0) + '% but position is favored. Hold.';
                 }
+                probForBet = displayProb;
                 if (isChoppy) reasons.push('Choppy (' + advisorHistory.flipCount + ' crosses) — stay alert');
             }
 
-            // ── CASE 7: HOLD — on right side but weak, or neutral ──
-            else if (onRightSide) {
-                level = 'hold';
-                shortLabel = 'HOLD';
-                urgency = 10;
-                advice = 'Position favored at ' + (probForBet * 100).toFixed(0) + '% win prob. $' +
-                    Math.abs(distanceFromStrike).toFixed(2) + ' on right side. Hold.';
-            }
-
-            // ── CASE 8: FALLBACK ──
+            // ── CASE 6: FALLBACK ──
             else {
                 level = 'hold';
                 shortLabel = 'HOLD';
