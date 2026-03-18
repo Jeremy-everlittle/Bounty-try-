@@ -1,6 +1,16 @@
 'use strict';
 
 const store = require('./store');
+const { OnlineMLManager } = require('./online-ml');
+
+// Online ML manager — initialized lazily after store is loaded
+let onlineML = null;
+function getOnlineML() {
+    if (!onlineML) {
+        onlineML = new OnlineMLManager(store);
+    }
+    return onlineML;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // PREDICTION ENGINE — Server-side headless prediction
@@ -773,19 +783,27 @@ function detectCandlePatterns(history) {
 function computeBollingerSqueeze(prices, period) {
     if (typeof period === 'undefined') period = 20;
     if (prices.length < period + 2) return { squeeze: false, breakoutSignal: 0 };
-    const slice = prices.slice(-period);
-    const mean = slice.reduce((a, b) => a + b, 0) / period;
-    const stdDev = Math.sqrt(slice.reduce((s, p) => s + (p - mean) ** 2, 0) / period);
-    const bandwidth = stdDev / mean;
+    // O(n) sliding window: maintain running sum and sum-of-squares
+    let sum = 0, sumSq = 0;
     const histBandwidths = [];
-    for (let i = period; i <= prices.length; i++) {
-        const s = prices.slice(i - period, i);
-        const m = s.reduce((a, b) => a + b, 0) / period;
-        const sd = Math.sqrt(s.reduce((sum, p) => sum + (p - m) ** 2, 0) / period);
-        histBandwidths.push(sd / m);
+    for (let i = 0; i < prices.length; i++) {
+        sum += prices[i];
+        sumSq += prices[i] * prices[i];
+        if (i >= period) {
+            sum -= prices[i - period];
+            sumSq -= prices[i - period] * prices[i - period];
+        }
+        if (i >= period - 1) {
+            const m = sum / period;
+            const variance = sumSq / period - m * m;
+            const sd = Math.sqrt(Math.max(0, variance));
+            histBandwidths.push(sd / m);
+        }
     }
-    histBandwidths.sort((a, b) => a - b);
-    const pct20 = histBandwidths[Math.floor(histBandwidths.length * 0.2)] || bandwidth;
+    const bandwidth = histBandwidths[histBandwidths.length - 1];
+    const mean = sum / period;
+    const sorted = histBandwidths.slice().sort((a, b) => a - b);
+    const pct20 = sorted[Math.floor(sorted.length * 0.2)] || bandwidth;
     const squeeze = bandwidth <= pct20 && histBandwidths.length > 5;
     const current = prices[prices.length - 1];
     const breakoutSignal = squeeze ? (current > mean ? 0.3 : -0.3) : 0;
@@ -840,20 +858,25 @@ function timePolarize(prob, minutesAhead, totalMinutes, maxExponent) {
 }
 
 function ensembleConfidence(zScore, totalZShift, positionalWeight, positionalProb, minutesAhead, nIter) {
-    if (typeof nIter === 'undefined') nIter = 30;
-    function randn() {
-        let u = 0, v = 0;
-        while (u === 0) u = Math.random();
-        while (v === 0) v = Math.random();
+    if (typeof nIter === 'undefined') nIter = 50;
+    // Deterministic quasi-random via Halton sequence (no Math.random)
+    function halton(index, base) {
+        let result = 0, f = 1, i = index + 1;
+        while (i > 0) { f /= base; result += f * (i % base); i = Math.floor(i / base); }
+        return result;
+    }
+    function qrandn(i) {
+        const u = Math.max(1e-10, halton(i, 2));
+        const v = halton(i, 3);
         return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
     }
     function toLogOddsE(p) { return Math.log(Math.max(p, 1e-9) / Math.max(1 - p, 1e-9)); }
     function fromLogOddsE(lo) { return 1 / (1 + Math.exp(-lo)); }
     const samples = [];
     for (let i = 0; i < nIter; i++) {
-        const pZ = zScore + randn() * 0.05;
-        const pShift = Math.max(-1, Math.min(1, totalZShift + randn() * 0.03));
-        const pPosPr = Math.max(0.01, Math.min(0.99, positionalProb + randn() * 0.02));
+        const pZ = zScore + qrandn(i * 3) * 0.05;
+        const pShift = Math.max(-1, Math.min(1, totalZShift + qrandn(i * 3 + 1) * 0.03));
+        const pPosPr = Math.max(0.01, Math.min(0.99, positionalProb + qrandn(i * 3 + 2) * 0.02));
         const dap = normCDF(pZ + pShift * (1 - positionalWeight) * 3);
         const lo = toLogOddsE(pPosPr) * positionalWeight + toLogOddsE(dap) * (1 - positionalWeight);
         let p = fromLogOddsE(lo);
@@ -1166,16 +1189,20 @@ function computeAnchoredVWAP(history) {
 
 function computeMACD(prices) {
     if (prices.length < 26) return { macd: 0, signal: 0, histogram: 0 };
-    const ema12 = computeEMA(prices, 12);
-    const ema26 = computeEMA(prices, 26);
-    const macdLine = ema12 - ema26;
-    const macdValues = [];
-    for (let i = 26; i <= prices.length; i++) {
-        const e12 = computeEMA(prices.slice(0, i), 12);
-        const e26 = computeEMA(prices.slice(0, i), 26);
-        macdValues.push(e12 - e26);
+    // O(n) incremental MACD: compute EMA12 and EMA26 in a single pass
+    const k12 = 2 / 13, k26 = 2 / 27, k9 = 2 / 10;
+    let ema12 = prices[0], ema26 = prices[0];
+    let signalLine = 0;
+    let macdLine = 0;
+    for (let i = 1; i < prices.length; i++) {
+        ema12 = prices[i] * k12 + ema12 * (1 - k12);
+        ema26 = prices[i] * k26 + ema26 * (1 - k26);
+        if (i >= 25) {
+            macdLine = ema12 - ema26;
+            if (i === 25) signalLine = macdLine;
+            else signalLine = macdLine * k9 + signalLine * (1 - k9);
+        }
     }
-    const signalLine = macdValues.length >= 9 ? computeEMA(macdValues, 9) : macdLine;
     return { macd: macdLine, signal: signalLine, histogram: macdLine - signalLine };
 }
 
@@ -1853,6 +1880,12 @@ function predictPrice(marketData, minutesAhead, strike) {
 
     // Flow agreement boost removed — order flow decays to noise at 15-min horizon
 
+    // SIGNAL 20: ETH LEAD-LAG (cross-asset) — moved before microVolAdjust
+    const ethLL = computeEthLeadLag(prices, marketData.ethPriceHistory);
+
+    // SIGNAL 21: OPEN INTEREST VOL ADJUSTMENT — moved before microVolAdjust
+    const oiSignal = computeOIVolSignal(marketData.openInterestHistory);
+
     const microVolAdjust = spreadVolAdjust * vpinVolAdjust * lambdaVolAdjust * oiSignal.volMultiplier;
     const adjustedRemainingVol = remainingVol * microVolAdjust;
     const driftWithEarlyBias = minutesIntoPeriod <= 3 ? rawDrift * 0.75 + earlyMomentumSignal * 0.25 : rawDrift;
@@ -1895,12 +1928,6 @@ function predictPrice(marketData, minutesAhead, strike) {
             fundingSignal = -Math.sign(deviation) * magnitude;
         }
     }
-
-    // SIGNAL 20: ETH LEAD-LAG (cross-asset)
-    const ethLL = computeEthLeadLag(prices, marketData.ethPriceHistory);
-
-    // SIGNAL 21: OPEN INTEREST VOL ADJUSTMENT
-    const oiSignal = computeOIVolSignal(marketData.openInterestHistory);
 
     // COMBINE SIGNALS
     const timeProgress = Math.max(0, Math.min(1, 1 - (minutesAhead / 15)));

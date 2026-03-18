@@ -468,7 +468,9 @@ async function fetchAllData() {
                     history: state.history,
                     orderBook: state.orderBook,
                     recentTrades: state.recentTrades,
-                    fundingRate: state.fundingRate
+                    fundingRate: state.fundingRate,
+                    ethPriceHistory: state.ethPriceHistory,
+                    openInterestHistory: state.openInterestHistory
                 };
                 const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike, periodKey);
                 store.updateCurrentPeriod({ updatedPrediction: updated });
