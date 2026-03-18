@@ -1694,15 +1694,14 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     betSize = Math.max(0, Math.min(1.0, betSize));
 
     // ── Fee-adjusted Kelly fraction ──
-    // Kalshi fees: ~7 cents per side. For a 50c contract:
-    // Win profit: 0.93 - 0.50 - 0.07 = 0.36 (net of both fees)
-    // Loss: 0.50 + 0.07 = 0.57
-    // Need p > (cost + fee) / 0.93 = 0.57/0.93 = 61.3% to have edge
+    // Kalshi fees: ~1.5 cents per contract per side (reduced from old 7c schedule)
+    // At 50c contracts: win profit = 0.97 - 0.50 = 0.47, loss = 0.515
+    // Break-even: 0.515/0.985 ≈ 52.3% (was 61.3% with old 7c fees)
     // Quarter Kelly recommended with <200 sample track record
     const contractCost = 0.50; // approximate average contract price
-    const fee = 0.07;
-    const winProfit = (1.0 - fee) - contractCost - fee; // 0.36
-    const lossAmount = contractCost + fee; // 0.57
+    const fee = 0.015; // ~1.5 cents per side (Kalshi's current reduced fee schedule)
+    const winProfit = (1.0 - fee) - contractCost - fee; // 0.47
+    const lossAmount = contractCost + fee; // 0.515
     const kellyRaw = winProfit > 0
         ? (probForBet * winProfit - (1 - probForBet) * lossAmount) / winProfit
         : 0;
@@ -1728,7 +1727,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         },
         reason: !shouldBetAdjusted ?
             (sessionMult === 0 ? 'COOLING OFF — ' + sessionRisk.consecutiveLosses + ' consecutive losses, pausing' :
-             !kellyHasEdge ? 'No edge after Kalshi fees (need >' + ((lossAmount / (1 - fee)) * 100).toFixed(0) + '% win prob)' :
+             !kellyHasEdge ? 'No edge after Kalshi fees (need >' + ((lossAmount / (lossAmount + winProfit)) * 100).toFixed(0) + '% win prob)' :
              !factors.hasMinEdge ? 'Edge too thin (' + (edge*100).toFixed(1) + '%)' :
              !factors.notChoppy ? 'Market is choppy (ADX=' + chop.adx.toFixed(0) + ')' :
              !factors.notExhausted ? 'Momentum exhaustion detected' :
