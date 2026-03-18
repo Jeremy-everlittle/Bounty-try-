@@ -2257,7 +2257,7 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const onRightSide = !onWrongSide;
     const distanceFromStrike = currentPrice - strike;
     const distancePct = (Math.abs(distanceFromStrike) / strike) * 100;
-    const probForBet = betIsUp ? updPred.probability : (1 - updPred.probability);
+    let probForBet = betIsUp ? updPred.probability : (1 - updPred.probability);
     const origProbForBet = betIsUp ? origPred.probability : (1 - origPred.probability);
     const modelFlipped = betIsUp !== (updPred.predictedPrice >= strike);
     const origDirection = betIsUp ? 'UP' : 'DOWN';
