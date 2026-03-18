@@ -298,6 +298,28 @@ async function fetchFearGreed() {
     return cachedFearGreed;
 }
 
+// ── Binance Long/Short Ratios (free, no key, 5-min updates) ──
+// Contra-indicator: when crowd is heavily long, mean reversion is more likely.
+let cachedLongShort = { ratio: 1.0, lastFetch: 0 };
+async function fetchLongShortRatio() {
+    if (Date.now() - cachedLongShort.lastFetch < 60000) return cachedLongShort;
+    try {
+        const data = await fetchJSON(
+            'https://fapi.binance.com/futures/data/topLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=1',
+            5000
+        );
+        if (data && data[0] && data[0].longShortRatio) {
+            cachedLongShort = {
+                ratio: parseFloat(data[0].longShortRatio),
+                longAccount: parseFloat(data[0].longAccount),
+                shortAccount: parseFloat(data[0].shortAccount),
+                lastFetch: Date.now()
+            };
+        }
+    } catch (e) { /* keep cached value */ }
+    return cachedLongShort;
+}
+
 // ── Macro Event Calendar — known high-impact dates ──
 // FOMC meetings 2025-2026 (published by Federal Reserve a year ahead)
 // Format: 'YYYY-MM-DD' of announcement day
@@ -365,6 +387,7 @@ const state = {
     liquidations: null,      // recent liquidation data
     fearGreed: null,         // Alternative.me Fear & Greed index
     macroEvent: null,        // macro event context (FOMC/CPI/NFP)
+    longShortRatio: null,    // Binance top trader long/short ratio
     history: [],
     lastUpdate: null,
     periodKey: null,
@@ -408,7 +431,7 @@ async function fetchAllData() {
     console.log(`\n--- Fetch cycle @ ${new Date().toLocaleTimeString()} ---`);
     try {
         // Parallel fetch all data sources
-        const [brti, kalshi, orderBook, trades, fundingRate, history, ethPrice, openInterest, liquidations, fearGreed] = await Promise.allSettled([
+        const [brti, kalshi, orderBook, trades, fundingRate, history, ethPrice, openInterest, liquidations, fearGreed, longShort] = await Promise.allSettled([
             fetchBRTIApprox(),
             fetchKalshiData(),
             fetchOrderBook(),
@@ -418,7 +441,8 @@ async function fetchAllData() {
             fetchEthPrice(),
             fetchOpenInterest(),
             fetchLiquidations(),
-            fetchFearGreed()
+            fetchFearGreed(),
+            fetchLongShortRatio()
         ]);
         // Macro event context (no API call needed — calendar-based)
         state.macroEvent = getMacroEventContext();
@@ -471,6 +495,9 @@ async function fetchAllData() {
         if (fearGreed.status === 'fulfilled' && fearGreed.value) {
             state.fearGreed = fearGreed.value;
         }
+        if (longShort.status === 'fulfilled' && longShort.value) {
+            state.longShortRatio = longShort.value;
+        }
 
         if (history.status === 'fulfilled' && history.value) {
             state.history = history.value;
@@ -515,7 +542,8 @@ async function fetchAllData() {
                         openInterestHistory: state.openInterestHistory,
                     liquidations: state.liquidations,
                     fearGreed: state.fearGreed,
-                    macroEvent: state.macroEvent
+                    macroEvent: state.macroEvent,
+                    longShortRatio: state.longShortRatio
                     };
                     const prediction = engine.handleNewPeriod(periodKey, marketData, minutesAhead, state.kalshiStrike, periodEnd);
                     store.updateCurrentPeriod({
@@ -556,7 +584,8 @@ async function fetchAllData() {
                     openInterestHistory: state.openInterestHistory,
                     liquidations: state.liquidations,
                     fearGreed: state.fearGreed,
-                    macroEvent: state.macroEvent
+                    macroEvent: state.macroEvent,
+                    longShortRatio: state.longShortRatio
                 };
                 const prediction = engine.handleNewPeriod(periodKey, marketData, minutesAhead, state.kalshiStrike, periodEnd);
                 store.updateCurrentPeriod({
@@ -583,7 +612,8 @@ async function fetchAllData() {
                     openInterestHistory: state.openInterestHistory,
                     liquidations: state.liquidations,
                     fearGreed: state.fearGreed,
-                    macroEvent: state.macroEvent
+                    macroEvent: state.macroEvent,
+                    longShortRatio: state.longShortRatio
                 };
                 const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike, periodKey);
                 store.updateCurrentPeriod({ updatedPrediction: updated });

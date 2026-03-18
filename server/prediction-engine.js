@@ -1991,6 +1991,17 @@ function predictPrice(marketData, minutesAhead, strike) {
         }
     }
 
+    // SIGNAL: LONG/SHORT RATIO — contra-indicator when crowd heavily positioned
+    // Binance top trader account ratio; >1.5 = crowd heavily long, <0.7 = crowd short
+    let longShortSignal = 0;
+    if (marketData.longShortRatio && marketData.longShortRatio.ratio) {
+        const lsr = marketData.longShortRatio.ratio;
+        if (lsr > 2.0) longShortSignal = -0.15;        // extreme long = bearish contra
+        else if (lsr > 1.5) longShortSignal = -0.08;    // moderately long
+        else if (lsr < 0.5) longShortSignal = 0.15;     // extreme short = bullish contra
+        else if (lsr < 0.7) longShortSignal = 0.08;     // moderately short
+    }
+
     // SIGNAL: HOUR-OF-DAY BIAS — research-backed intraday seasonality
     // 22:00-23:00 UTC consistently bullish (~0.07% avg return, p<0.05)
     // US market open (14:30 UTC) = elevated volatility / momentum regime
@@ -2101,7 +2112,9 @@ function predictPrice(marketData, minutesAhead, strike) {
         // Liquidation cascade: strongest short-term directional signal
         liqSignal            * 0.08 * immediateBoosted +
         // Hour-of-day seasonality: small but statistically significant
-        hourBias             * 0.03
+        hourBias             * 0.03 +
+        // Long/short ratio: contra-indicator at extremes
+        longShortSignal      * 0.03
     );
     // Bayesian shrinkage: retain 30% of signal (was 20%, too aggressive)
     // In choppy markets, apply extra dampening to prevent false signals
