@@ -2078,8 +2078,8 @@ function predictPrice(marketData, minutesAhead, strike) {
 
     const effectiveAC1 = (hurstH - 0.5) * 2;
     const blendedAC1 = ac1 * 0.5 + effectiveAC1 * 0.5;
-    const recentReturn = n > 10 ? (prices[n - 1] - prices[n - 11]) / prices[n - 11] : 0;
-    const regM = getRegimeMultipliers(trendRegime, volRegime, blendedAC1, recentReturn);
+    const recentReturn10 = n > 10 ? (prices[n - 1] - prices[n - 11]) / prices[n - 11] : 0;
+    const regM = getRegimeMultipliers(trendRegime, volRegime, blendedAC1, recentReturn10);
 
     const rawTotalZShift = (
         driftZShift          * (0.10 + earlyBoost * 0.02) * immediateBoosted * regM.momentum +
