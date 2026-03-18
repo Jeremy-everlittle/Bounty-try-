@@ -255,6 +255,30 @@ async function fetchFundingRate() {
     return null;
 }
 
+// ── Binance Liquidations (force orders) ──
+async function fetchLiquidations() {
+    const data = await fetchJSON('https://fapi.binance.com/fapi/v1/forceOrders?symbol=BTCUSDT&limit=50');
+    if (!data || !data.length) return { longLiqVol: 0, shortLiqVol: 0, totalLiqVol: 0, count: 0 };
+    const cutoff = Date.now() - 15 * 60 * 1000; // last 15 minutes
+    let longLiqVol = 0, shortLiqVol = 0;
+    let count = 0;
+    for (const order of data) {
+        if (order.time < cutoff) continue;
+        const qty = parseFloat(order.origQty) * parseFloat(order.price);
+        if (order.side === 'SELL') longLiqVol += qty;  // long positions being liquidated
+        else shortLiqVol += qty; // short positions being liquidated
+        count++;
+    }
+    return {
+        longLiqVol, shortLiqVol,
+        totalLiqVol: longLiqVol + shortLiqVol,
+        count,
+        imbalance: (longLiqVol + shortLiqVol) > 0
+            ? (shortLiqVol - longLiqVol) / (longLiqVol + shortLiqVol) // positive = shorts liquidated = bullish
+            : 0
+    };
+}
+
 // ── Binance 1m Klines ──
 async function fetchHistory() {
     const data = await fetchJSON('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=120');
@@ -287,6 +311,7 @@ const state = {
     ethPriceHistory: [], // last 15 ETH prices for lead-lag
     openInterest: null,
     openInterestHistory: [], // last 15 OI values for rate-of-change
+    liquidations: null,      // recent liquidation data
     history: [],
     lastUpdate: null,
     periodKey: null,
@@ -330,7 +355,7 @@ async function fetchAllData() {
     console.log(`\n--- Fetch cycle @ ${new Date().toLocaleTimeString()} ---`);
     try {
         // Parallel fetch all data sources
-        const [brti, kalshi, orderBook, trades, fundingRate, history, ethPrice, openInterest] = await Promise.allSettled([
+        const [brti, kalshi, orderBook, trades, fundingRate, history, ethPrice, openInterest, liquidations] = await Promise.allSettled([
             fetchBRTIApprox(),
             fetchKalshiData(),
             fetchOrderBook(),
@@ -338,7 +363,8 @@ async function fetchAllData() {
             fetchFundingRate(),
             fetchHistory(),
             fetchEthPrice(),
-            fetchOpenInterest()
+            fetchOpenInterest(),
+            fetchLiquidations()
         ]);
 
         if (brti.status === 'fulfilled' && brti.value) {
@@ -383,6 +409,10 @@ async function fetchAllData() {
             if (state.openInterestHistory.length > 15) state.openInterestHistory.shift();
         }
 
+        if (liquidations.status === 'fulfilled' && liquidations.value) {
+            state.liquidations = liquidations.value;
+        }
+
         if (history.status === 'fulfilled' && history.value) {
             state.history = history.value;
         }
@@ -423,7 +453,8 @@ async function fetchAllData() {
                         ethPrice: state.ethPrice,
                         ethPriceHistory: state.ethPriceHistory,
                         openInterest: state.openInterest,
-                        openInterestHistory: state.openInterestHistory
+                        openInterestHistory: state.openInterestHistory,
+                    liquidations: state.liquidations
                     };
                     const prediction = engine.handleNewPeriod(periodKey, marketData, minutesAhead, state.kalshiStrike, periodEnd);
                     store.updateCurrentPeriod({
@@ -461,7 +492,8 @@ async function fetchAllData() {
                     ethPrice: state.ethPrice,
                     ethPriceHistory: state.ethPriceHistory,
                     openInterest: state.openInterest,
-                    openInterestHistory: state.openInterestHistory
+                    openInterestHistory: state.openInterestHistory,
+                    liquidations: state.liquidations
                 };
                 const prediction = engine.handleNewPeriod(periodKey, marketData, minutesAhead, state.kalshiStrike, periodEnd);
                 store.updateCurrentPeriod({
@@ -485,7 +517,8 @@ async function fetchAllData() {
                     recentTrades: state.recentTrades,
                     fundingRate: state.fundingRate,
                     ethPriceHistory: state.ethPriceHistory,
-                    openInterestHistory: state.openInterestHistory
+                    openInterestHistory: state.openInterestHistory,
+                    liquidations: state.liquidations
                 };
                 const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike, periodKey);
                 store.updateCurrentPeriod({ updatedPrediction: updated });
