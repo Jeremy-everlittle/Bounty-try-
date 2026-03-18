@@ -1454,12 +1454,33 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
 
     betSize = Math.max(0.25, Math.min(1.0, betSize));
 
+    // ── Fee-adjusted Kelly fraction ──
+    // Kalshi fees: ~7 cents per side. For a 50c contract:
+    // Win profit: 0.93 - 0.50 - 0.07 = 0.36 (net of both fees)
+    // Loss: 0.50 + 0.07 = 0.57
+    // Need p > (cost + fee) / 0.93 = 0.57/0.93 = 61.3% to have edge
+    // Quarter Kelly recommended with <200 sample track record
+    const contractCost = 0.50; // approximate average contract price
+    const fee = 0.07;
+    const winProfit = (1.0 - fee) - contractCost - fee; // 0.36
+    const lossAmount = contractCost + fee; // 0.57
+    const kellyRaw = winProfit > 0
+        ? (probForBet * winProfit - (1 - probForBet) * lossAmount) / winProfit
+        : 0;
+    const kellyFraction = Math.max(0, kellyRaw * 0.25); // Quarter Kelly
+    const kellyHasEdge = kellyRaw > 0;
+
+    // If Kelly says no edge after fees, override shouldBet
+    const shouldBetAdjusted = shouldBet && kellyHasEdge;
+
     return {
-        quality, shouldBet, waitForBetter, suggestedWait,
-        edge, factors, choppiness: chop, exhaustion,
+        quality, shouldBet: shouldBetAdjusted, waitForBetter: !shouldBetAdjusted && minutesAhead > 8,
+        suggestedWait, edge, factors, choppiness: chop, exhaustion,
         betSize, betSizeReason,
-        reason: !shouldBet ?
-            (!factors.hasMinEdge ? 'Edge too thin (' + (edge*100).toFixed(1) + '%)' :
+        kellyFraction, kellyHasEdge,
+        reason: !shouldBetAdjusted ?
+            (!kellyHasEdge ? 'No edge after Kalshi fees (need >' + ((lossAmount / (1 - fee)) * 100).toFixed(0) + '% win prob)' :
+             !factors.hasMinEdge ? 'Edge too thin (' + (edge*100).toFixed(1) + '%)' :
              !factors.notChoppy ? 'Market is choppy (ADX=' + chop.adx.toFixed(0) + ')' :
              !factors.notExhausted ? 'Momentum exhaustion detected' :
              !factors.hasTime ? 'Not enough time remaining' :
@@ -1788,6 +1809,24 @@ function predictPrice(marketData, minutesAhead, strike) {
         const volCorr = learned.volRegimeMultiplier[volRegime.regime];
         finalProb = 0.5 + (finalProb - 0.5) / volCorr;
     }
+
+    // ── Temperature scaling for overconfidence correction ──
+    // Research: BTC 15-min predictions are systematically overconfident.
+    // Temperature T > 1 softens probabilities toward 0.5.
+    // T = 1.3 is the recommended default for unverified models.
+    // The self-learned overconfidenceRatio above partially handles this,
+    // but temperature scaling in logit space is more principled.
+    const TEMPERATURE = 1.25; // slightly conservative default
+    if (finalProb > 0.01 && finalProb < 0.99) {
+        const logit = Math.log(finalProb / (1 - finalProb));
+        const scaledLogit = logit / TEMPERATURE;
+        finalProb = 1 / (1 + Math.exp(-scaledLogit));
+    }
+
+    // ── Hard probability bounds ──
+    // Research: almost nothing justifies >90% or <10% confidence
+    // in a 15-minute BTC direction at a nearby strike.
+    finalProb = Math.max(0.10, Math.min(0.90, finalProb));
 
     // Construct output
     const predictUp = finalProb > 0.5;
