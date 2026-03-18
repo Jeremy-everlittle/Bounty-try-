@@ -617,6 +617,30 @@
             margin-top: 20px;
             line-height: 1.5;
         }
+        /* ── Auto-Trading Panel ── */
+        .trading-panel { padding: 12px 14px; border-radius: 10px; margin-top: 12px; border: 1px solid rgba(255,255,255,0.1); background: rgba(22,27,34,0.8); }
+        .trading-panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .trading-panel-title { font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #8b949e; }
+        .trading-mode-badge { font-size: 10px; font-weight: 800; letter-spacing: 1.5px; padding: 2px 8px; border-radius: 4px; }
+        .trading-mode-paper { background: rgba(210,153,34,0.25); color: #d29922; border: 1px solid rgba(210,153,34,0.4); }
+        .trading-mode-live { background: rgba(63,185,80,0.25); color: #3fb950; border: 1px solid rgba(63,185,80,0.4); }
+        .trading-mode-off { background: rgba(248,81,73,0.25); color: #f85149; border: 1px solid rgba(248,81,73,0.4); }
+        .trading-stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 8px; }
+        .trading-stat { text-align: center; }
+        .trading-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: #8b949e; }
+        .trading-stat-value { font-size: 14px; font-weight: 700; margin-top: 2px; }
+        .trading-position { margin-top: 8px; padding: 8px; border-radius: 6px; background: rgba(56,139,253,0.12); border: 1px solid rgba(56,139,253,0.3); }
+        .trading-position-label { font-size: 10px; color: #58a6ff; font-weight: 600; }
+        .trading-position-detail { font-size: 12px; font-weight: 700; color: #e6edf3; margin-top: 2px; }
+        .trading-recent { margin-top: 8px; }
+        .trading-recent-title { font-size: 10px; color: #8b949e; font-weight: 600; margin-bottom: 4px; }
+        .trading-recent-entry { font-size: 10px; color: #e6edf3; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .trading-controls { display: flex; gap: 6px; margin-top: 8px; }
+        .trading-btn { font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: #e6edf3; cursor: pointer; }
+        .trading-btn:hover { background: rgba(255,255,255,0.1); }
+        .trading-btn-danger { color: #f85149; border-color: rgba(248,81,73,0.4); }
+        .trading-btn-danger:hover { background: rgba(248,81,73,0.15); }
+        .trading-not-configured { font-size: 11px; color: #8b949e; text-align: center; padding: 10px; }
     </style>
 </head>
 <body>
@@ -673,6 +697,34 @@
 
         <div id="prebuy-signal-badge"></div>
         <div id="sell-signal-badge"></div>
+
+        <!-- Auto-Trading Panel -->
+        <div class="trading-panel" id="trading-panel">
+            <div class="trading-panel-header">
+                <span class="trading-panel-title">Auto Trading</span>
+                <span class="trading-mode-badge" id="trading-mode-badge">--</span>
+            </div>
+            <div class="trading-stats">
+                <div class="trading-stat">
+                    <div class="trading-stat-label">Daily P&L</div>
+                    <div class="trading-stat-value" id="trading-pnl">$0.00</div>
+                </div>
+                <div class="trading-stat">
+                    <div class="trading-stat-label">Trades</div>
+                    <div class="trading-stat-value" id="trading-count">0</div>
+                </div>
+                <div class="trading-stat">
+                    <div class="trading-stat-label">W/L</div>
+                    <div class="trading-stat-value" id="trading-wl">0/0</div>
+                </div>
+            </div>
+            <div id="trading-position-area"></div>
+            <div class="trading-recent" id="trading-recent-area"></div>
+            <div class="trading-controls">
+                <button class="trading-btn" id="trading-mode-btn" onclick="toggleTradingMode()">Toggle Mode</button>
+                <button class="trading-btn trading-btn-danger" id="trading-kill-btn" onclick="toggleKillSwitch()">Kill Switch</button>
+            </div>
+        </div>
 
         <!-- Position Tracker -->
         <div class="position-tracker" id="position-tracker">
@@ -1476,6 +1528,112 @@
                 '</div>';
         }
 
+        // ── Auto-Trading Panel Rendering ──
+        function renderTradingPanel() {
+            const ts = serverData && serverData.tradingStatus ? serverData.tradingStatus : null;
+            const panel = document.getElementById('trading-panel');
+            if (!panel) return;
+
+            if (!ts) {
+                panel.style.display = 'none';
+                return;
+            }
+            panel.style.display = '';
+
+            // Mode badge
+            const badge = document.getElementById('trading-mode-badge');
+            if (ts.killSwitch) {
+                badge.textContent = 'KILLED';
+                badge.className = 'trading-mode-badge trading-mode-off';
+            } else if (ts.paperMode) {
+                badge.textContent = 'PAPER';
+                badge.className = 'trading-mode-badge trading-mode-paper';
+            } else if (ts.configured) {
+                badge.textContent = 'LIVE';
+                badge.className = 'trading-mode-badge trading-mode-live';
+            } else {
+                badge.textContent = 'NOT CONFIGURED';
+                badge.className = 'trading-mode-badge trading-mode-off';
+            }
+
+            // Stats
+            const pnl = (ts.daily.pnlCents / 100);
+            const pnlEl = document.getElementById('trading-pnl');
+            pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+            pnlEl.style.color = pnl >= 0 ? '#3fb950' : '#f85149';
+
+            document.getElementById('trading-count').textContent = ts.daily.tradeCount;
+            document.getElementById('trading-wl').textContent = ts.daily.wins + '/' + ts.daily.losses;
+
+            // Current position
+            const posArea = document.getElementById('trading-position-area');
+            if (ts.currentPosition) {
+                const p = ts.currentPosition;
+                posArea.innerHTML = '<div class="trading-position">' +
+                    '<div class="trading-position-label">OPEN POSITION</div>' +
+                    '<div class="trading-position-detail">' +
+                    p.contracts + 'x ' + p.side.toUpperCase() + ' @ ' + p.entryPrice + 'c' +
+                    ' &middot; ' + p.holdingSeconds + 's' +
+                    '</div></div>';
+            } else {
+                posArea.innerHTML = '';
+            }
+
+            // Recent trades
+            const recentArea = document.getElementById('trading-recent-area');
+            if (ts.recentTrades && ts.recentTrades.length > 0) {
+                let html = '<div class="trading-recent-title">Recent Trades</div>';
+                for (const t of ts.recentTrades.slice(0, 5)) {
+                    const time = new Date(t.time).toLocaleTimeString();
+                    const color = t.type === 'settle' ? (t.correct ? '#3fb950' : '#f85149') : '#e6edf3';
+                    html += '<div class="trading-recent-entry" style="color:' + color + '">' +
+                        time + ' ' + t.type.toUpperCase() +
+                        (t.side ? ' ' + t.contracts + 'x ' + t.side.toUpperCase() : '') +
+                        (t.pnlCents !== undefined ? ' ' + (t.pnlCents > 0 ? '+' : '') + '$' + (t.pnlCents / 100).toFixed(2) : '') +
+                        (t.reason ? ' (' + t.reason + ')' : '') +
+                        '</div>';
+                }
+                recentArea.innerHTML = html;
+            } else {
+                recentArea.innerHTML = '';
+            }
+
+            // Kill switch button state
+            const killBtn = document.getElementById('trading-kill-btn');
+            if (ts.killSwitch) {
+                killBtn.textContent = 'Resume Trading';
+                killBtn.className = 'trading-btn';
+            } else {
+                killBtn.textContent = 'Kill Switch';
+                killBtn.className = 'trading-btn trading-btn-danger';
+            }
+        }
+
+        async function toggleTradingMode() {
+            try {
+                const ts = serverData && serverData.tradingStatus;
+                const newPaperMode = ts ? !ts.paperMode : true;
+                if (!newPaperMode && !confirm('Switch to LIVE trading? Real money will be used.')) return;
+                await fetch('/api/trading/mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paperMode: newPaperMode })
+                });
+            } catch (e) { console.error('Toggle mode failed:', e); }
+        }
+
+        async function toggleKillSwitch() {
+            try {
+                const ts = serverData && serverData.tradingStatus;
+                const activate = ts ? !ts.killSwitch : true;
+                await fetch('/api/trading/kill-switch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ active: activate })
+                });
+            } catch (e) { console.error('Kill switch failed:', e); }
+        }
+
         function renderSellSignal(containerId) {
             const el = document.getElementById(containerId);
             if (!el) return;
@@ -1980,6 +2138,9 @@
             // Trading advisor signals
             renderPreBuySignal('prebuy-signal-badge');
             renderSellSignal('sell-signal-badge');
+
+            // Auto-trading panel
+            renderTradingPanel();
 
             // Update position tracker
             renderPositionUI();
