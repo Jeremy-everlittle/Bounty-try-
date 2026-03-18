@@ -363,7 +363,7 @@ function getStatus() {
             maxDailyLossCents: config.maxDailyLossCents,
             maxDailyTrades: config.maxDailyTrades,
         },
-        recentTrades: tradeLog.slice(0, 20),
+        recentTrades: tradeLog.slice(0, 50),
     };
 }
 

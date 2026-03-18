@@ -635,6 +635,22 @@
         .trading-recent { margin-top: 8px; }
         .trading-recent-title { font-size: 10px; color: #8b949e; font-weight: 600; margin-bottom: 4px; }
         .trading-recent-entry { font-size: 10px; color: #e6edf3; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        /* ── Trade History ── */
+        .trade-history-header { display: flex; align-items: center; justify-content: space-between; cursor: pointer; padding: 4px 0; }
+        .trade-history-toggle { font-size: 10px; color: #8b949e; transition: transform 0.2s; }
+        .trade-history-toggle.collapsed { transform: rotate(-90deg); }
+        .trade-history-list { max-height: 400px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.15) transparent; }
+        .trade-history-item { padding: 8px; margin-bottom: 4px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); }
+        .trade-history-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+        .trade-history-type { font-size: 9px; font-weight: 800; letter-spacing: 0.8px; padding: 1px 6px; border-radius: 3px; }
+        .trade-history-side { font-size: 11px; font-weight: 700; color: #e6edf3; }
+        .trade-history-dir { font-size: 11px; font-weight: 700; }
+        .trade-history-time { font-size: 10px; color: #8b949e; margin-left: auto; }
+        .trade-history-details { display: flex; gap: 10px; font-size: 10px; color: #b0b8c1; margin-top: 4px; flex-wrap: wrap; }
+        .trade-history-pnl { font-size: 11px; font-weight: 700; margin-top: 3px; }
+        .trade-history-meta { display: flex; gap: 8px; font-size: 9px; color: #8b949e; margin-top: 3px; }
+        .trade-history-error { font-size: 9px; color: #f85149; margin-top: 3px; word-break: break-all; }
+        .trade-history-ticker { font-size: 9px; color: #484f58; margin-top: 2px; font-family: monospace; }
         .trading-controls { display: flex; gap: 6px; margin-top: 8px; }
         .trading-btn { font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: #e6edf3; cursor: pointer; }
         .trading-btn:hover { background: rgba(255,255,255,0.1); }
@@ -1596,30 +1612,119 @@
             const posArea = document.getElementById('trading-position-area');
             if (ts.currentPosition) {
                 const p = ts.currentPosition;
+                const costCents = p.contracts * p.entryPrice;
+                const maxPayoutCents = p.contracts * 100;
+                const maxProfitCents = maxPayoutCents - costCents;
+                const holdMin = Math.floor(p.holdingSeconds / 60);
+                const holdSec = p.holdingSeconds % 60;
+                const holdStr = holdMin > 0 ? holdMin + 'm ' + holdSec + 's' : holdSec + 's';
                 posArea.innerHTML = '<div class="trading-position">' +
                     '<div class="trading-position-label">OPEN POSITION</div>' +
                     '<div class="trading-position-detail">' +
-                    p.contracts + 'x ' + p.side.toUpperCase() + ' @ ' + p.entryPrice + 'c' +
-                    ' &middot; ' + p.holdingSeconds + 's' +
-                    '</div></div>';
+                    p.contracts + 'x ' + p.side.toUpperCase() + ' @ ' + p.entryPrice + '\u00A2' +
+                    ' &middot; ' + holdStr +
+                    '</div>' +
+                    '<div style="display:flex;gap:12px;margin-top:4px">' +
+                    '<div style="font-size:10px;color:#8b949e">Cost: <span style="color:#e6edf3;font-weight:700">$' + (costCents / 100).toFixed(2) + '</span></div>' +
+                    '<div style="font-size:10px;color:#8b949e">Max Payout: <span style="color:#3fb950;font-weight:700">$' + (maxPayoutCents / 100).toFixed(2) + '</span></div>' +
+                    '<div style="font-size:10px;color:#8b949e">Max Profit: <span style="color:#56d364;font-weight:700">+$' + (maxProfitCents / 100).toFixed(2) + '</span></div>' +
+                    '</div>' +
+                    '</div>';
             } else {
                 posArea.innerHTML = '';
             }
 
-            // Recent trades
+            // Trade history
             const recentArea = document.getElementById('trading-recent-area');
             if (ts.recentTrades && ts.recentTrades.length > 0) {
-                let html = '<div class="trading-recent-title">Recent Trades</div>';
-                for (const t of ts.recentTrades.slice(0, 5)) {
+                let html = '<div class="trade-history-header" onclick="toggleTradeHistory()">' +
+                    '<span class="trading-recent-title" style="cursor:pointer">Trade History (' + ts.recentTrades.length + ')</span>' +
+                    '<span class="trade-history-toggle" id="trade-history-toggle">\u25BC</span>' +
+                    '</div>' +
+                    '<div class="trade-history-list" id="trade-history-list">';
+                for (const t of ts.recentTrades) {
                     const time = new Date(t.time).toLocaleTimeString();
-                    const color = t.type === 'settle' ? (t.correct ? '#3fb950' : '#f85149') : '#e6edf3';
-                    html += '<div class="trading-recent-entry" style="color:' + color + '">' +
-                        time + ' ' + t.type.toUpperCase() +
-                        (t.side ? ' ' + t.contracts + 'x ' + t.side.toUpperCase() : '') +
-                        (t.pnlCents !== undefined ? ' ' + (t.pnlCents > 0 ? '+' : '') + '$' + (t.pnlCents / 100).toFixed(2) : '') +
-                        (t.reason ? ' (' + t.reason + ')' : '') +
+                    const date = new Date(t.time).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                    const isSettle = t.type === 'settle';
+                    const isBuy = t.type === 'buy';
+                    const isSell = t.type === 'sell';
+                    const isError = t.type === 'buy_error' || t.type === 'sell_error' || t.type === 'buy_failed';
+
+                    // Type badge colors
+                    let typeBg, typeColor, typeLabel;
+                    if (isSettle) {
+                        typeBg = t.correct ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
+                        typeColor = t.correct ? '#3fb950' : '#f85149';
+                        typeLabel = t.correct ? 'WIN' : 'LOSS';
+                    } else if (isBuy) {
+                        typeBg = 'rgba(56,139,253,0.2)'; typeColor = '#58a6ff'; typeLabel = 'BUY';
+                    } else if (isSell) {
+                        typeBg = 'rgba(210,153,34,0.2)'; typeColor = '#d29922'; typeLabel = 'SELL';
+                    } else if (isError) {
+                        typeBg = 'rgba(248,81,73,0.15)'; typeColor = '#f85149'; typeLabel = 'ERROR';
+                    } else {
+                        typeBg = 'rgba(255,255,255,0.08)'; typeColor = '#8b949e'; typeLabel = t.type.toUpperCase();
+                    }
+
+                    // Cost and payout for buy/settle entries
+                    const costCents = (t.contracts && t.limitPrice) ? t.contracts * t.limitPrice : (t.contracts && t.entryPrice) ? t.contracts * t.entryPrice : 0;
+                    const maxPayoutCents = t.contracts ? t.contracts * 100 : 0;
+
+                    html += '<div class="trade-history-item">' +
+                        '<div class="trade-history-row">' +
+                            '<span class="trade-history-type" style="background:' + typeBg + ';color:' + typeColor + '">' + typeLabel + '</span>' +
+                            '<span class="trade-history-side">' + (t.side ? t.side.toUpperCase() : '') + '</span>' +
+                            '<span class="trade-history-dir" style="color:' + (t.direction === 'UP' ? '#3fb950' : t.direction === 'DOWN' ? '#f85149' : '#8b949e') + '">' +
+                                (t.direction ? (t.direction === 'UP' ? '\u25B2' : '\u25BC') + ' ' + t.direction : '') +
+                            '</span>' +
+                            '<span class="trade-history-time">' + date + ' ' + time + '</span>' +
                         '</div>';
+
+                    // Details row
+                    if (t.contracts) {
+                        const price = t.limitPrice || t.entryPrice || 0;
+                        html += '<div class="trade-history-details">' +
+                            '<span>' + t.contracts + 'x @ ' + price + '\u00A2</span>';
+                        if (costCents > 0) {
+                            html += '<span>Cost: $' + (costCents / 100).toFixed(2) + '</span>';
+                        }
+                        if (isBuy && maxPayoutCents > 0) {
+                            html += '<span style="color:#3fb950">Max Payout: $' + (maxPayoutCents / 100).toFixed(2) + '</span>';
+                        }
+                        html += '</div>';
+                    }
+
+                    // P&L row for settled trades
+                    if (t.pnlCents !== undefined) {
+                        const pnlPositive = t.pnlCents > 0;
+                        html += '<div class="trade-history-pnl" style="color:' + (pnlPositive ? '#3fb950' : '#f85149') + '">' +
+                            'P&L: ' + (pnlPositive ? '+' : '') + '$' + (t.pnlCents / 100).toFixed(2) +
+                            (t.dailyPnlCents !== undefined ? ' &middot; Daily: ' + (t.dailyPnlCents >= 0 ? '+' : '') + '$' + (t.dailyPnlCents / 100).toFixed(2) : '') +
+                            '</div>';
+                    }
+
+                    // Edge/quality for buy entries
+                    if (t.edge || t.quality) {
+                        html += '<div class="trade-history-meta">';
+                        if (t.edge) html += '<span>Edge: ' + t.edge + '</span>';
+                        if (t.quality) html += '<span>Quality: ' + t.quality + '</span>';
+                        if (t.betSize) html += '<span>Size: ' + (parseFloat(t.betSize) * 100).toFixed(0) + '%</span>';
+                        html += '</div>';
+                    }
+
+                    // Error info
+                    if (t.error) {
+                        html += '<div class="trade-history-error">' + t.error + '</div>';
+                    }
+
+                    // Ticker
+                    if (t.ticker) {
+                        html += '<div class="trade-history-ticker">' + t.ticker + '</div>';
+                    }
+
+                    html += '</div>';
                 }
+                html += '</div>';
                 recentArea.innerHTML = html;
             } else {
                 recentArea.innerHTML = '';
@@ -1661,6 +1766,19 @@
                 if (!resp.ok) { alert('Failed: ' + (result.error || 'unknown error')); return; }
                 if (!result.configured) alert('Warning: ' + env.toUpperCase() + ' credentials are not configured. Trading will not work.');
             } catch (e) { console.error('Environment switch failed:', e); }
+        }
+
+        function toggleTradeHistory() {
+            const list = document.getElementById('trade-history-list');
+            const toggle = document.getElementById('trade-history-toggle');
+            if (!list || !toggle) return;
+            if (list.style.display === 'none') {
+                list.style.display = '';
+                toggle.classList.remove('collapsed');
+            } else {
+                list.style.display = 'none';
+                toggle.classList.add('collapsed');
+            }
         }
 
         async function toggleKillSwitch() {
