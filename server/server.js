@@ -435,6 +435,32 @@ async function fetchAllData() {
                         kalshiStrike: null
                     });
                 }
+            } else if (!currentPeriod.originalPrediction && state.kalshiStrike && currentPeriod.isTransitioning) {
+                // Strike arrived late — make the initial prediction now
+                const marketData = {
+                    currentPrice: state.brtiPrice,
+                    history: state.history,
+                    orderBook: state.orderBook,
+                    recentTrades: state.recentTrades,
+                    fundingRate: state.fundingRate,
+                    ethPrice: state.ethPrice,
+                    ethPriceHistory: state.ethPriceHistory,
+                    openInterest: state.openInterest,
+                    openInterestHistory: state.openInterestHistory
+                };
+                const prediction = engine.handleNewPeriod(periodKey, marketData, minutesAhead, state.kalshiStrike, periodEnd);
+                store.updateCurrentPeriod({
+                    periodStartPrice: state.kalshiStrike,
+                    originalPrediction: prediction,
+                    updatedPrediction: null,
+                    kalshiTicker: state.kalshiTicker,
+                    kalshiCloseTime: state.kalshiCloseTime,
+                    kalshiStrike: state.kalshiStrike,
+                    isTransitioning: false
+                });
+                const bq = prediction._betQuality;
+                const qualStr = bq ? (bq.shouldBet ? 'BET' : 'SKIP') + ' (Q=' + (bq.quality*100).toFixed(0) + '% E=' + (bq.edge*100).toFixed(1) + '%)' : '';
+                console.log(`Late prediction: ${prediction.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(prediction.probability * 100).toFixed(1)}% | ${qualStr}`);
             } else if (currentPeriod.originalPrediction && state.kalshiStrike) {
                 // Same period - update prediction
                 const marketData = {
