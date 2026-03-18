@@ -431,20 +431,6 @@ function computeJumpFilteredVol(prices, window) {
     return { continuousVol, jumpDetected, jumpRatio };
 }
 
-function computeOrderBookImbalance(orderBook) {
-    if (!orderBook || !orderBook.bids || !orderBook.asks) return 0;
-    let bidVol = 0, askVol = 0;
-    const levels = Math.min(orderBook.bids.length, orderBook.asks.length, 10);
-    for (let i = 0; i < levels; i++) {
-        const weight = 1 / (i + 1);
-        bidVol += parseFloat(orderBook.bids[i][1]) * weight;
-        askVol += parseFloat(orderBook.asks[i][1]) * weight;
-    }
-    const total = bidVol + askVol;
-    if (total === 0) return 0;
-    return (bidVol - askVol) / total;
-}
-
 // ── TARI: Trade Arrival Rate Imbalance with Size Buckets ──
 // Research finding: Count-based imbalance with size buckets outperforms
 // simple volume imbalance (54-57% hit rate vs 51-53% for raw flow).
@@ -1378,7 +1364,7 @@ function detectMomentumExhaustion(prices, history) {
         priceIsHigher = recentHigh > priorHigh;
         momIsLower = recentMom < priorMom * 0.7; // momentum 30%+ weaker
         priceIsLower = Math.min(...prices.slice(-5)) < Math.min(...prices.slice(-lookback, -5));
-        momIsHigher = recentMom < priorMom * 0.7;
+        momIsHigher = recentMom > priorMom * 1.3; // momentum strengthening despite price drop
     }
     const bearishDivergence = priceIsHigher && momIsLower; // price up, momentum fading
     const bullishDivergence = priceIsLower && momIsHigher;  // price down, momentum fading
@@ -2063,9 +2049,9 @@ function predictPrice(marketData, minutesAhead, strike) {
         // Liquidation cascade: strongest short-term directional signal
         liqSignal            * 0.08 * immediateBoosted
     );
-    // Bayesian shrinkage: 80% of combined signal is noise at 15-min scale
+    // Bayesian shrinkage: retain 30% of signal (was 20%, too aggressive)
     // In choppy markets, apply extra dampening to prevent false signals
-    const shrinkageFactor = 0.20 * chopDampen;
+    const shrinkageFactor = 0.30 * chopDampen;
     const totalZShift = Math.max(-0.8, Math.min(0.8, rawTotalZShift * agreementMult * shrinkageFactor));
 
     // Final probability
@@ -2076,18 +2062,19 @@ function predictPrice(marketData, minutesAhead, strike) {
     const driftLO = toLogOdds(driftAdjustedProb) * (1 - positionalWeight);
     const combinedProb = fromLogOdds(posLO + driftLO);
     const polarizedProb = timePolarize(combinedProb, minutesAhead);
-    const clampedProb = 0.08 + 0.84 / (1 + Math.exp(-5 * (polarizedProb - 0.5)));
+    // Removed redundant sigmoid clamping — hard bounds + temperature scaling suffice
+    const clampedProb = polarizedProb;
     const ensConf = ensembleConfidence(zScore, totalZShift, positionalWeight, positionalProb, minutesAhead);
 
     const bayesResult = bayesianAdjust(clampedProb, volRegime.regime, getBayesTrendLabel(trendRegime));
     let finalProb = bayesResult.adjustedProb;
 
-    // Gamma-aware confidence dampening — extended to 10 min window and 1.0σ threshold
-    const isNearStrike = Math.abs(zScore) < 1.0;
-    if (isNearStrike && minutesAhead < 10) {
-        const proximityFactor = 1 - Math.abs(zScore) / 1.0;
-        const timeFactor = (10 - minutesAhead) / 10;
-        const gammaRisk = 1 + proximityFactor * timeFactor * 0.50;
+    // Gamma-aware confidence dampening near strike
+    const isNearStrike = Math.abs(zScore) < 0.8;
+    if (isNearStrike && minutesAhead < 8) {
+        const proximityFactor = 1 - Math.abs(zScore) / 0.8;
+        const timeFactor = (8 - minutesAhead) / 8;
+        const gammaRisk = 1 + proximityFactor * timeFactor * 0.25;
         finalProb = 0.5 + (finalProb - 0.5) / gammaRisk;
     }
 
@@ -2148,7 +2135,7 @@ function predictPrice(marketData, minutesAhead, strike) {
     // T = 1.3 is the recommended default for unverified models.
     // The self-learned overconfidenceRatio above partially handles this,
     // but temperature scaling in logit space is more principled.
-    const TEMPERATURE = 1.25; // slightly conservative default
+    const TEMPERATURE = 1.10; // mild — learned corrections handle the rest adaptively
     if (finalProb > 0.01 && finalProb < 0.99) {
         const logit = Math.log(finalProb / (1 - finalProb));
         const scaledLogit = logit / TEMPERATURE;
@@ -2495,12 +2482,13 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
         raw.changePercent = ((raw.predictedPrice - strike) / strike) * 100;
     }
 
-    // Use smoothed probability instead of raw for more stable output
+    // Save true raw probability before overwriting with smoothed
+    const trueRawProb = raw.probability;
     raw.probability = smoothedP;
-    raw._rawProbability = stabilityState.lastRawProb;
+    raw._rawProbability = trueRawProb;
     raw._lockedDirection = stabilityState.lockedDirection;
     raw._consecutiveSame = stabilityState.consecutiveSameDirection;
-    stabilityState.lastRawProb = raw.probability;
+    stabilityState.lastRawProb = trueRawProb;
 
     return raw;
 }
