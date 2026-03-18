@@ -147,6 +147,9 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             return;
         }
 
+        // Use GTC (good-til-canceled) so the order rests on the book if not
+        // immediately matched.  FOK/IOC fail with 409 on demo when there is
+        // no opposing liquidity.
         const result = await trading.placeOrder({
             ticker: kalshiTicker,
             side,
@@ -154,7 +157,6 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             count: contracts,
             yesPrice: side === 'yes' ? limitPrice : undefined,
             noPrice: side === 'no' ? limitPrice : undefined,
-            timeInForce: 'fill_or_kill',
         });
 
         const order = result.order || {};
@@ -233,7 +235,6 @@ async function onSellSignal(sellSignal, minutesRemaining) {
             // Sell at a price that's likely to fill — accept some slippage
             yesPrice: currentPosition.side === 'yes' ? Math.max(1, currentPosition.entryPrice - 10) : undefined,
             noPrice: currentPosition.side === 'no' ? Math.max(1, currentPosition.entryPrice - 10) : undefined,
-            timeInForce: 'fill_or_kill',
         });
 
         const order = result.order || {};
