@@ -41,6 +41,173 @@ const probTracker = {
     momentumHistory: [],  // [{timestamp, momentum}] for exhaustion detection
 };
 
+// ── Session Risk Manager ──
+// Tracks consecutive losses, drawdown, and adjusts bet sizing dynamically.
+// This runs server-side across the session (not per-period).
+const sessionRisk = {
+    results: [],            // [{timestamp, correct, profit}] — rolling window of 20
+    consecutiveLosses: 0,
+    consecutiveWins: 0,
+    sessionPnL: 0,          // approximate P&L in contracts
+    peakPnL: 0,             // high-water mark
+    currentDrawdown: 0,     // distance from peak
+    coolingOff: false,       // true = stop trading temporarily
+    coolingOffUntil: 0,      // timestamp when cooling off ends
+    edgeDecayAlert: false,   // true = recent accuracy below breakeven
+};
+
+function updateSessionRisk(correct) {
+    const profit = correct ? 0.36 : -0.57; // net of Kalshi fees at 50c contracts
+    sessionRisk.results.push({ timestamp: Date.now(), correct, profit });
+    if (sessionRisk.results.length > 20) sessionRisk.results.shift();
+
+    sessionRisk.sessionPnL += profit;
+    if (sessionRisk.sessionPnL > sessionRisk.peakPnL) {
+        sessionRisk.peakPnL = sessionRisk.sessionPnL;
+    }
+    sessionRisk.currentDrawdown = sessionRisk.peakPnL - sessionRisk.sessionPnL;
+
+    if (correct) {
+        sessionRisk.consecutiveWins++;
+        sessionRisk.consecutiveLosses = 0;
+    } else {
+        sessionRisk.consecutiveLosses++;
+        sessionRisk.consecutiveWins = 0;
+    }
+
+    // Cooling off: 3+ consecutive losses → pause for 2 periods (30 min)
+    if (sessionRisk.consecutiveLosses >= 3) {
+        sessionRisk.coolingOff = true;
+        sessionRisk.coolingOffUntil = Date.now() + 30 * 60 * 1000;
+    }
+
+    // Edge decay: rolling accuracy below fee-adjusted breakeven (61.3%)
+    if (sessionRisk.results.length >= 8) {
+        const recentCorrect = sessionRisk.results.filter(r => r.correct).length;
+        const recentAccuracy = recentCorrect / sessionRisk.results.length;
+        sessionRisk.edgeDecayAlert = recentAccuracy < 0.55; // warn at 55%, below 61.3% breakeven
+    }
+}
+
+function getSessionRiskMultiplier() {
+    // Check if cooling off period has expired
+    if (sessionRisk.coolingOff && Date.now() > sessionRisk.coolingOffUntil) {
+        sessionRisk.coolingOff = false;
+    }
+
+    if (sessionRisk.coolingOff) return 0; // don't trade
+
+    let mult = 1.0;
+
+    // Anti-martingale: reduce size after consecutive losses
+    if (sessionRisk.consecutiveLosses >= 2) mult *= 0.50;
+    else if (sessionRisk.consecutiveLosses >= 1) mult *= 0.75;
+
+    // Drawdown protection: reduce size when in significant drawdown
+    if (sessionRisk.currentDrawdown > 2.0) mult *= 0.50; // >2 contracts drawdown
+    else if (sessionRisk.currentDrawdown > 1.0) mult *= 0.75;
+
+    // Edge decay: reduce size when accuracy is dropping
+    if (sessionRisk.edgeDecayAlert) mult *= 0.60;
+
+    // Winning streak: can go up to full size (but no more — no martingale)
+    // Already at 1.0, so no boost needed
+
+    return Math.max(0, Math.min(1.0, mult));
+}
+
+// ── Online Logistic Regression (pure JS, no libraries) ──
+// Learns adaptive signal weights from prediction outcomes.
+// Uses stochastic gradient descent with L2 regularization.
+const onlineLR = {
+    // Feature order: [bias, volRatio, trendVR, ac1, flowImbalance, choppiness, exhaustion, momentumStrength]
+    weights: [0, 0, 0, 0, 0, 0, 0, 0],
+    learningRate: 0.05,
+    lambda: 0.01,        // L2 regularization
+    sampleCount: 0,
+    minSamples: 15,      // don't use predictions until we have enough data
+    featureStats: {       // running mean/var for online normalization
+        means: [0, 0, 0, 0, 0, 0, 0, 0],
+        vars: [1, 1, 1, 1, 1, 1, 1, 1],
+        n: 0
+    }
+};
+
+function onlineLR_normalize(features) {
+    const s = onlineLR.featureStats;
+    if (s.n < 5) return features; // not enough data to normalize
+    return features.map((f, i) => {
+        const std = Math.sqrt(Math.max(s.vars[i], 1e-8));
+        return (f - s.means[i]) / std;
+    });
+}
+
+function onlineLR_updateStats(features) {
+    const s = onlineLR.featureStats;
+    s.n++;
+    for (let i = 0; i < features.length; i++) {
+        const oldMean = s.means[i];
+        s.means[i] += (features[i] - oldMean) / s.n;
+        s.vars[i] += (features[i] - oldMean) * (features[i] - s.means[i]);
+        if (s.n > 1) s.vars[i] = s.vars[i] / s.n; // population variance
+    }
+}
+
+function onlineLR_predict(features) {
+    if (onlineLR.sampleCount < onlineLR.minSamples) return 0.5; // no adjustment yet
+    const norm = onlineLR_normalize(features);
+    let logit = 0;
+    for (let i = 0; i < norm.length; i++) {
+        logit += onlineLR.weights[i] * norm[i];
+    }
+    return 1 / (1 + Math.exp(-Math.max(-10, Math.min(10, logit))));
+}
+
+function onlineLR_update(features, outcome) {
+    // outcome: 1 = correct direction, 0 = wrong
+    onlineLR_updateStats(features);
+    const norm = onlineLR_normalize(features);
+    const pred = onlineLR_predict(features);
+    const error = outcome - pred;
+
+    // Decaying learning rate: lr = lr0 / (1 + n * 0.001)
+    const lr = onlineLR.learningRate / (1 + onlineLR.sampleCount * 0.001);
+
+    for (let i = 0; i < onlineLR.weights.length; i++) {
+        // SGD with L2 regularization
+        onlineLR.weights[i] += lr * (error * norm[i] - onlineLR.lambda * onlineLR.weights[i]);
+        // Clip weights to prevent explosion
+        onlineLR.weights[i] = Math.max(-3, Math.min(3, onlineLR.weights[i]));
+    }
+    onlineLR.sampleCount++;
+}
+
+// Extract features from market state for online LR
+function extractLRFeatures(marketData) {
+    const prices = marketData.history.map(h => h.price);
+    const n = prices.length;
+    if (n < 10) return [1, 0, 0, 0, 0, 0, 0, 0]; // bias only
+
+    const volRegime = detectVolRegime(prices);
+    const trendRegime = detectTrendRegime(prices, n);
+    const ac1 = computeAutocorrelation(prices, 1);
+    const flow = marketData.recentTrades ? computeTradeFlowImbalance(marketData.recentTrades) : 0;
+    const chop = detectChoppiness(prices);
+    const exhaust = detectMomentumExhaustion(prices, marketData.history);
+    const mom5 = n > 5 ? (prices[n-1] - prices[n-6]) / prices[n-6] : 0;
+
+    return [
+        1,                          // bias
+        volRegime.ratio,            // vol regime ratio
+        trendRegime.vr,             // variance ratio
+        ac1,                        // autocorrelation
+        flow,                       // trade flow imbalance
+        chop.choppiness,            // choppiness index
+        exhaust.exhaustion,         // exhaustion score
+        mom5 * 1000                 // momentum (scaled)
+    ];
+}
+
 // ── Standard normal CDF (Abramowitz & Stegun) ──
 function normCDF(x) {
     if (x > 8) return 1;
@@ -1452,7 +1619,23 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         betSizeReason = 'Full size — strong setup';
     }
 
-    betSize = Math.max(0.25, Math.min(1.0, betSize));
+    // Session risk adjustment: reduce size based on drawdown/streak
+    const sessionMult = getSessionRiskMultiplier();
+    if (sessionMult === 0) {
+        betSize = 0;
+        betSizeReason = 'COOLING OFF — consecutive losses, waiting for reset';
+    } else if (sessionMult < 1.0) {
+        betSize *= sessionMult;
+        if (sessionRisk.edgeDecayAlert) {
+            betSizeReason = betSize < 0.4 ? 'Small — edge decay detected' : 'Reduced — edge fading';
+        } else if (sessionRisk.consecutiveLosses >= 2) {
+            betSizeReason = betSize < 0.4 ? 'Small — loss streak protection' : 'Reduced — after losses';
+        } else if (sessionRisk.currentDrawdown > 1.0) {
+            betSizeReason = betSize < 0.4 ? 'Small — drawdown protection' : 'Reduced — managing drawdown';
+        }
+    }
+
+    betSize = Math.max(0, Math.min(1.0, betSize));
 
     // ── Fee-adjusted Kelly fraction ──
     // Kalshi fees: ~7 cents per side. For a 50c contract:
@@ -1471,15 +1654,25 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     const kellyHasEdge = kellyRaw > 0;
 
     // If Kelly says no edge after fees, override shouldBet
-    const shouldBetAdjusted = shouldBet && kellyHasEdge;
+    // Also block bets during cooling off period
+    const shouldBetAdjusted = shouldBet && kellyHasEdge && sessionMult > 0;
 
     return {
         quality, shouldBet: shouldBetAdjusted, waitForBetter: !shouldBetAdjusted && minutesAhead > 8,
         suggestedWait, edge, factors, choppiness: chop, exhaustion,
         betSize, betSizeReason,
         kellyFraction, kellyHasEdge,
+        sessionRisk: {
+            consecutiveLosses: sessionRisk.consecutiveLosses,
+            consecutiveWins: sessionRisk.consecutiveWins,
+            currentDrawdown: sessionRisk.currentDrawdown,
+            coolingOff: sessionRisk.coolingOff,
+            edgeDecayAlert: sessionRisk.edgeDecayAlert,
+            riskMultiplier: sessionMult
+        },
         reason: !shouldBetAdjusted ?
-            (!kellyHasEdge ? 'No edge after Kalshi fees (need >' + ((lossAmount / (1 - fee)) * 100).toFixed(0) + '% win prob)' :
+            (sessionMult === 0 ? 'COOLING OFF — ' + sessionRisk.consecutiveLosses + ' consecutive losses, pausing' :
+             !kellyHasEdge ? 'No edge after Kalshi fees (need >' + ((lossAmount / (1 - fee)) * 100).toFixed(0) + '% win prob)' :
              !factors.hasMinEdge ? 'Edge too thin (' + (edge*100).toFixed(1) + '%)' :
              !factors.notChoppy ? 'Market is choppy (ADX=' + chop.adx.toFixed(0) + ')' :
              !factors.notExhausted ? 'Momentum exhaustion detected' :
@@ -1554,7 +1747,25 @@ function predictPrice(marketData, minutesAhead, strike) {
         settlementVolAdj = 0.80 + (minutesAhead - 3) / 2 * 0.20;
     }
     const settlementVol = remainingVol * settlementVolAdj;
-    const zScore = settlementVol > 0 ? Math.log(current / strike) / settlementVol : 0;
+
+    // BRTI Settlement Price Estimator: when < 2 min remain, estimate where
+    // the 60-second trimmed average will land based on recent price trajectory.
+    // The BRTI trims top/bottom 20% of constituent prices over 60 seconds,
+    // so it's a smoothed, lagging indicator. Current spot leads settlement.
+    let brtiShift = 0;
+    if (minutesAhead <= 2 && n > 5) {
+        // Estimate: settlement ≈ average of last ~6 prices (60 sec at 10s ticks)
+        const settlementWindow = Math.min(6, n);
+        const recentAvg = prices.slice(-settlementWindow).reduce((a, b) => a + b, 0) / settlementWindow;
+        // If current price is above recent average, settlement will lag below spot
+        // This means the z-score for settlement should use the estimated settlement price
+        const brtiEstimate = recentAvg;
+        brtiShift = Math.log(brtiEstimate / current); // negative if spot above avg
+        // Weight: stronger as we get closer to settlement
+        brtiShift *= (2 - minutesAhead) / 2; // 0 at 2min, full at 0min
+    }
+    // Include BRTI settlement lag: spot may be above/below where settlement will land
+    const zScore = settlementVol > 0 ? (Math.log(current / strike) + brtiShift) / settlementVol : 0;
     const positionalProb = fatTailCDF(zScore, prices);
 
     // SIGNAL 2: MOMENTUM / DRIFT
@@ -1574,11 +1785,21 @@ function predictPrice(marketData, minutesAhead, strike) {
     const volRegime = detectVolRegime(prices);
     const trendRegime = detectTrendRegime(prices, n);
     const ac1 = computeAutocorrelation(prices, 1);
+    const ac2 = computeAutocorrelation(prices, 2);
+    // Multi-lag: ac1 + ac2 together differentiate noise from structure
+    // Both negative → strong mean reversion (bounce/whipsaw)
+    // ac1 positive, ac2 positive → persistent trend
+    // ac1 negative, ac2 positive → oscillation (choppy)
+    const acSum = ac1 + ac2 * 0.5; // ac2 weighted less (noisier)
     let driftMultiplier = 1.0;
-    if (ac1 < -0.35) driftMultiplier = 0.15;
+    if (acSum < -0.50) driftMultiplier = 0.10;      // very strong mean reversion
+    else if (ac1 < -0.35) driftMultiplier = 0.15;
+    else if (acSum > 0.50) driftMultiplier = 1.0;    // strong persistence
     else if (ac1 > 0.35) driftMultiplier = 0.95;
     else if (trendRegime.meanReverting) driftMultiplier = 0.25;
     else if (trendRegime.trending) driftMultiplier = 1.0;
+    // Oscillating market (ac1 neg, ac2 pos): reduce drift, increase reversion
+    else if (ac1 < -0.15 && ac2 > 0.15) driftMultiplier = 0.35;
 
     // Early period momentum bias — stronger and starts immediately
     const minutesIntoPeriod = 15 - minutesAhead;
@@ -1808,6 +2029,17 @@ function predictPrice(marketData, minutesAhead, strike) {
         // Widen/narrow probability based on learned vol correction
         const volCorr = learned.volRegimeMultiplier[volRegime.regime];
         finalProb = 0.5 + (finalProb - 0.5) / volCorr;
+    }
+
+    // ── Online LR adjustment: learned signal from past outcomes ──
+    // Small adjustment from the online logistic regression model.
+    // Only kicks in after minSamples (15) graded predictions.
+    if (onlineLR.sampleCount >= onlineLR.minSamples) {
+        const lrFeatures = extractLRFeatures(marketData);
+        const lrPred = onlineLR_predict(lrFeatures);
+        // Blend: 90% original + 10% learned (conservative to avoid overfitting)
+        const lrWeight = Math.min(0.15, onlineLR.sampleCount / 1000); // ramp up slowly
+        finalProb = finalProb * (1 - lrWeight) + lrPred * lrWeight;
     }
 
     // ── Temperature scaling for overconfidence correction ──
@@ -2200,9 +2432,25 @@ function gradeBayesianPrediction(currentPrice, periodKey) {
             // No break — grade all pending entries
         }
     });
-    // Feed each graded record to self-learning error analysis
+    // Feed each graded record to self-learning error analysis, session risk, and online LR
     for (const rec of gradedRecords) {
-        try { analyzeAndLearn(rec); } catch(e) { console.error('Error analysis failed:', e.message); }
+        try {
+            analyzeAndLearn(rec);
+            updateSessionRisk(rec.correct);
+            // Train online LR with the outcome
+            // We use simplified features since we don't have full marketData at grading time
+            const lrFeatures = [
+                1, // bias
+                rec.volRegime === 'volatile' ? 2.0 : rec.volRegime === 'quiet' ? 0.5 : 1.0,
+                rec.trendRegime === 'trending' ? 1.5 : rec.trendRegime === 'meanReverting' ? 0.7 : 1.0,
+                0, // ac1 not available at grading
+                0, // flow not available
+                0, // choppiness not available
+                0, // exhaustion not available
+                0  // momentum not available
+            ];
+            onlineLR_update(lrFeatures, rec.correct ? 1 : 0);
+        } catch(e) { console.error('Error analysis failed:', e.message); }
     }
     return updated;
 }
@@ -2498,5 +2746,7 @@ module.exports = {
     getLearnedCorrections,
     getErrorSummary,
     detectMomentumExhaustion,
-    detectChoppiness
+    detectChoppiness,
+    getSessionRiskMultiplier,
+    sessionRisk
 };

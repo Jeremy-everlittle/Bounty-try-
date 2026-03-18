@@ -517,7 +517,15 @@ async function fetchAllData() {
             totalPredictions: store.getState().totalPredictionsMade,
             errorAnalysis: engine.getErrorSummary(),
             learnedCorrections: engine.getLearnedCorrections(),
-            betQuality: store.getCurrentPeriod()?.originalPrediction?._betQuality || null
+            betQuality: store.getCurrentPeriod()?.originalPrediction?._betQuality || null,
+            sessionRisk: {
+                consecutiveLosses: engine.sessionRisk.consecutiveLosses,
+                consecutiveWins: engine.sessionRisk.consecutiveWins,
+                currentDrawdown: engine.sessionRisk.currentDrawdown,
+                coolingOff: engine.sessionRisk.coolingOff,
+                edgeDecayAlert: engine.sessionRisk.edgeDecayAlert,
+                riskMultiplier: engine.getSessionRiskMultiplier()
+            }
         });
 
         console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | ${wss.clients.size} clients`);

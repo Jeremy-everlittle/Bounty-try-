@@ -3848,6 +3848,21 @@
                     '</div>' +
                     (bq.betSizeReason && betSize < 0.9 ? '<div class="sell-signal-details" style="margin-top:2px;color:#b0b8c1">' + bq.betSizeReason + '</div>' : '');
 
+                // Session risk banner
+                if (bq.sessionRisk) {
+                    const sr = bq.sessionRisk;
+                    if (sr.coolingOff) {
+                        qualityBar += '<div style="margin-top:4px;padding:4px 8px;background:#f8514933;border-radius:4px;color:#f85149;font-weight:700">COOLING OFF — ' + sr.consecutiveLosses + ' consecutive losses. Waiting for reset.</div>';
+                    } else if (sr.edgeDecayAlert) {
+                        qualityBar += '<div style="margin-top:4px;padding:4px 8px;background:#d2992233;border-radius:4px;color:#d29922">Edge decay detected — recent accuracy below breakeven. Reducing size.</div>';
+                    } else if (sr.consecutiveLosses >= 2) {
+                        qualityBar += '<div style="margin-top:4px;padding:2px 8px;color:#d29922;font-size:11px">After ' + sr.consecutiveLosses + ' losses — reducing position size</div>';
+                    }
+                    if (sr.consecutiveWins >= 3) {
+                        qualityBar += '<div style="margin-top:2px;padding:2px 8px;color:#3fb950;font-size:11px">Streak: ' + sr.consecutiveWins + ' wins</div>';
+                    }
+                }
+
             el.innerHTML =
                 '<div class="prebuy-signal prebuy-' + finalLevel + '">' +
                     '<div class="prebuy-header">' +
