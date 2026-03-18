@@ -39,6 +39,10 @@ const stabilityState = {
     periodKey: null,
 };
 
+// ── Online ML feature cache (for attaching to graded records) ──
+let _lastMLFeatures = null;
+let _lastSignalPredictions = null;
+
 // ── Probability velocity & profit tracking (persists within a period) ──
 const probTracker = {
     periodKey: null,
@@ -127,76 +131,18 @@ function getSessionRiskMultiplier() {
 }
 
 // ── Online Logistic Regression (pure JS, no libraries) ──
-// Learns adaptive signal weights from prediction outcomes.
-// Uses stochastic gradient descent with L2 regularization.
-const onlineLR = {
-    // Feature order: [bias, volRatio, trendVR, ac1, flowImbalance, choppiness, exhaustion, momentumStrength]
-    weights: [0, 0, 0, 0, 0, 0, 0, 0],
-    learningRate: 0.05,
-    lambda: 0.01,        // L2 regularization
-    sampleCount: 0,
-    minSamples: 15,      // don't use predictions until we have enough data
-    featureStats: {       // running mean/var for online normalization
-        means: [0, 0, 0, 0, 0, 0, 0, 0],
-        vars: [1, 1, 1, 1, 1, 1, 1, 1],
-        n: 0
-    }
-};
+// Legacy inline LR removed — replaced by OnlineMLManager in online-ml.js
+// The OnlineMLManager provides:
+//   - OnlineLogisticRegression with proper Welford normalization, L2 reg, LR scheduling
+//   - ExponentialWeightedEnsemble for adaptive signal combination
+//   - OnlineCalibrator with Platt scaling + isotonic regression
+//   - OnlineHMM for regime detection
 
-function onlineLR_normalize(features) {
-    const s = onlineLR.featureStats;
-    if (s.n < 5) return features; // not enough data to normalize
-    return features.map((f, i) => {
-        const std = Math.sqrt(Math.max(s.vars[i], 1e-8));
-        return (f - s.means[i]) / std;
-    });
-}
-
-function onlineLR_updateStats(features) {
-    const s = onlineLR.featureStats;
-    s.n++;
-    for (let i = 0; i < features.length; i++) {
-        const oldMean = s.means[i];
-        s.means[i] += (features[i] - oldMean) / s.n;
-        s.vars[i] += (features[i] - oldMean) * (features[i] - s.means[i]);
-        if (s.n > 1) s.vars[i] = s.vars[i] / s.n; // population variance
-    }
-}
-
-function onlineLR_predict(features) {
-    if (onlineLR.sampleCount < onlineLR.minSamples) return 0.5; // no adjustment yet
-    const norm = onlineLR_normalize(features);
-    let logit = 0;
-    for (let i = 0; i < norm.length; i++) {
-        logit += onlineLR.weights[i] * norm[i];
-    }
-    return 1 / (1 + Math.exp(-Math.max(-10, Math.min(10, logit))));
-}
-
-function onlineLR_update(features, outcome) {
-    // outcome: 1 = correct direction, 0 = wrong
-    onlineLR_updateStats(features);
-    const norm = onlineLR_normalize(features);
-    const pred = onlineLR_predict(features);
-    const error = outcome - pred;
-
-    // Decaying learning rate: lr = lr0 / (1 + n * 0.001)
-    const lr = onlineLR.learningRate / (1 + onlineLR.sampleCount * 0.001);
-
-    for (let i = 0; i < onlineLR.weights.length; i++) {
-        // SGD with L2 regularization
-        onlineLR.weights[i] += lr * (error * norm[i] - onlineLR.lambda * onlineLR.weights[i]);
-        // Clip weights to prevent explosion
-        onlineLR.weights[i] = Math.max(-3, Math.min(3, onlineLR.weights[i]));
-    }
-    onlineLR.sampleCount++;
-}
-
-// Extract features from market state for online LR
-function extractLRFeatures(marketData) {
+// Extract features from market state for online ML
+function extractMLFeatures(marketData, extraCtx) {
     const prices = marketData.history.map(h => h.price);
     const n = prices.length;
-    if (n < 10) return [1, 0, 0, 0, 0, 0, 0, 0]; // bias only
+    if (n < 10) return { features: [0, 0, 0, 0, 0, 0, 0, 0], ctx: {} };
 
     const volRegime = detectVolRegime(prices);
     const trendRegime = detectTrendRegime(prices, n);
@@ -205,17 +151,43 @@ function extractLRFeatures(marketData) {
     const chop = detectChoppiness(prices);
     const exhaust = detectMomentumExhaustion(prices, marketData.history);
     const mom5 = n > 5 ? (prices[n-1] - prices[n-6]) / prices[n-6] : 0;
+    const rsi = computeRSI(prices);
+    const hurstH = computeHurstExponent(prices.slice(-Math.min(n, 90)));
+    const logReturn = n > 1 ? Math.log(prices[n-1] / prices[n-2]) : 0;
 
-    return [
-        1,                          // bias
-        volRegime.ratio,            // vol regime ratio
-        trendRegime.vr,             // variance ratio
-        ac1,                        // autocorrelation
-        flow,                       // trade flow imbalance
-        chop.choppiness,            // choppiness index
-        exhaust.exhaustion,         // exhaustion score
-        mom5 * 1000                 // momentum (scaled)
+    // Map vol regime to numeric
+    const volRegimeMap = { volatile: 2, expanding: 1, normal: 0, contracting: -1, quiet: -2 };
+    const volRegimeNum = volRegimeMap[volRegime.regime] || 0;
+    const trendStrength = ac1 * 0.5 + (hurstH - 0.5) * 2 * 0.5;
+    const hour = new Date().getHours();
+    const timeOfDay = hour / 24;
+    const distFromStrike = extraCtx && extraCtx.zScore ? extraCtx.zScore : 0;
+    const spreadVol = extraCtx && extraCtx.spreadVolAdjust ? extraCtx.spreadVolAdjust : 1.0;
+
+    const features = [
+        volRegimeNum,
+        trendStrength,
+        flow,
+        timeOfDay,
+        distFromStrike,
+        mom5 * 1000,
+        (rsi - 50) / 50,
+        spreadVol
     ];
+
+    const ctx = {
+        volRegime: volRegime.regime,
+        ac1,
+        hurstH,
+        orderFlowSignal: flow,
+        driftSignal: mom5 * 1000,
+        rsi,
+        spreadVolAdjust: spreadVol,
+        zScore: distFromStrike,
+        logReturn
+    };
+
+    return { features, ctx };
 }
 
 // ── Standard normal CDF (Abramowitz & Stegun) ──
@@ -1174,6 +1146,43 @@ function computeAutocorrelation(prices, lag) {
     return den > 0 ? num / den : 0;
 }
 
+
+// ── Normalized Rate of Change ──
+function computeNormalizedROC(prices, lookback) {
+    const n = prices.length;
+    if (n < lookback + 2) return 0;
+    const roc = (prices[n - 1] - prices[n - 1 - lookback]) / prices[n - 1 - lookback];
+    const vol = computeRealizedVol(prices, lookback);
+    return vol > 0.0001 ? Math.max(-3, Math.min(3, roc / vol)) : 0;
+}
+
+// ── Mean Reversion Composite Score ──
+function computeMeanReversionScore(prices, history, trendRegime) {
+    const n = prices.length;
+    if (n < 20) return { signal: 0, agreement: false };
+    let cumPV = 0, cumVol = 0, cumPV2 = 0;
+    for (const h of history) {
+        const vol = h.volume || 1;
+        cumPV += h.price * vol; cumVol += vol; cumPV2 += h.price * h.price * vol;
+    }
+    const vwap = cumPV / cumVol;
+    const vwapStd = Math.sqrt(Math.max(0, (cumPV2 / cumVol) - vwap * vwap));
+    const vwapZ = vwapStd > 0 ? (prices[n - 1] - vwap) / vwapStd : 0;
+    const period = Math.min(20, n);
+    const slice = prices.slice(-period);
+    const bbMean = slice.reduce((a, b) => a + b, 0) / period;
+    const bbStd = Math.sqrt(slice.reduce((s, p) => s + (p - bbMean) ** 2, 0) / period);
+    const bbZ = bbStd > 0 ? (prices[n - 1] - bbMean) / bbStd : 0;
+    const agreement = Math.sign(vwapZ) === Math.sign(bbZ) && Math.abs(vwapZ) > 1.0 && Math.abs(bbZ) > 1.0;
+    const composite = vwapZ * 0.4 + bbZ * 0.6;
+    let regimeGate = 1.0;
+    if (trendRegime.trending) regimeGate = 0.3;
+    else if (trendRegime.meanReverting) regimeGate = 1.5;
+    let signal = -Math.sign(composite) * Math.min(Math.abs(composite) * 0.12, 0.40) * regimeGate;
+    if (agreement) signal *= 1.4;
+    return { signal: Math.max(-0.5, Math.min(0.5, signal)), agreement };
+}
+
 function computeAnchoredVWAP(history) {
     if (history.length < 3) return { vwap: 0, deviation: 0 };
     let cumPV = 0, cumVol = 0;
@@ -1963,6 +1972,14 @@ function predictPrice(marketData, minutesAhead, strike) {
     // SIGNAL 23: CHOPPINESS DETECTION — reduce signal weight in choppy markets
     const choppiness = detectChoppiness(prices);
 
+    // SIGNAL 24: NORMALIZED ROC — momentum z-scored by vol
+    const nroc5 = computeNormalizedROC(prices, 5);
+    const nroc10 = computeNormalizedROC(prices, 10);
+    const normRocSignal = (nroc5 * 0.6 + nroc10 * 0.4) * 0.10;
+
+    // SIGNAL 25: MEAN REVERSION COMPOSITE — VWAP+BB z-score with regime gating
+    const mrComposite = computeMeanReversionScore(prices, history, trendRegime);
+
     const earlyBoost = Math.max(0, 1 - timeProgress * 2);
     const urgencyFade = minutesAhead < 3 ? Math.max(0, (minutesAhead - 1) / 2) : 1.0;
     const immediateBoosted = minutesAhead < 3 ? 1 + (3 - minutesAhead) * 0.3 : 1.0;
@@ -1979,7 +1996,9 @@ function predictPrice(marketData, minutesAhead, strike) {
         { value: candlePattern.signal, weight: 0.04 }, { value: microMRSignal, weight: 0.08 },
         { value: breakoutSignal, weight: 0.06 }, { value: cpSignal, weight: 0.04 },
         { value: ethLL.signal, weight: 0.04 },
-        { value: exhaustionSignal, weight: 0.08 }
+        { value: exhaustionSignal, weight: 0.08 },
+        { value: normRocSignal, weight: 0.05 },
+        { value: mrComposite.signal, weight: 0.06 }
     ];
     const agreementMult = computeAgreementMultiplier(allSignals);
 
@@ -2010,7 +2029,11 @@ function predictPrice(marketData, minutesAhead, strike) {
         ethLL.signal         * 0.04 * immediateBoosted * regM.momentum +
         // Momentum exhaustion: contrarian signal that fades current trend when losing steam
         // Increases weight as period progresses (more useful mid/late period)
-        exhaustionSignal     * (0.06 + (1 - earlyBoost) * 0.06) * regM.reversion
+        exhaustionSignal     * (0.06 + (1 - earlyBoost) * 0.06) * regM.reversion +
+        // Normalized ROC: momentum z-scored by vol, avoids false signals in high-vol
+        normRocSignal        * (0.04 + earlyBoost * 0.02) * regM.momentum +
+        // Mean reversion composite: fades overextended moves when VWAP and BB agree
+        mrComposite.signal   * 0.08 * regM.reversion
     );
     // Bayesian shrinkage: 80% of combined signal is noise at 15-min scale
     // In choppy markets, apply extra dampening to prevent false signals
@@ -2058,15 +2081,37 @@ function predictPrice(marketData, minutesAhead, strike) {
         finalProb = 0.5 + (finalProb - 0.5) / volCorr;
     }
 
-    // ── Online LR adjustment: learned signal from past outcomes ──
-    // Small adjustment from the online logistic regression model.
-    // Only kicks in after minSamples (15) graded predictions.
-    if (onlineLR.sampleCount >= onlineLR.minSamples) {
-        const lrFeatures = extractLRFeatures(marketData);
-        const lrPred = onlineLR_predict(lrFeatures);
-        // Blend: 90% original + 10% learned (conservative to avoid overfitting)
-        const lrWeight = Math.min(0.15, onlineLR.sampleCount / 1000); // ramp up slowly
-        finalProb = finalProb * (1 - lrWeight) + lrPred * lrWeight;
+    // ── Online ML Enhancement ──
+    // Uses OnlineMLManager: logistic regression, adaptive ensemble,
+    // HMM regime detection, and online calibration.
+    try {
+        const ml = getOnlineML();
+        const { features: mlFeatures, ctx: mlCtx } = extractMLFeatures(marketData, {
+            zScore, spreadVolAdjust: spreadVolAdjust || 1.0
+        });
+        // Add signal probabilities for ensemble tracking
+        mlCtx.positionalProb = positionalProb;
+        mlCtx.driftAdjustedProb = driftAdjustedProb;
+        mlCtx.orderFlowProb = orderFlowSignal > 0 ? 0.5 + orderFlowSignal * 0.3 : 0.5 + orderFlowSignal * 0.3;
+        mlCtx.bayesianProb = bayesResult.adjustedProb;
+        mlCtx.meanReversionProb = rsiSignal !== 0 ? 0.5 + rsiSignal * 0.2 : 0.5 + microMRSignal * 0.2;
+        mlCtx.patternProb = 0.5 + (candlePattern.signal * 0.15 + breakoutSignal * 0.15);
+
+        const mlResult = ml.enhance(finalProb, mlCtx);
+        finalProb = mlResult.probability;
+
+        // Store ML features and signal predictions for later learning
+        // These will be attached to the Bayesian record for grading
+        _lastMLFeatures = mlFeatures;
+        _lastSignalPredictions = [
+            mlCtx.positionalProb, mlCtx.driftAdjustedProb, mlCtx.orderFlowProb,
+            mlCtx.bayesianProb, mlResult.lrProb, mlCtx.meanReversionProb, mlCtx.patternProb
+        ];
+    } catch (e) {
+        // Online ML is non-critical — if it fails, continue with existing prob
+        if (e.message && !e.message.includes('Cannot find module')) {
+            console.error('Online ML enhance error:', e.message);
+        }
     }
 
     // ── Temperature scaling for overconfidence correction ──
@@ -2459,24 +2504,25 @@ function gradeBayesianPrediction(currentPrice, periodKey) {
             // No break — grade all pending entries
         }
     });
-    // Feed each graded record to self-learning error analysis, session risk, and online LR
+    // Feed each graded record to self-learning error analysis, session risk, and online ML
     for (const rec of gradedRecords) {
         try {
             analyzeAndLearn(rec);
             updateSessionRisk(rec.correct);
-            // Train online LR with the outcome
-            // We use simplified features since we don't have full marketData at grading time
-            const lrFeatures = [
-                1, // bias
-                rec.volRegime === 'volatile' ? 2.0 : rec.volRegime === 'quiet' ? 0.5 : 1.0,
-                rec.trendRegime === 'trending' ? 1.5 : rec.trendRegime === 'meanReverting' ? 0.7 : 1.0,
-                0, // ac1 not available at grading
-                0, // flow not available
-                0, // choppiness not available
-                0, // exhaustion not available
-                0  // momentum not available
-            ];
-            onlineLR_update(lrFeatures, rec.correct ? 1 : 0);
+
+            // Feed outcome to Online ML Manager
+            try {
+                const ml = getOnlineML();
+                // Attach cached ML features if available (from last prediction)
+                rec._mlFeatures = _lastMLFeatures;
+                rec._signalPredictions = _lastSignalPredictions;
+                ml.learn(rec);
+            } catch (mlErr) {
+                // Online ML learning is non-critical
+                if (mlErr.message && !mlErr.message.includes('Cannot find module')) {
+                    console.error('Online ML learn error:', mlErr.message);
+                }
+            }
         } catch(e) { console.error('Error analysis failed:', e.message); }
     }
     return updated;
@@ -2775,5 +2821,6 @@ module.exports = {
     detectMomentumExhaustion,
     detectChoppiness,
     getSessionRiskMultiplier,
-    sessionRisk
+    sessionRisk,
+    getOnlineML
 };
