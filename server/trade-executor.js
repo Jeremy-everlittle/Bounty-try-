@@ -178,8 +178,14 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         console.log(`[trade-executor] LIVE BUY: ${contracts}x ${side.toUpperCase()} on ${kalshiTicker} — order ${order.order_id}`);
 
     } catch (err) {
-        console.error(`[trade-executor] Order failed:`, err.message);
-        logTrade('buy_error', { ...tradeInfo, error: err.message });
+        const detail = err.response ? JSON.stringify(err.response) : '';
+        console.error(`[trade-executor] Order failed:`, err.message, detail ? `| Response: ${detail}` : '');
+        logTrade('buy_error', { ...tradeInfo, error: err.message, response: err.response });
+
+        // On 409 (conflict/insufficient funds), don't retry this period
+        if (err.status === 409) {
+            currentPosition = { ticker: kalshiTicker, side, contracts: 0, entryPrice: 0, orderId: 'blocked-409', periodKey, entryTime: Date.now() };
+        }
     }
 }
 
@@ -237,8 +243,9 @@ async function onSellSignal(sellSignal, minutesRemaining) {
         currentPosition = null;
 
     } catch (err) {
-        console.error(`[trade-executor] Sell failed:`, err.message);
-        logTrade('sell_error', { ...tradeInfo, error: err.message });
+        const detail = err.response ? JSON.stringify(err.response) : '';
+        console.error(`[trade-executor] Sell failed:`, err.message, detail ? `| Response: ${detail}` : '');
+        logTrade('sell_error', { ...tradeInfo, error: err.message, response: err.response });
         // Don't clear position — will retry next cycle or auto-settle
     }
 }
