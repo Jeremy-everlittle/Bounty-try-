@@ -773,10 +773,18 @@ function resetState() {
 // Status & logging
 // ═══════════════════════════════════════════════════════════════
 
+let tradeNotifyCallback = null;
+
+function onTradeNotify(cb) { tradeNotifyCallback = cb; }
+
 function logTrade(type, info) {
     const entry = { type, time: new Date().toISOString(), ...info };
     tradeLog.unshift(entry);
     if (tradeLog.length > MAX_TRADE_LOG) tradeLog.length = MAX_TRADE_LOG;
+    // Notify listeners (for push notifications)
+    if (tradeNotifyCallback) {
+        try { tradeNotifyCallback(entry); } catch(e) { /* ignore */ }
+    }
 }
 
 async function refreshBalance() {
@@ -831,5 +839,6 @@ module.exports = {
     setPaperMode,
     resetState,
     getStatus,
+    onTradeNotify,
     config, // exposed for startup logging
 };

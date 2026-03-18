@@ -729,6 +729,7 @@
             <div class="trading-controls">
                 <button class="trading-btn" id="trading-mode-btn" onclick="toggleTradingMode()">Toggle Mode</button>
                 <button class="trading-btn trading-btn-danger" id="trading-kill-btn" onclick="toggleKillSwitch()">Kill Switch</button>
+                <button class="trading-btn" id="notif-btn" onclick="toggleNotifications()" style="font-size:12px">Notifications: OFF</button>
             </div>
         </div>
 
@@ -876,6 +877,8 @@
                             mergePredictionLogs(msg.predictionLog);
                             renderPredictionHistory();
                         }
+                    } else if (msg.type === 'trade') {
+                        handleTradeNotification(msg.trade);
                     }
                 } catch (e) {
                     console.error('WebSocket message parse error:', e);
@@ -2567,7 +2570,106 @@
             }
         });
 
+        // ── Notifications ────────────────────────────────────────────
+        let notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true';
+
+        function updateNotifButton() {
+            const btn = document.getElementById('notif-btn');
+            if (!btn) return;
+            if (notificationsEnabled && Notification.permission === 'granted') {
+                btn.textContent = 'Notifications: ON';
+                btn.style.color = '#3fb950';
+                btn.style.borderColor = 'rgba(63,185,80,0.4)';
+            } else {
+                btn.textContent = 'Notifications: OFF';
+                btn.style.color = '';
+                btn.style.borderColor = '';
+            }
+        }
+
+        async function toggleNotifications() {
+            if (!('Notification' in window)) {
+                alert('Your browser does not support notifications.');
+                return;
+            }
+            if (!notificationsEnabled) {
+                const perm = await Notification.requestPermission();
+                if (perm === 'granted') {
+                    notificationsEnabled = true;
+                    localStorage.setItem('notificationsEnabled', 'true');
+                } else {
+                    alert('Notification permission denied. Please enable it in your browser settings.');
+                }
+            } else {
+                notificationsEnabled = false;
+                localStorage.setItem('notificationsEnabled', 'false');
+            }
+            updateNotifButton();
+        }
+
+        function handleTradeNotification(trade) {
+            if (!notificationsEnabled || Notification.permission !== 'granted') return;
+            // Only notify on actionable trade events
+            const notifyTypes = ['buy', 'sell', 'settle', 'dip_buy', 'late_lock', 're_entry'];
+            if (!notifyTypes.includes(trade.type)) return;
+
+            let title, body, icon;
+            const dir = (trade.direction || trade.side || '').toUpperCase();
+
+            switch (trade.type) {
+                case 'buy':
+                    title = 'Bought ' + dir;
+                    body = trade.contracts + 'x ' + dir + ' @ ' + trade.limitPrice + '\u00A2 | Edge: ' + (trade.edge || '?');
+                    icon = '📈';
+                    break;
+                case 'sell':
+                    title = 'Sold Position';
+                    body = trade.contracts + 'x ' + (trade.side || '').toUpperCase() + ' | Reason: ' + (trade.reason || 'unknown');
+                    icon = '📉';
+                    break;
+                case 'settle':
+                    const won = trade.correct;
+                    const pnl = (trade.pnlCents / 100).toFixed(2);
+                    title = won ? 'Won Settlement!' : 'Lost Settlement';
+                    body = trade.contracts + 'x ' + (trade.side || '').toUpperCase() + ' | P&L: ' + (won ? '+' : '') + '$' + pnl;
+                    icon = won ? '✅' : '❌';
+                    break;
+                case 'dip_buy':
+                    title = 'Dip Buy ' + dir;
+                    body = '+' + trade.contracts + 'x @ ' + trade.limitPrice + '\u00A2 (' + (trade.dipImprovement || '') + ' cheaper)';
+                    icon = '🔻';
+                    break;
+                case 'late_lock':
+                    title = 'Late Lock ' + dir;
+                    body = trade.contracts + 'x @ ' + trade.limitPrice + '\u00A2 | ' + (trade.sigmaDistance || '') + ' from strike';
+                    icon = '🔒';
+                    break;
+                case 're_entry':
+                    title = 'Re-Entry ' + dir;
+                    body = trade.contracts + 'x @ ' + trade.limitPrice + '\u00A2 | Edge: ' + (trade.edge || '?');
+                    icon = '🔄';
+                    break;
+            }
+
+            if (title) {
+                const n = new Notification(icon + ' ' + title, {
+                    body: body,
+                    tag: 'trade-' + trade.time,
+                    renotify: true,
+                    requireInteraction: false,
+                });
+                // Auto-close after 10s
+                setTimeout(() => n.close(), 10000);
+            }
+        }
+
+        // Register service worker for notification click handling
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => {});
+        }
+
         // ── Boot ──────────────────────────────────────────────────────
+        updateNotifButton();
         connectWebSocket(); // Connect to always-on server
         renderPredictionHistory();
         fetchAndPredict();

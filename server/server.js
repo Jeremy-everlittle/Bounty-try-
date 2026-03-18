@@ -753,6 +753,11 @@ function broadcast(data) {
     }
 }
 
+// Forward trade events to all WebSocket clients for push notifications
+tradeExecutor.onTradeNotify((trade) => {
+    broadcast({ type: 'trade', trade });
+});
+
 wss.on('connection', (ws) => {
     console.log(`Client connected (total: ${wss.clients.size})`);
 
