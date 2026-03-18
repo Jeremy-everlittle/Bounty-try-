@@ -825,6 +825,14 @@
                         if (msg.kalshiTicker) {
                             kalshiMarketTicker = msg.kalshiTicker;
                         }
+                        // Sync prediction history from server — single source of truth
+                        // The server grades predictions immediately on period transition,
+                        // so this is always up-to-date. Replaces flaky local grading.
+                        if (msg.predictionLog && msg.predictionLog.length > 0) {
+                            predictionLog = msg.predictionLog;
+                            savePredictionLog();
+                            renderPredictionHistory();
+                        }
                     }
                 } catch (e) {
                     console.error('WebSocket message parse error:', e);

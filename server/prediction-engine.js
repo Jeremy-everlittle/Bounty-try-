@@ -2070,8 +2070,9 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
 
 function gradeBayesianPrediction(currentPrice, periodKey) {
     let updated = false;
-    let gradedRecord = null;
+    const gradedRecords = [];
     store.updateBayesianState(bs => {
+        // Grade ALL ungraded entries from completed periods (not just one).
         for (let i = bs.records.length - 1; i >= 0; i--) {
             const rec = bs.records[i];
             if (rec.actualPrice !== null) continue;
@@ -2089,26 +2090,29 @@ function gradeBayesianPrediction(currentPrice, periodKey) {
                 bs.timeBeta[rec.timeBucket] = betaUpdate(bs.timeBeta[rec.timeBucket], success);
             if (rec.calibrationBin !== undefined && bs.calibrationBins[rec.calibrationBin])
                 bs.calibrationBins[rec.calibrationBin] = betaUpdate(bs.calibrationBins[rec.calibrationBin], success);
-            gradedRecord = { ...rec };
+            gradedRecords.push({ ...rec });
             updated = true;
-            break;
+            // No break — grade all pending entries
         }
     });
-    // Feed graded record to self-learning error analysis
-    if (gradedRecord) {
-        try { analyzeAndLearn(gradedRecord); } catch(e) { console.error('Error analysis failed:', e.message); }
+    // Feed each graded record to self-learning error analysis
+    for (const rec of gradedRecords) {
+        try { analyzeAndLearn(rec); } catch(e) { console.error('Error analysis failed:', e.message); }
     }
     return updated;
 }
 
 function gradePreviousPrediction(currentPrice, periodKey) {
     store.updatePredictionLog(log => {
+        // Grade ALL ungraded entries from completed periods (not just the most recent one).
+        // If a cycle was skipped (no Kalshi strike), entries pile up ungraded.
+        // By removing the `break`, we grade every pending entry in one pass.
         for (let i = log.length - 1; i >= 0; i--) {
             if (log[i].actualPrice === null && log[i].periodKey !== periodKey) {
                 log[i].actualPrice = currentPrice;
                 log[i].actualDirection = currentPrice >= log[i].startPrice ? 'up' : 'down';
                 log[i].correct = log[i].predictedDirection === log[i].actualDirection;
-                break;
+                // No break — grade all pending entries
             }
         }
     });
