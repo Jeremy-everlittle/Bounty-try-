@@ -625,7 +625,7 @@
         .trading-mode-paper { background: rgba(210,153,34,0.25); color: #d29922; border: 1px solid rgba(210,153,34,0.4); }
         .trading-mode-live { background: rgba(63,185,80,0.25); color: #3fb950; border: 1px solid rgba(63,185,80,0.4); }
         .trading-mode-off { background: rgba(248,81,73,0.25); color: #f85149; border: 1px solid rgba(248,81,73,0.4); }
-        .trading-stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 8px; }
+        .trading-stats { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 8px; margin-top: 8px; }
         .trading-stat { text-align: center; }
         .trading-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: #8b949e; }
         .trading-stat-value { font-size: 14px; font-weight: 700; margin-top: 2px; }
@@ -734,6 +734,10 @@
                 <button class="env-btn" id="env-btn-prod" onclick="switchEnvironment('production')">PROD</button>
             </div>
             <div class="trading-stats">
+                <div class="trading-stat">
+                    <div class="trading-stat-label">Balance</div>
+                    <div class="trading-stat-value" id="trading-balance">--</div>
+                </div>
                 <div class="trading-stat">
                     <div class="trading-stat-label">Daily P&L</div>
                     <div class="trading-stat-value" id="trading-pnl">$0.00</div>
@@ -1601,6 +1605,17 @@
             } else {
                 badge.textContent = 'NOT CONFIGURED';
                 badge.className = 'trading-mode-badge trading-mode-off';
+            }
+
+            // Balance
+            const balEl = document.getElementById('trading-balance');
+            if (ts.balanceCents !== null && ts.balanceCents !== undefined) {
+                const bal = ts.balanceCents / 100;
+                balEl.textContent = '$' + bal.toFixed(2);
+                balEl.style.color = '#e6edf3';
+            } else {
+                balEl.textContent = '--';
+                balEl.style.color = '#8b949e';
             }
 
             // Stats

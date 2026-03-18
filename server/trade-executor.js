@@ -24,6 +24,8 @@ let currentPosition = null;   // { ticker, side, action, contracts, entryPrice, 
 let killSwitch = false;
 let soldThisPeriod = null;    // Track sold positions for re-entry: { periodKey, side, ticker, soldAt, reason }
 let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
+let cachedBalance = null;     // { balanceCents, lastFetched }
+const BALANCE_CACHE_MS = 30000; // refresh balance every 30s
 
 const dailyStats = {
     date: new Date().toISOString().slice(0, 10),
@@ -777,12 +779,25 @@ function logTrade(type, info) {
     if (tradeLog.length > MAX_TRADE_LOG) tradeLog.length = MAX_TRADE_LOG;
 }
 
+async function refreshBalance() {
+    if (cachedBalance && Date.now() - cachedBalance.lastFetched < BALANCE_CACHE_MS) return;
+    try {
+        const resp = await trading.getBalance();
+        cachedBalance = { balanceCents: resp.balance, lastFetched: Date.now() };
+    } catch (e) {
+        // Silently fail — will retry next cycle
+    }
+}
+
 function getStatus() {
     checkDayRollover();
+    // Trigger async balance refresh (non-blocking)
+    refreshBalance();
     return {
         paperMode: config.paperMode,
         killSwitch,
         configured: trading.isConfigured(),
+        balanceCents: cachedBalance ? cachedBalance.balanceCents : null,
         currentPosition: currentPosition ? {
             ticker: currentPosition.ticker,
             side: currentPosition.side,
