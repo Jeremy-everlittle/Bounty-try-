@@ -878,6 +878,7 @@
             if (predictionLog.length && predictionLog[predictionLog.length - 1].periodKey === periodKey) return;
             predictionLog.push({
                 time: targetTimeStr,
+                timestamp: Date.now(),
                 periodKey,
                 startPrice,
                 predictedPrice,
@@ -1137,9 +1138,20 @@
                 const strikeSign = strikeDiff >= 0 ? '+' : '-';
                 const strikeCls = strikeDiff >= 0 ? 'hi-off-good' : 'hi-off-bad';
 
+                // Convert server UTC time to local time
+                let displayTime = p.time;
+                if (p.timestamp) {
+                    const d = new Date(p.timestamp);
+                    let th = d.getHours();
+                    const tm = d.getMinutes().toString().padStart(2, '0');
+                    const tap = th >= 12 ? 'PM' : 'AM';
+                    th = th % 12 || 12;
+                    displayTime = th + ':' + tm + ' ' + tap;
+                }
+
                 html += `<div class="history-item">
                     <div class="hi-top">
-                        <span class="hi-time">${p.time}</span>
+                        <span class="hi-time">${displayTime}</span>
                         <span class="hi-bet ${betCls}">${betLabel}</span>
                         <span class="hi-result ${cls}">${icon}</span>
                     </div>
