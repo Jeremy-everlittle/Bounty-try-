@@ -634,6 +634,9 @@ async function fetchAllData() {
                     longShortRatio: state.longShortRatio
                 };
                 const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike, periodKey);
+                // Recompute bet quality based on updated prediction
+                const updatedBetQuality = engine.assessBetQuality(updated, state.kalshiStrike, marketData, minutesAhead);
+                updated._betQuality = updatedBetQuality;
                 store.updateCurrentPeriod({ updatedPrediction: updated });
 
                 // Compute sell signal
@@ -684,7 +687,7 @@ async function fetchAllData() {
             totalPredictions: store.getState().totalPredictionsMade,
             errorAnalysis: engine.getErrorSummary(),
             learnedCorrections: engine.getLearnedCorrections(),
-            betQuality: store.getCurrentPeriod()?.originalPrediction?._betQuality || null,
+            betQuality: store.getCurrentPeriod()?.updatedPrediction?._betQuality || store.getCurrentPeriod()?.originalPrediction?._betQuality || null,
             sessionRisk: {
                 consecutiveLosses: engine.sessionRisk.consecutiveLosses,
                 consecutiveWins: engine.sessionRisk.consecutiveWins,

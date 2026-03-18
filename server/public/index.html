@@ -1486,12 +1486,16 @@
             const origPred = pred && pred.originalPrediction;
             if (!bq || !origPred || !kalshiStrike) { el.innerHTML = ''; return; }
 
+            // Use updated prediction if available (reflects current market conditions)
+            const updatedPred = pred && pred.updatedPrediction;
+            const activePred = updatedPred || origPred;
+
             const minutesLeft = currentTarget ? Math.max(0, getSecondsUntilTarget(currentTarget) / 60) : 15;
-            const isUp = origPred.predictedPrice >= kalshiStrike;
+            const isUp = activePred.predictedPrice >= kalshiStrike;
             const direction = isUp ? 'UP' : 'DOWN';
             const dirColor = isUp ? '#3fb950' : '#f85149';
             const dirBg = isUp ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
-            const probForBet = isUp ? origPred.probability : (1 - origPred.probability);
+            const probForBet = isUp ? activePred.probability : (1 - activePred.probability);
 
             // Determine level from bet quality
             let level, shortLabel, advice;
@@ -1550,7 +1554,7 @@
                     '</div>' +
                     '<div class="prebuy-advice">' + advice + '</div>' +
                     '<div class="prebuy-metrics">' +
-                        '<span class="prebuy-metric">Conf: ' + (origPred.confidence * 100).toFixed(0) + '%</span>' +
+                        '<span class="prebuy-metric">Conf: ' + (activePred.confidence * 100).toFixed(0) + '%</span>' +
                         '<span class="prebuy-metric">Time: ' + minutesLeft.toFixed(0) + 'm</span>' +
                     '</div>' +
                     qualityBar +
