@@ -4191,9 +4191,13 @@
                 return;
             }
 
-            // Compute preview (recompute every 30s for freshness)
-            if (!nextPeriodPrediction || (secs % 30 === 0)) {
+            // Use server preview if available (updates every ~3s), else local
+            if (serverData && serverData.nextPeriodPreview) {
+                nextPeriodPrediction = serverData.nextPeriodPreview;
+            } else if (!nextPeriodPrediction || !nextPeriodPrediction._computedAt ||
+                (Date.now() - nextPeriodPrediction._computedAt > 30000)) {
                 nextPeriodPrediction = computeNextPeriodPreview();
+                if (nextPeriodPrediction) nextPeriodPrediction._computedAt = Date.now();
             }
             if (!nextPeriodPrediction) return;
 
@@ -4205,11 +4209,11 @@
                 nextPeriodShown = true;
             }
 
-            // Time window for next period
+            // Time window for next period (just start–end, not nested ranges)
             const nextStart = currentTarget;
             const nextEnd = new Date(nextStart.getTime() + 15 * 60 * 1000);
             document.getElementById('next-period-time').textContent =
-                formatTargetTime(nextStart) + ' \u2013 ' + formatTargetTime(nextEnd);
+                formatLocalTime(nextStart) + ' \u2013 ' + formatLocalTime(nextEnd);
 
             // Direction badge
             const badge = document.getElementById('next-period-badge');
