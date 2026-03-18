@@ -2380,9 +2380,7 @@
                     if (serverPred.updatedPrediction) {
                         updatedPrediction = serverPred.updatedPrediction;
                     }
-                    if (serverPred.kalshiStrike) {
-                        kalshiStrike = serverPred.kalshiStrike;
-                    }
+                    kalshiStrike = serverData.kalshiStrike || serverPred.kalshiStrike || kalshiStrike;
                 }
 
                 // Detect new period for UI state
