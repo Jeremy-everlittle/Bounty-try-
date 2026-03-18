@@ -9,6 +9,7 @@ const { execSync } = require('child_process');
 const store = require('./store');
 const engine = require('./prediction-engine');
 const tradeExecutor = require('./trade-executor');
+const kalshiAuth = require('./kalshi-auth');
 
 // Build version — updated each commit (Railway has no .git dir)
 const BUILD_VERSION = {
@@ -119,8 +120,9 @@ async function fetchBRTIApprox() {
 async function fetchKalshiData() {
     try {
         // Try status=open first
+        const kalshiBase = kalshiAuth.getBaseUrl() + '/trade-api/v2';
         let data = await fetchJSON(
-            'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&status=open&limit=100'
+            kalshiBase + '/markets?series_ticker=KXBTC15M&status=open&limit=100'
         );
         let markets = data ? (data.markets || []) : [];
 
@@ -131,7 +133,7 @@ async function fetchKalshiData() {
         // Fallback to unfiltered if needed
         if (markets.length === 0 || !hasFuture) {
             const allData = await fetchJSON(
-                'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&limit=100'
+                kalshiBase + '/markets?series_ticker=KXBTC15M&limit=100'
             );
             if (allData && allData.markets) {
                 const existingTickers = new Set(markets.map(m => m.ticker));
@@ -158,7 +160,7 @@ async function fetchKalshiData() {
         let detailedMarket = best;
         try {
             const detail = await fetchJSON(
-                'https://api.elections.kalshi.com/trade-api/v2/markets/' + best.ticker
+                kalshiBase + '/markets/' + best.ticker
             );
             if (detail && detail.market) detailedMarket = detail.market;
         } catch (e) {}
@@ -693,10 +695,11 @@ async function fetchAllData() {
             },
             fearGreed: state.fearGreed,
             macroEvent: state.macroEvent,
-            tradingStatus: tradeExecutor.getStatus()
+            tradingStatus: tradeExecutor.getStatus(),
+            kalshiEnvironment: kalshiAuth.getEnvironment()
         });
 
-        console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | ${wss.clients.size} clients`);
+        console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | Env=${kalshiAuth.getEnvironment()} | ${wss.clients.size} clients`);
 
     } catch (e) {
         console.error('Fetch cycle error:', e);
@@ -743,7 +746,8 @@ wss.on('connection', (ws) => {
         totalPredictions: store.getState().totalPredictionsMade,
         errorAnalysis: engine.getErrorSummary(),
         learnedCorrections: engine.getLearnedCorrections(),
-        tradingStatus: tradeExecutor.getStatus()
+        tradingStatus: tradeExecutor.getStatus(),
+        kalshiEnvironment: kalshiAuth.getEnvironment()
     }));
 
     ws.on('message', (raw) => {
@@ -844,6 +848,30 @@ app.post('/api/trading/mode', (req, res) => {
     res.json({ paperMode, message: `Trading mode set to ${paperMode ? 'PAPER' : 'LIVE'}` });
 });
 
+app.get('/api/trading/environment', (req, res) => {
+    res.json({ environment: kalshiAuth.getEnvironment(), configured: kalshiAuth.isConfigured() });
+});
+
+app.post('/api/trading/environment', (req, res) => {
+    const env = req.body?.environment;
+    if (env !== 'demo' && env !== 'production') {
+        return res.status(400).json({ error: "environment must be 'demo' or 'production'" });
+    }
+    try {
+        tradeExecutor.setKillSwitch(true);
+        kalshiAuth.setEnvironment(env);
+        tradeExecutor.resetState();
+        const configured = kalshiAuth.isConfigured();
+        res.json({
+            environment: env,
+            configured,
+            message: `Switched to ${env.toUpperCase()}${configured ? '' : ' (credentials not configured!)'}. Kill switch activated — re-enable trading manually.`
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // GRACEFUL SHUTDOWN — Save state on exit
 // ═══════════════════════════════════════════════════════════════
@@ -887,7 +915,8 @@ server.listen(PORT, () => {
     console.log(`Predictions: http://localhost:${PORT}/api/predictions`);
     console.log(`History: http://localhost:${PORT}/api/history`);
     console.log(`Trading: http://localhost:${PORT}/api/trading/status`);
-    console.log(`Trading mode: ${tradeExecutor.config.paperMode ? 'PAPER (simulated)' : 'LIVE'}${require('./kalshi-auth').isConfigured() ? '' : ' | Kalshi API not configured'}`);
+    console.log(`Trading mode: ${tradeExecutor.config.paperMode ? 'PAPER (simulated)' : 'LIVE'}${kalshiAuth.isConfigured() ? '' : ' | Kalshi API not configured'}`);
+    console.log(`Kalshi environment: ${kalshiAuth.getEnvironment().toUpperCase()} → ${kalshiAuth.getBaseUrl()}`);
 
     // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
     async function fetchLoop() {

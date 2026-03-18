@@ -312,6 +312,18 @@ function setPaperMode(enabled) {
     console.log(`[trade-executor] Mode: ${enabled ? 'PAPER' : 'LIVE'}`);
 }
 
+function resetState() {
+    currentPosition = null;
+    dailyStats.date = new Date().toISOString().slice(0, 10);
+    dailyStats.pnlCents = 0;
+    dailyStats.tradeCount = 0;
+    dailyStats.wins = 0;
+    dailyStats.losses = 0;
+    tradeLog.length = 0;
+    killSwitch = true;
+    console.log('[trade-executor] State reset — kill switch activated');
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Status & logging
 // ═══════════════════════════════════════════════════════════════
@@ -353,6 +365,7 @@ module.exports = {
     onPeriodEnd,
     setKillSwitch,
     setPaperMode,
+    resetState,
     getStatus,
     config, // exposed for startup logging
 };

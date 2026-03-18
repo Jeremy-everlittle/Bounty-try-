@@ -3,14 +3,19 @@
 // ═══════════════════════════════════════════════════════════════
 // Kalshi API Authentication — RSA-PSS Request Signing
 // ═══════════════════════════════════════════════════════════════
-// Each request is independently signed with:
-//   message = timestamp + HTTP_METHOD + path (without query params)
-//   signature = RSA-PSS(SHA-256, saltLen=DIGEST) → base64
+// Supports two environments: 'demo' and 'production'
+// Each has its own credentials and base URL.
 //
-// Required env vars:
-//   KALSHI_API_KEY       — API Key ID from Kalshi dashboard
-//   KALSHI_PRIVATE_KEY   — RSA private key PEM string (newlines as \n)
-//   OR KALSHI_PRIVATE_KEY_PATH — path to .pem file
+// Production env vars:
+//   KALSHI_API_KEY           — Production API Key ID
+//   KALSHI_PRIVATE_KEY       — Production RSA private key PEM (newlines as \n)
+//   OR KALSHI_PRIVATE_KEY_PATH — path to production .pem file
+//   KALSHI_BASE_URL          — Production API URL (default: https://trading-api.kalshi.com)
+//
+// Demo env vars:
+//   KALSHI_DEMO_API_KEY      — Demo API Key ID
+//   KALSHI_DEMO_PRIVATE_KEY  — Demo RSA private key PEM (newlines as \n)
+//   KALSHI_DEMO_BASE_URL     — Demo API URL (default: https://demo-api.kalshi.co)
 // ═══════════════════════════════════════════════════════════════
 
 const crypto = require('crypto');
@@ -19,10 +24,38 @@ const path = require('path');
 
 let _privateKey = null;
 let _apiKeyId = null;
+let _currentEnv = 'demo'; // default to demo for safety
+
+function getEnvironment() {
+    return _currentEnv;
+}
+
+function setEnvironment(env) {
+    if (env !== 'demo' && env !== 'production') {
+        throw new Error(`Invalid environment: ${env}. Must be 'demo' or 'production'.`);
+    }
+    if (env === _currentEnv) return;
+    console.log(`[kalshi-auth] Switching environment: ${_currentEnv} → ${env}`);
+    _currentEnv = env;
+    // Clear cached credentials so they are re-read for the new environment
+    _privateKey = null;
+    _apiKeyId = null;
+}
+
+function getBaseUrl() {
+    if (_currentEnv === 'demo') {
+        return process.env.KALSHI_DEMO_BASE_URL || 'https://demo-api.kalshi.co';
+    }
+    return process.env.KALSHI_BASE_URL || 'https://trading-api.kalshi.com';
+}
 
 function getApiKeyId() {
     if (!_apiKeyId) {
-        _apiKeyId = process.env.KALSHI_API_KEY || '';
+        if (_currentEnv === 'demo') {
+            _apiKeyId = process.env.KALSHI_DEMO_API_KEY || '';
+        } else {
+            _apiKeyId = process.env.KALSHI_API_KEY || '';
+        }
     }
     return _apiKeyId;
 }
@@ -30,13 +63,22 @@ function getApiKeyId() {
 function getPrivateKey() {
     if (_privateKey) return _privateKey;
 
-    // Try inline PEM first (env var with \n escaped)
+    if (_currentEnv === 'demo') {
+        // Demo: inline PEM only
+        if (process.env.KALSHI_DEMO_PRIVATE_KEY) {
+            _privateKey = process.env.KALSHI_DEMO_PRIVATE_KEY.replace(/\\n/g, '\n');
+            return _privateKey;
+        }
+        return null;
+    }
+
+    // Production: try inline PEM first
     if (process.env.KALSHI_PRIVATE_KEY) {
         _privateKey = process.env.KALSHI_PRIVATE_KEY.replace(/\\n/g, '\n');
         return _privateKey;
     }
 
-    // Try file path
+    // Production: try file path
     const keyPath = process.env.KALSHI_PRIVATE_KEY_PATH;
     if (keyPath) {
         const absPath = path.resolve(keyPath);
@@ -94,4 +136,7 @@ module.exports = {
     getAuthHeaders,
     isConfigured,
     getApiKeyId,
+    getEnvironment,
+    setEnvironment,
+    getBaseUrl,
 };

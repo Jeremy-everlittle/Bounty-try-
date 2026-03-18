@@ -641,11 +641,20 @@
         .trading-btn-danger { color: #f85149; border-color: rgba(248,81,73,0.4); }
         .trading-btn-danger:hover { background: rgba(248,81,73,0.15); }
         .trading-not-configured { font-size: 11px; color: #8b949e; text-align: center; padding: 10px; }
+        /* ── Environment Toggle ── */
+        .env-toggle { display: flex; gap: 4px; margin: 8px 0; padding: 4px; background: rgba(0,0,0,0.3); border-radius: 6px; }
+        .env-btn { flex: 1; padding: 5px 8px; border: 1px solid transparent; border-radius: 4px; font-size: 10px; font-weight: 800; letter-spacing: 1.2px; text-align: center; cursor: pointer; background: transparent; color: #8b949e; transition: all 0.2s; }
+        .env-btn:hover { background: rgba(255,255,255,0.05); }
+        .env-btn.active-demo { background: rgba(63,185,80,0.2); color: #3fb950; border-color: rgba(63,185,80,0.4); }
+        .env-btn.active-prod { background: rgba(248,81,73,0.2); color: #f85149; border-color: rgba(248,81,73,0.4); }
+        .env-header-badge { display: inline-block; font-size: 9px; font-weight: 800; letter-spacing: 1.2px; padding: 1px 6px; border-radius: 3px; margin-left: 8px; vertical-align: middle; }
+        .env-header-demo { background: rgba(63,185,80,0.25); color: #3fb950; }
+        .env-header-prod { background: rgba(248,81,73,0.25); color: #f85149; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>BTC Predictor</h1>
+        <h1>BTC Predictor <span class="env-header-badge env-header-demo" id="env-header-badge">DEMO</span></h1>
         <p><span class="live-dot"></span>Kalshi BTC Up or Down &middot; 15 min</p>
     </div>
 
@@ -703,6 +712,10 @@
             <div class="trading-panel-header">
                 <span class="trading-panel-title">Auto Trading</span>
                 <span class="trading-mode-badge" id="trading-mode-badge">--</span>
+            </div>
+            <div class="env-toggle" id="env-toggle">
+                <button class="env-btn active-demo" id="env-btn-demo" onclick="switchEnvironment('demo')">DEMO</button>
+                <button class="env-btn" id="env-btn-prod" onclick="switchEnvironment('production')">PROD</button>
             </div>
             <div class="trading-stats">
                 <div class="trading-stat">
@@ -1540,6 +1553,20 @@
             }
             panel.style.display = '';
 
+            // Environment toggle
+            const currentEnv = serverData.kalshiEnvironment || 'demo';
+            const demoBtn = document.getElementById('env-btn-demo');
+            const prodBtn = document.getElementById('env-btn-prod');
+            const headerBadge = document.getElementById('env-header-badge');
+            if (demoBtn && prodBtn) {
+                demoBtn.className = 'env-btn' + (currentEnv === 'demo' ? ' active-demo' : '');
+                prodBtn.className = 'env-btn' + (currentEnv === 'production' ? ' active-prod' : '');
+            }
+            if (headerBadge) {
+                headerBadge.textContent = currentEnv === 'production' ? 'PROD' : 'DEMO';
+                headerBadge.className = 'env-header-badge ' + (currentEnv === 'production' ? 'env-header-prod' : 'env-header-demo');
+            }
+
             // Mode badge
             const badge = document.getElementById('trading-mode-badge');
             if (ts.killSwitch) {
@@ -1620,6 +1647,20 @@
                     body: JSON.stringify({ paperMode: newPaperMode })
                 });
             } catch (e) { console.error('Toggle mode failed:', e); }
+        }
+
+        async function switchEnvironment(env) {
+            try {
+                if (env === 'production' && !confirm('Switch to PRODUCTION? This uses real money on Kalshi.')) return;
+                const resp = await fetch('/api/trading/environment', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ environment: env })
+                });
+                const result = await resp.json();
+                if (!resp.ok) { alert('Failed: ' + (result.error || 'unknown error')); return; }
+                if (!result.configured) alert('Warning: ' + env.toUpperCase() + ' credentials are not configured. Trading will not work.');
+            } catch (e) { console.error('Environment switch failed:', e); }
         }
 
         async function toggleKillSwitch() {

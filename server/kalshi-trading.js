@@ -8,9 +8,8 @@
 // ═══════════════════════════════════════════════════════════════
 
 const crypto = require('crypto');
-const { getAuthHeaders, isConfigured } = require('./kalshi-auth');
+const { getAuthHeaders, isConfigured, getBaseUrl } = require('./kalshi-auth');
 
-const BASE_URL = process.env.KALSHI_BASE_URL || 'https://api.elections.kalshi.com';
 const API_PREFIX = '/trade-api/v2';
 
 /**
@@ -18,7 +17,7 @@ const API_PREFIX = '/trade-api/v2';
  */
 async function kalshiFetch(method, path, body = null, timeout = 10000) {
     const fullPath = API_PREFIX + path;
-    const url = BASE_URL + fullPath;
+    const url = getBaseUrl() + fullPath;
     const headers = {
         ...getAuthHeaders(method, fullPath),
         'Content-Type': 'application/json',
