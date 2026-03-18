@@ -14,7 +14,7 @@ const STORE_FILE = path.join(DATA_DIR, 'prediction-state.json');
 // Default state
 function createDefaultState() {
     return {
-        // Prediction log (last 50 graded predictions)
+        // Prediction log (all graded predictions)
         predictionLog: [],
 
         // Bayesian learning state
@@ -144,8 +144,6 @@ function save() {
 function _doSave() {
     ensureDataDir();
     try {
-        // Trim data before saving
-        state.predictionLog = state.predictionLog.slice(-50);
         state.bayesianState.records = state.bayesianState.records.slice(-200);
         fs.writeFileSync(STORE_FILE, JSON.stringify(state, null, 2));
     } catch (e) {
@@ -177,7 +175,6 @@ function recordPrediction(entry) {
     if (state.predictionLog.length &&
         state.predictionLog[state.predictionLog.length - 1].periodKey === entry.periodKey) return;
     state.predictionLog.push(entry);
-    state.predictionLog = state.predictionLog.slice(-50);
     save();
 }
 

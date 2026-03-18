@@ -724,6 +724,17 @@ wss.on('connection', (ws) => {
         learnedCorrections: engine.getLearnedCorrections()
     }));
 
+    ws.on('message', (raw) => {
+        try {
+            const msg = JSON.parse(raw);
+            if (msg.type === 'clearHistory') {
+                console.log('Client requested history clear');
+                store.getState().predictionLog = [];
+                store.save();
+            }
+        } catch (e) {}
+    });
+
     ws.on('close', () => {
         console.log(`Client disconnected (total: ${wss.clients.size})`);
     });
