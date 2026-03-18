@@ -1790,18 +1790,24 @@ function predictPrice(marketData, minutesAhead, strike) {
     // BRTI Settlement Price Estimator: when < 2 min remain, estimate where
     // the 60-second simple average will land based on recent price trajectory.
     // BRTI is computed per-second from order books (not trades). Settlement =
-    // mean of 60 BRTI values. Current spot leads the settlement average.
+    // mean of 60 BRTI values. Current spot (Binance) leads BRTI by 1-3 seconds.
     let brtiShift = 0;
     if (minutesAhead <= 2 && n > 5) {
-        // Estimate: settlement ≈ average of last ~6 prices (60 sec at 10s ticks)
         const settlementWindow = Math.min(6, n);
         const recentAvg = prices.slice(-settlementWindow).reduce((a, b) => a + b, 0) / settlementWindow;
-        // If current price is above recent average, settlement will lag below spot
-        // This means the z-score for settlement should use the estimated settlement price
-        const brtiEstimate = recentAvg;
-        brtiShift = Math.log(brtiEstimate / current); // negative if spot above avg
+
+        // BRTI lag correction: Binance leads BRTI constituent exchanges by ~1-3s.
+        // During fast moves, BRTI will be closer to where price was 1-2 ticks ago.
+        // Momentum = recent price change per tick; lag shifts settlement toward lagged price.
+        const momentum1 = n > 2 ? prices[n - 1] - prices[n - 2] : 0;
+        const lagFactor = 0.15; // ~1.5 seconds of lag at 10s ticks
+        const laggedPrice = current - momentum1 * lagFactor;
+        // Blend lagged price into settlement estimate
+        const brtiEstimate = recentAvg * 0.85 + laggedPrice * 0.15;
+
+        brtiShift = Math.log(brtiEstimate / current);
         // Weight: stronger as we get closer to settlement
-        brtiShift *= (2 - minutesAhead) / 2; // 0 at 2min, full at 0min
+        brtiShift *= (2 - minutesAhead) / 2;
     }
     // Include BRTI settlement lag: spot may be above/below where settlement will land
     const zScore = settlementVol > 0 ? (Math.log(current / strike) + brtiShift) / settlementVol : 0;
