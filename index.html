@@ -1784,6 +1784,10 @@
                 brtiResult = { price: serverData.brtiPrice, sources: serverData.brtiSources || 'server' };
                 kStrike = serverData.kalshiStrike;
                 history = serverData.history || [];
+                // Clear any stale client-side CORS error since server is providing data
+                document.getElementById('kalshi-error-banner').style.display = 'none';
+                const debugEl = document.getElementById('debug-strike');
+                if (debugEl && kStrike) debugEl.textContent = 'Strike: $' + kStrike.toFixed(2) + ' via server';
                 // Microstructure data already injected via WebSocket onmessage
             } else {
                 // Fallback to direct client-side fetch (original behavior)
