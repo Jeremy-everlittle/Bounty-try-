@@ -2156,7 +2156,8 @@ function predictPrice(marketData, minutesAhead, strike) {
         _lastMLFeatures = mlFeatures;
         _lastSignalPredictions = [
             mlCtx.positionalProb, mlCtx.driftAdjustedProb, mlCtx.orderFlowProb,
-            mlCtx.bayesianProb, mlResult.lrProb, mlCtx.meanReversionProb, mlCtx.patternProb
+            mlCtx.bayesianProb, mlResult.lrProb, mlCtx.meanReversionProb, mlCtx.patternProb,
+            mlResult.rlsProb
         ];
     } catch (e) {
         // Online ML is non-critical — if it fails, continue with existing prob

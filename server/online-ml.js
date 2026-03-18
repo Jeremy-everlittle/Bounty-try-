@@ -1271,7 +1271,187 @@ class OnlineHMM {
 
 
 // ─────────────────────────────────────────────────────────────
-// 5. INTEGRATION MANAGER
+// 5. RECURSIVE LEAST SQUARES (RLS)
+// ─────────────────────────────────────────────────────────────
+// RLS converges in ~2*d observations (vs hundreds for SGD).
+// Automatically adapts per-feature learning rate via the
+// inverse covariance matrix. Forgetting factor lambda enables
+// non-stationary tracking. Output is passed through sigmoid
+// for probability estimation.
+//
+// Memory: O(d^2) for inverse covariance matrix
+// Compute: O(d^2) per update — trivial for d=8
+// Cold start: ~16-20 observations for d=8 features
+// ─────────────────────────────────────────────────────────────
+
+class OnlineRLS {
+    constructor(opts = {}) {
+        this.numFeatures = opts.numFeatures || 8;
+        this.lambda = opts.lambda || 0.98;       // forgetting factor
+        this.delta = opts.delta || 100;           // initial P scaling
+        this.minLambda = opts.minLambda || 0.95;
+        this.maxLambda = opts.maxLambda || 0.995;
+
+        const d = this.numFeatures;
+        this.weights = new Float64Array(d);
+        this.bias = 0;
+
+        // Inverse covariance matrix P = delta * I (flat d*d array)
+        this.P = new Float64Array(d * d);
+        for (let i = 0; i < d; i++) this.P[i * d + i] = this.delta;
+
+        // Online feature normalization (Welford's)
+        this.featureMean = new Float64Array(d);
+        this.featureM2 = new Float64Array(d);
+        this.featureCount = 0;
+
+        this.trainingSamples = 0;
+        this.rollingAccuracy = 0.5;
+        this.recentCorrect = 0;
+        this.recentTotal = 0;
+    }
+
+    _normalize(features) {
+        const d = this.numFeatures;
+        const normed = new Float64Array(d);
+        for (let i = 0; i < d; i++) {
+            const variance = this.featureCount > 1
+                ? this.featureM2[i] / (this.featureCount - 1) : 1;
+            const std = Math.sqrt(variance) || 1;
+            normed[i] = (features[i] - this.featureMean[i]) / std;
+        }
+        return normed;
+    }
+
+    _updateStats(features) {
+        this.featureCount++;
+        const n = this.featureCount;
+        for (let i = 0; i < this.numFeatures; i++) {
+            const delta = features[i] - this.featureMean[i];
+            this.featureMean[i] += delta / n;
+            const delta2 = features[i] - this.featureMean[i];
+            this.featureM2[i] += delta * delta2;
+        }
+    }
+
+    predict(features) {
+        if (this.trainingSamples < 5) return 0.5;
+        const x = this._normalize(features);
+        let z = this.bias;
+        for (let i = 0; i < this.numFeatures; i++) z += this.weights[i] * x[i];
+        return 1 / (1 + Math.exp(-z)); // sigmoid
+    }
+
+    update(features, label) {
+        this._updateStats(features);
+        const d = this.numFeatures;
+        const x = this._normalize(features);
+        const y = label ? 1 : 0;
+
+        // RLS update with forgetting factor
+        // k = P * x / (lambda + x^T * P * x)
+        const Px = new Float64Array(d);
+        for (let i = 0; i < d; i++) {
+            let sum = 0;
+            for (let j = 0; j < d; j++) sum += this.P[i * d + j] * x[j];
+            Px[i] = sum;
+        }
+        let xTPx = 0;
+        for (let i = 0; i < d; i++) xTPx += x[i] * Px[i];
+        const denom = this.lambda + xTPx;
+        const k = new Float64Array(d);
+        for (let i = 0; i < d; i++) k[i] = Px[i] / denom;
+
+        // Prediction error (in linear space, then apply to sigmoid output)
+        let yHat = this.bias;
+        for (let i = 0; i < d; i++) yHat += this.weights[i] * x[i];
+        const error = y - (1 / (1 + Math.exp(-yHat))); // sigmoid error
+
+        // Update weights
+        for (let i = 0; i < d; i++) this.weights[i] += k[i] * error;
+        this.bias += 0.01 * error; // small bias update
+
+        // Update P: P = (1/lambda) * (P - k * x^T * P)
+        const invLambda = 1 / this.lambda;
+        for (let i = 0; i < d; i++) {
+            for (let j = 0; j < d; j++) {
+                this.P[i * d + j] = invLambda * (this.P[i * d + j] - k[i] * Px[j]);
+            }
+        }
+        // Force symmetry to prevent numerical drift
+        for (let i = 0; i < d; i++) {
+            for (let j = i + 1; j < d; j++) {
+                const avg = (this.P[i * d + j] + this.P[j * d + i]) / 2;
+                this.P[i * d + j] = avg;
+                this.P[j * d + i] = avg;
+            }
+        }
+
+        // Track accuracy
+        this.trainingSamples++;
+        const predicted = 1 / (1 + Math.exp(-yHat));
+        const correct = (predicted >= 0.5) === (y >= 0.5);
+        this.recentTotal++;
+        if (correct) this.recentCorrect++;
+        if (this.recentTotal > 50) {
+            this.rollingAccuracy = this.recentCorrect / this.recentTotal;
+            this.recentCorrect = Math.round(this.recentCorrect * 0.95);
+            this.recentTotal = Math.round(this.recentTotal * 0.95);
+        }
+    }
+
+    getConfidence() {
+        if (this.trainingSamples < 16) return 0; // need 2*d samples minimum
+        return Math.min(1.0, (this.trainingSamples - 16) / 100);
+    }
+
+    serialize() {
+        return {
+            weights: Array.from(this.weights),
+            bias: this.bias,
+            P: Array.from(this.P),
+            featureMean: Array.from(this.featureMean),
+            featureM2: Array.from(this.featureM2),
+            featureCount: this.featureCount,
+            trainingSamples: this.trainingSamples,
+            rollingAccuracy: this.rollingAccuracy,
+            recentCorrect: this.recentCorrect,
+            recentTotal: this.recentTotal,
+            lambda: this.lambda
+        };
+    }
+
+    deserialize(data) {
+        if (!data) return;
+        const d = this.numFeatures;
+        if (data.weights) this.weights = new Float64Array(data.weights);
+        if (data.bias !== undefined) this.bias = data.bias;
+        if (data.P && data.P.length === d * d) this.P = new Float64Array(data.P);
+        if (data.featureMean) this.featureMean = new Float64Array(data.featureMean);
+        if (data.featureM2) this.featureM2 = new Float64Array(data.featureM2);
+        if (data.featureCount) this.featureCount = data.featureCount;
+        if (data.trainingSamples) this.trainingSamples = data.trainingSamples;
+        if (data.rollingAccuracy) this.rollingAccuracy = data.rollingAccuracy;
+        if (data.recentCorrect) this.recentCorrect = data.recentCorrect;
+        if (data.recentTotal) this.recentTotal = data.recentTotal;
+        if (data.lambda) this.lambda = data.lambda;
+    }
+
+    getDiagnostics() {
+        return {
+            trainingSamples: this.trainingSamples,
+            rollingAccuracy: this.rollingAccuracy,
+            confidence: this.getConfidence(),
+            lambda: this.lambda,
+            topWeights: Array.from(this.weights).map((w, i) => ({ i, w: Math.abs(w) }))
+                .sort((a, b) => b.w - a.w).slice(0, 5)
+        };
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────
+// 6. INTEGRATION MANAGER
 // ─────────────────────────────────────────────────────────────
 // Manages all online ML components and their integration with
 // the existing prediction engine.
@@ -1310,14 +1490,15 @@ class OnlineMLManager {
                 'momentum',        // drift/momentum signals
                 'orderFlow',       // microstructure signals
                 'bayesian',        // Bayesian beta-binomial prior
-                'logisticReg',     // online logistic regression
+                'logisticReg',     // online logistic regression (SGD)
                 'meanReversion',   // RSI + micro mean reversion
-                'pattern'          // candle patterns + breakout
+                'pattern',         // candle patterns + breakout
+                'rls'              // recursive least squares (fast convergence)
             ],
-            alpha: 0.08,          // moderate adaptation speed
-            minWeight: 0.03,      // no signal gets less than 3%
+            alpha: 0.08,
+            minWeight: 0.03,
             coldStartSamples: 25,
-            priorWeights: [0.30, 0.15, 0.10, 0.10, 0.05, 0.15, 0.15]  // domain-knowledge priors
+            priorWeights: [0.28, 0.14, 0.09, 0.09, 0.05, 0.14, 0.14, 0.07]
         });
 
         this.calibrator = new OnlineCalibrator({
@@ -1333,6 +1514,13 @@ class OnlineMLManager {
             stateNames: ['trending_up', 'mean_reverting', 'trending_down'],
             onlineLR: 0.008,
             minObservations: 25
+        });
+
+        // RLS learner: faster convergence than SGD, adapts per-feature
+        this.rls = new OnlineRLS({
+            numFeatures: lrFeatures.length,
+            lambda: 0.98,
+            delta: 100
         });
 
         // Load persisted state if available
@@ -1351,7 +1539,9 @@ class OnlineMLManager {
                 if (ml.ensemble) this.ensemble.deserialize(ml.ensemble);
                 if (ml.calibrator) this.calibrator.deserialize(ml.calibrator);
                 if (ml.hmm) this.hmm.deserialize(ml.hmm);
+                if (ml.rls) this.rls.deserialize(ml.rls);
                 console.log(`Online ML loaded: LR=${this.logisticRegression.trainingSamples} samples, ` +
+                    `RLS=${this.rls.trainingSamples} samples, ` +
                     `Ensemble=${this.ensemble.totalUpdates} updates, ` +
                     `Calibrator=${this.calibrator.totalSamples} samples, ` +
                     `HMM=${this.hmm.totalObservations} observations`);
@@ -1371,7 +1561,8 @@ class OnlineMLManager {
                 logisticRegression: this.logisticRegression.serialize(),
                 ensemble: this.ensemble.serialize(),
                 calibrator: this.calibrator.serialize(),
-                hmm: this.hmm.serialize()
+                hmm: this.hmm.serialize(),
+                rls: this.rls.serialize()
             };
             this.store.save();
         } catch (e) {
@@ -1428,10 +1619,12 @@ class OnlineMLManager {
             this.hmm.observe(ctx.logReturn);
         }
 
-        // 2. Get logistic regression prediction
+        // 2. Get logistic regression and RLS predictions
         const features = this.extractFeatures(ctx);
         const lrProb = this.logisticRegression.predict(features);
         const lrConfidence = this.logisticRegression.getConfidence();
+        const rlsProb = this.rls.predict(features);
+        const rlsConfidence = this.rls.getConfidence();
 
         // 3. Get HMM regime
         const regime = this.hmm.getRegime();
@@ -1445,7 +1638,8 @@ class OnlineMLManager {
             ctx.bayesianProb || 0.5,         // Bayesian prior adjusted prob
             lrConfidence > 0 ? lrProb : 0.5, // logistic regression (neutral if no confidence)
             ctx.meanReversionProb || 0.5,    // mean reversion signals
-            ctx.patternProb || 0.5           // pattern recognition signals
+            ctx.patternProb || 0.5,          // pattern recognition signals
+            rlsConfidence > 0 ? rlsProb : 0.5 // RLS (neutral if no confidence)
         ];
 
         // 5. Ensemble combination
@@ -1468,7 +1662,8 @@ class OnlineMLManager {
 
         // 7. Blend with base probability (existing engine gets major weight)
         // Online ML gets more weight as it trains
-        const mlWeight = Math.min(0.30, lrConfidence * 0.15 +
+        const mlWeight = Math.min(0.30,
+            Math.max(lrConfidence, rlsConfidence) * 0.12 +
             (this.ensemble.totalUpdates > 50 ? 0.10 : 0) +
             (this.calibrator.totalSamples > 100 ? 0.05 : 0));
 
@@ -1480,7 +1675,9 @@ class OnlineMLManager {
         return {
             probability: Math.max(0.05, Math.min(0.95, calibrated)),
             lrProb,
+            rlsProb,
             lrConfidence,
+            rlsConfidence,
             hmmRegime: regime,
             ensembleResult,
             mlWeight,
@@ -1500,9 +1697,10 @@ class OnlineMLManager {
         const outcome = record.correct ? 1 : 0;
         const actualUp = record.actualDirection === 'up' ? 1 : 0;
 
-        // 1. Update logistic regression
+        // 1. Update logistic regression and RLS
         if (record._mlFeatures) {
             this.logisticRegression.update(record._mlFeatures, actualUp);
+            this.rls.update(record._mlFeatures, actualUp);
         }
 
         // 2. Update ensemble
@@ -1527,6 +1725,7 @@ class OnlineMLManager {
     getDiagnostics() {
         return {
             logisticRegression: this.logisticRegression.getDiagnostics(),
+            rls: this.rls.getDiagnostics(),
             ensemble: this.ensemble.getDiagnostics(),
             calibrator: this.calibrator.getDiagnostics(),
             hmm: this.hmm.getDiagnostics()
@@ -1541,6 +1740,7 @@ class OnlineMLManager {
 
 module.exports = {
     OnlineLogisticRegression,
+    OnlineRLS,
     ExponentialWeightedEnsemble,
     OnlineCalibrator,
     OnlineHMM,
