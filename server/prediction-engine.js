@@ -1639,14 +1639,16 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         betSizeReason = betSize < 0.4 ? 'Small — thin edge + adverse conditions' : 'Reduced — thin edge (' + (edge * 100).toFixed(1) + '%)';
     }
 
-    // High volatility = more uncertainty = smaller bet
+    // Vol regime-based sizing: more granular than just "high vol = smaller"
     if (prices.length > 5) {
-        const recentVol = computeRealizedVol(prices, Math.min(10, prices.length - 1));
-        const longVol = computeRealizedVol(prices, Math.min(60, prices.length - 1));
-        if (recentVol > longVol * 1.5) {
-            betSize *= 0.70;
-            betSizeReason = betSize < 0.4 ? 'Small — elevated volatility + other factors' : 'Reduced — vol spike detected';
-        }
+        const vr = detectVolRegime(prices);
+        const volSizeMults = { quiet: 1.10, contracting: 1.00, normal: 1.00, expanding: 0.70, volatile: 0.45 };
+        let volMult = volSizeMults[vr.regime] || 1.0;
+        // Extreme vol ratio (>2.5) = crisis, cut to minimum
+        if (vr.ratio > 2.5) volMult = 0.25;
+        else if (vr.ratio > 1.8) volMult = 0.45 - (vr.ratio - 1.8) / (2.5 - 1.8) * 0.20;
+        betSize *= Math.max(0.25, Math.min(1.10, volMult));
+        if (volMult < 0.8) betSizeReason = betSize < 0.4 ? 'Small — ' + vr.regime + ' vol regime' : 'Reduced — ' + vr.regime + ' vol (ratio=' + vr.ratio.toFixed(1) + ')';
     }
 
     // Strong signal = can go full size (or close to it)
@@ -1767,8 +1769,9 @@ function predictPrice(marketData, minutesAhead, strike) {
     // todMult now includes both hour-of-day AND day-of-week (incl. weekend)
     const remainingVol = rawRemainingVol * (0.60 + 0.40 * todMult);
     // Settlement-aware volatility compression
-    // Kalshi settles to 60-second trimmed average of CF Benchmarks RTI
-    // (top/bottom 20% excluded = 36 values averaged)
+    // KXBTC15M settles to simple average of 60 per-second BRTI values
+    // (NOT trimmed — trimming is only for BTCMINMAX product)
+    // BRTI itself is order-book-based (not trade-based): exponentially weighted mid-price curve
     // With autocorrelation, effective_n ≈ 12-15 → settlement vol ≈ spot vol * 0.29
     let settlementVolAdj = 1.0;
     if (minutesAhead <= 1) {
@@ -1785,9 +1788,9 @@ function predictPrice(marketData, minutesAhead, strike) {
     const settlementVol = remainingVol * settlementVolAdj;
 
     // BRTI Settlement Price Estimator: when < 2 min remain, estimate where
-    // the 60-second trimmed average will land based on recent price trajectory.
-    // The BRTI trims top/bottom 20% of constituent prices over 60 seconds,
-    // so it's a smoothed, lagging indicator. Current spot leads settlement.
+    // the 60-second simple average will land based on recent price trajectory.
+    // BRTI is computed per-second from order books (not trades). Settlement =
+    // mean of 60 BRTI values. Current spot leads the settlement average.
     let brtiShift = 0;
     if (minutesAhead <= 2 && n > 5) {
         // Estimate: settlement ≈ average of last ~6 prices (60 sec at 10s ticks)
@@ -1929,12 +1932,20 @@ function predictPrice(marketData, minutesAhead, strike) {
     // Trigger on deviation from baseline, not absolute level
     // Research: > 0.05%/8hr = crowded longs, < -0.03%/8hr = panic shorting
     if (marketData.fundingRate) {
-        const fr = marketData.fundingRate;
+        const frData = marketData.fundingRate;
+        // Support both old format (number) and new format (object with settledRate + premium)
+        const fr = typeof frData === 'number' ? frData : (frData.settledRate || 0);
+        const premium = typeof frData === 'object' ? (frData.premium || 0) : 0;
         const deviation = fr - 0.0001; // deviation from normal baseline
         if (Math.abs(deviation) > 0.0003) {
-            // Graduated contrarian signal based on deviation magnitude
             const magnitude = Math.min(0.25, Math.abs(deviation) * 200);
             fundingSignal = -Math.sign(deviation) * magnitude;
+        }
+        // Real-time premium (mark vs index) is a faster signal than settled funding
+        // High premium = leveraged longs paying up → contrarian short bias
+        if (Math.abs(premium) > 0.0005) {
+            const premiumSignal = -Math.sign(premium) * Math.min(0.15, Math.abs(premium) * 100);
+            fundingSignal = fundingSignal * 0.4 + premiumSignal * 0.6; // Weight premium more
         }
     }
 

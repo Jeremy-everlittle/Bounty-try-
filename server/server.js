@@ -233,10 +233,25 @@ async function fetchRecentTrades() {
     return await fetchJSON('https://api.binance.com/api/v3/aggTrades?symbol=BTCUSDT&limit=200');
 }
 
-// ── Binance Funding Rate ──
+// ── Binance Funding Rate (settled rate + real-time premium index) ──
 async function fetchFundingRate() {
-    const data = await fetchJSON('https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1');
-    if (data && data.length > 0) return parseFloat(data[0].fundingRate);
+    // Premium index gives real-time mark/index spread (updates every second)
+    // More useful than the 8-hourly settled rate for short-term prediction
+    const data = await fetchJSON('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT');
+    if (data && data.lastFundingRate) {
+        return {
+            settledRate: parseFloat(data.lastFundingRate),
+            markPrice: parseFloat(data.markPrice),
+            indexPrice: parseFloat(data.indexPrice),
+            // Premium = (mark - index) / index: real-time leverage pressure
+            premium: parseFloat(data.markPrice) && parseFloat(data.indexPrice)
+                ? (parseFloat(data.markPrice) - parseFloat(data.indexPrice)) / parseFloat(data.indexPrice)
+                : 0
+        };
+    }
+    // Fallback to simple funding rate endpoint
+    const fallback = await fetchJSON('https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1');
+    if (fallback && fallback.length > 0) return { settledRate: parseFloat(fallback[0].fundingRate), premium: 0 };
     return null;
 }
 
