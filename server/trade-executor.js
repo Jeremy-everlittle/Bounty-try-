@@ -20,8 +20,10 @@ const config = {
 };
 
 // ── State ──
-let currentPosition = null;   // { ticker, side, action, contracts, entryPrice, orderId, periodKey }
+let currentPosition = null;   // { ticker, side, action, contracts, entryPrice, orderId, periodKey, totalCostCents, totalContracts }
 let killSwitch = false;
+let soldThisPeriod = null;    // Track sold positions for re-entry: { periodKey, side, ticker, soldAt, reason }
+let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
 
 const dailyStats = {
     date: new Date().toISOString().slice(0, 10),
@@ -214,8 +216,28 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 // Exit: called every 10s when sell signal updates
 // ═══════════════════════════════════════════════════════════════
 
-async function onSellSignal(sellSignal, minutesRemaining) {
+async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, strike, currentPrice) {
     if (!currentPosition || !sellSignal) return;
+
+    // ── GUARANTEED WIN PROTECTION ──
+    // If we're solidly winning with little time left, DON'T sell — ride it to settlement
+    // for the full payout. Selling early means we get less than 100¢ per contract.
+    if (strike && currentPrice) {
+        const betIsUp = currentPosition.side === 'yes';
+        const onRightSide = (betIsUp && currentPrice >= strike) || (!betIsUp && currentPrice < strike);
+        const remainingVol = (updatedPrediction && updatedPrediction._remainingVol) || 0.002;
+        const distancePct = Math.abs(currentPrice - strike) / strike;
+        const sigmaDistance = distancePct / remainingVol;
+
+        // If we're winning AND price is 1.5+ sigma on our side, hold for settlement
+        if (onRightSide && sigmaDistance >= 1.5 && minutesRemaining < 3) {
+            // Don't sell a guaranteed winner — let it settle for full 100¢ payout
+            if (sellSignal.level === 'take_profit') {
+                console.log(`[trade-executor] Holding guaranteed winner: ${sigmaDistance.toFixed(1)}σ on right side with ${minutesRemaining.toFixed(1)}m left`);
+                return;
+            }
+        }
+    }
 
     const shouldSell = (
         sellSignal.level === 'lost_cause' ||
@@ -240,6 +262,14 @@ async function onSellSignal(sellSignal, minutesRemaining) {
         console.log(`[trade-executor] PAPER SELL: ${currentPosition.contracts}x ${currentPosition.side.toUpperCase()} on ${currentPosition.ticker} — reason: ${sellSignal.level}`);
         logTrade('sell', tradeInfo);
         dailyStats.tradeCount++;
+        // Record for potential re-entry
+        soldThisPeriod = {
+            periodKey: currentPosition.periodKey,
+            side: currentPosition.side,
+            ticker: currentPosition.ticker,
+            soldAt: Date.now(),
+            reason: sellSignal.level,
+        };
         currentPosition = null;
         return;
     }
@@ -260,6 +290,14 @@ async function onSellSignal(sellSignal, minutesRemaining) {
         console.log(`[trade-executor] LIVE SELL: order ${order.order_id} status=${order.status}`);
         logTrade('sell', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status });
         dailyStats.tradeCount++;
+        // Record for potential re-entry
+        soldThisPeriod = {
+            periodKey: currentPosition.periodKey,
+            side: currentPosition.side,
+            ticker: currentPosition.ticker,
+            soldAt: Date.now(),
+            reason: sellSignal.level,
+        };
         currentPosition = null;
 
     } catch (err) {
@@ -310,6 +348,380 @@ function onPeriodEnd(gradeResult) {
     console.log(`[trade-executor] Period settled: ${wasCorrect ? 'WIN' : 'LOSS'} | P&L: ${pnl > 0 ? '+' : ''}${(pnl / 100).toFixed(2)} | Daily: ${dailyStats.pnlCents > 0 ? '+' : ''}$${(dailyStats.pnlCents / 100).toFixed(2)}`);
 
     currentPosition = null;
+    soldThisPeriod = null; // reset for new period
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Strategy: DIP/SPIKE BUYER — add to position at better odds
+// Called every tick when we have an open position and price moves
+// against us but recovery still looks likely.
+// ═══════════════════════════════════════════════════════════════
+
+async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPrice, minutesRemaining, kalshiTicker, periodKey) {
+    if (!currentPosition || currentPosition.periodKey !== periodKey) return;
+    if (killSwitch) return;
+    if (minutesRemaining < 1.5) return; // too close to settlement for dip buying
+    if (Date.now() - lastDipCheckTime < 8000) return; // throttle
+    lastDipCheckTime = Date.now();
+
+    const betIsUp = currentPosition.side === 'yes';
+    const onWrongSide = (betIsUp && currentPrice < strike) || (!betIsUp && currentPrice >= strike);
+    if (!onWrongSide) return; // not a dip — price is in our favor
+
+    // Only add if the sell signal says HOLD (normal dip / recoverable)
+    // Never add if the model says sell or lost cause
+    if (sellSignal && (sellSignal.level === 'lost_cause' || sellSignal.level === 'sell_now' || sellSignal.level === 'consider_selling')) return;
+
+    // Check updated prediction still agrees with our direction
+    const bq = updatedPrediction && updatedPrediction._betQuality;
+    if (!bq || !bq.shouldBet) return;
+    const updIsUp = updatedPrediction.predictedPrice >= strike;
+    if (updIsUp !== betIsUp) return; // model flipped — don't add
+
+    // Check the probability is still decent (model thinks we'll recover)
+    const probForBet = betIsUp ? updatedPrediction.probability : (1 - updatedPrediction.probability);
+    if (probForBet < 0.55) return; // not confident enough in recovery
+
+    // Calculate the dip opportunity — how much cheaper can we buy?
+    const currentLimitPrice = Math.max(5, Math.min(95, Math.round(probForBet * 100)));
+    const entryImprovement = currentPosition.entryPrice - currentLimitPrice;
+    if (entryImprovement < 5) return; // need at least 5¢ improvement to justify adding
+
+    // How many more contracts can we add?
+    const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
+    const maxAdd = config.maxPositionContracts - currentContracts;
+    if (maxAdd <= 0) return; // already at max
+
+    // Scale add size: bigger dip = add more, but cap at half the original position
+    const dipScale = Math.min(1.0, entryImprovement / 20); // 20¢ dip = full scale
+    const addContracts = Math.max(1, Math.min(maxAdd, Math.round(dipScale * bq.betSize * config.baseContracts)));
+
+    const check = canTrade();
+    if (!check.ok) return;
+
+    const tradeInfo = {
+        ticker: kalshiTicker,
+        side: currentPosition.side,
+        action: 'buy',
+        contracts: addContracts,
+        limitPrice: currentLimitPrice,
+        periodKey,
+        direction: betIsUp ? 'UP' : 'DOWN',
+        strategy: 'dip_buyer',
+        dipImprovement: entryImprovement + '¢',
+        probForBet: (probForBet * 100).toFixed(0) + '%',
+        existingContracts: currentContracts,
+    };
+
+    if (config.paperMode) {
+        console.log(`[trade-executor] PAPER DIP-BUY: +${addContracts}x ${currentPosition.side.toUpperCase()} @ ${currentLimitPrice}c (${entryImprovement}c cheaper) | Prob=${(probForBet*100).toFixed(0)}%`);
+        // Update position with averaged entry
+        const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+        const addCost = addContracts * currentLimitPrice;
+        const newTotal = currentContracts + addContracts;
+        currentPosition.totalCostCents = oldCost + addCost;
+        currentPosition.totalContracts = newTotal;
+        currentPosition.contracts = newTotal;
+        currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal); // weighted avg
+        logTrade('dip_buy', tradeInfo);
+        dailyStats.tradeCount++;
+        return;
+    }
+
+    // LIVE ORDER
+    try {
+        const result = await trading.placeOrder({
+            ticker: kalshiTicker,
+            side: currentPosition.side,
+            action: 'buy',
+            count: addContracts,
+            yesPrice: currentPosition.side === 'yes' ? currentLimitPrice : undefined,
+            noPrice: currentPosition.side === 'no' ? currentLimitPrice : undefined,
+        });
+        const order = result.order || {};
+        if (order.status === 'canceled' || order.status === 'rejected') {
+            logTrade('dip_buy_failed', { ...tradeInfo, reason: order.status });
+            return;
+        }
+        const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+        const addCost = addContracts * currentLimitPrice;
+        const newTotal = currentContracts + addContracts;
+        currentPosition.totalCostCents = oldCost + addCost;
+        currentPosition.totalContracts = newTotal;
+        currentPosition.contracts = newTotal;
+        currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal);
+        logTrade('dip_buy', { ...tradeInfo, orderId: order.order_id });
+        dailyStats.tradeCount++;
+        console.log(`[trade-executor] LIVE DIP-BUY: +${addContracts}x @ ${currentLimitPrice}c — order ${order.order_id}`);
+    } catch (err) {
+        logTrade('dip_buy_error', { ...tradeInfo, error: err.message });
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Strategy: LATE LOCK — enter big when outcome is nearly certain
+// In the final minutes, if price is far from strike (many sigma),
+// buy max contracts at the high price for a small guaranteed return.
+// ═══════════════════════════════════════════════════════════════
+
+async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemaining, kalshiTicker, periodKey) {
+    // Only in final 2 minutes
+    if (minutesRemaining > 2.0) return;
+    if (killSwitch) return;
+
+    // Must have strong prediction data
+    const bq = updatedPrediction && updatedPrediction._betQuality;
+    if (!bq) return;
+
+    const remainingVol = updatedPrediction._remainingVol || 0.002;
+    const distanceFromStrike = Math.abs(currentPrice - strike);
+    const distancePct = distanceFromStrike / strike;
+    const sigmaDistance = distancePct / remainingVol;
+
+    // Need at least 2.5 sigma away — this is very safe
+    // At 2.5σ, there's ~99.4% chance price stays on this side
+    if (sigmaDistance < 2.5) return;
+
+    const priceAboveStrike = currentPrice >= strike;
+    const lockSide = priceAboveStrike ? 'yes' : 'no';
+
+    // Calculate the entry price (high, since it's nearly guaranteed)
+    // At 2.5σ, prob ≈ 0.994, so price ≈ 99¢ for winning side
+    // We cap at 95¢ to ensure at least 5¢ profit per contract
+    const winProb = Math.min(0.99, 0.5 + 0.5 * erf(sigmaDistance / Math.SQRT2));
+    const limitPrice = Math.min(95, Math.max(85, Math.round(winProb * 100)));
+    const profitPerContract = 100 - limitPrice;
+
+    // Skip if profit margin is too thin (< 3¢ per contract after fees)
+    if (profitPerContract < 5) return;
+
+    // If we already have a position on this side, add to it up to max
+    if (currentPosition && currentPosition.periodKey === periodKey) {
+        if (currentPosition.side === lockSide) {
+            // Already on the right side — add up to max
+            const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
+            const addContracts = config.maxPositionContracts - currentContracts;
+            if (addContracts <= 0) return; // already maxed out
+            return await executeLockEntry(lockSide, addContracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock_add');
+        } else {
+            // On the wrong side?! This shouldn't happen if sell signals work, but don't fight it
+            return;
+        }
+    }
+
+    // No position — enter fresh with max contracts
+    if (currentPosition) return; // different period position (shouldn't happen)
+
+    const check = canTrade();
+    if (!check.ok) return;
+
+    const contracts = config.maxPositionContracts;
+    await executeLockEntry(lockSide, contracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock');
+}
+
+async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, sigmaDistance, profitPerContract, strategy) {
+    const direction = side === 'yes' ? 'UP' : 'DOWN';
+    const tradeInfo = {
+        ticker,
+        side,
+        action: 'buy',
+        contracts,
+        limitPrice,
+        periodKey,
+        direction,
+        strategy,
+        sigmaDistance: sigmaDistance.toFixed(1) + 'σ',
+        profitPerContract: profitPerContract + '¢',
+        expectedProfit: '$' + ((contracts * profitPerContract) / 100).toFixed(2),
+    };
+
+    if (config.paperMode) {
+        console.log(`[trade-executor] PAPER ${strategy.toUpperCase()}: ${contracts}x ${side.toUpperCase()} @ ${limitPrice}c | ${sigmaDistance.toFixed(1)}σ away | Expected +$${((contracts * profitPerContract) / 100).toFixed(2)}`);
+        if (currentPosition && currentPosition.periodKey === periodKey) {
+            // Adding to existing position
+            const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+            const addCost = contracts * limitPrice;
+            const newTotal = (currentPosition.totalContracts || currentPosition.contracts) + contracts;
+            currentPosition.totalCostCents = oldCost + addCost;
+            currentPosition.totalContracts = newTotal;
+            currentPosition.contracts = newTotal;
+            currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal);
+        } else {
+            currentPosition = {
+                ticker, side, contracts,
+                entryPrice: limitPrice,
+                orderId: 'paper-lock-' + Date.now(),
+                periodKey,
+                entryTime: Date.now(),
+                totalCostCents: contracts * limitPrice,
+                totalContracts: contracts,
+            };
+        }
+        logTrade(strategy, tradeInfo);
+        dailyStats.tradeCount++;
+        return;
+    }
+
+    // LIVE
+    try {
+        const result = await trading.placeOrder({
+            ticker,
+            side,
+            action: 'buy',
+            count: contracts,
+            yesPrice: side === 'yes' ? limitPrice : undefined,
+            noPrice: side === 'no' ? limitPrice : undefined,
+        });
+        const order = result.order || {};
+        if (order.status === 'canceled' || order.status === 'rejected') {
+            logTrade(strategy + '_failed', { ...tradeInfo, reason: order.status });
+            return;
+        }
+        if (currentPosition && currentPosition.periodKey === periodKey) {
+            const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+            const addCost = contracts * limitPrice;
+            const newTotal = (currentPosition.totalContracts || currentPosition.contracts) + contracts;
+            currentPosition.totalCostCents = oldCost + addCost;
+            currentPosition.totalContracts = newTotal;
+            currentPosition.contracts = newTotal;
+            currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal);
+        } else {
+            currentPosition = {
+                ticker, side, contracts: order.count || contracts,
+                entryPrice: limitPrice,
+                orderId: order.order_id,
+                periodKey,
+                entryTime: Date.now(),
+                totalCostCents: contracts * limitPrice,
+                totalContracts: contracts,
+            };
+        }
+        logTrade(strategy, { ...tradeInfo, orderId: order.order_id });
+        dailyStats.tradeCount++;
+        console.log(`[trade-executor] LIVE ${strategy.toUpperCase()}: ${contracts}x ${side.toUpperCase()} @ ${limitPrice}c — order ${order.order_id}`);
+    } catch (err) {
+        logTrade(strategy + '_error', { ...tradeInfo, error: err.message });
+    }
+}
+
+// Approximation of the error function for probability calculations
+function erf(x) {
+    const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+    const sign = x < 0 ? -1 : 1;
+    x = Math.abs(x);
+    const t = 1.0 / (1.0 + p * x);
+    const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+    return sign * y;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Strategy: RE-ENTRY — get back in after an early sell
+// If we sold out (stop-loss/sell signal) but the prediction
+// swings back in our favor, re-enter the position.
+// ═══════════════════════════════════════════════════════════════
+
+async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRemaining, kalshiTicker, periodKey) {
+    // Must have sold this period and have no current position
+    if (currentPosition) return;
+    if (!soldThisPeriod || soldThisPeriod.periodKey !== periodKey) return;
+    if (killSwitch) return;
+    if (minutesRemaining < 2.0) return; // too late for re-entry (late lock handles this)
+
+    const bq = updatedPrediction && updatedPrediction._betQuality;
+    if (!bq || !bq.shouldBet) return;
+
+    // The updated prediction must agree with our original direction
+    const origSide = soldThisPeriod.side;
+    const origIsUp = origSide === 'yes';
+    const updIsUp = updatedPrediction.predictedPrice >= strike;
+    if (updIsUp !== origIsUp) return; // model hasn't recovered to our side
+
+    // Require strong confidence for re-entry (higher bar than initial entry)
+    const probForBet = origIsUp ? updatedPrediction.probability : (1 - updatedPrediction.probability);
+    if (probForBet < 0.62) return; // need 62%+ confidence (vs 50%+ for initial)
+    if (bq.quality < 0.65) return; // need higher quality than initial entry
+    if (bq.edge < 0.06) return;    // need 6%+ edge
+
+    // Price must be back on our side
+    const priceOnOurSide = (origIsUp && currentPrice >= strike) || (!origIsUp && currentPrice < strike);
+    if (!priceOnOurSide) return;
+
+    const check = canTrade();
+    if (!check.ok) return;
+
+    // Re-enter with reduced size (more cautious after getting stopped out)
+    const contracts = Math.max(1, Math.min(
+        config.maxPositionContracts,
+        Math.round(bq.betSize * config.baseContracts * 0.6) // 60% of normal size
+    ));
+    const limitPrice = Math.max(5, Math.min(95, Math.round(probForBet * 100)));
+
+    const tradeInfo = {
+        ticker: kalshiTicker,
+        side: origSide,
+        action: 'buy',
+        contracts,
+        limitPrice,
+        periodKey,
+        direction: origIsUp ? 'UP' : 'DOWN',
+        strategy: 're_entry',
+        originalSellReason: soldThisPeriod.reason,
+        probForBet: (probForBet * 100).toFixed(0) + '%',
+        edge: (bq.edge * 100).toFixed(1) + '%',
+    };
+
+    if (config.paperMode) {
+        console.log(`[trade-executor] PAPER RE-ENTRY: ${contracts}x ${origSide.toUpperCase()} @ ${limitPrice}c | Prob=${(probForBet*100).toFixed(0)}% | After sell: ${soldThisPeriod.reason}`);
+        currentPosition = {
+            ticker: kalshiTicker,
+            side: origSide,
+            contracts,
+            entryPrice: limitPrice,
+            orderId: 'paper-reentry-' + Date.now(),
+            periodKey,
+            entryTime: Date.now(),
+            totalCostCents: contracts * limitPrice,
+            totalContracts: contracts,
+        };
+        logTrade('re_entry', tradeInfo);
+        dailyStats.tradeCount++;
+        soldThisPeriod = null; // consumed
+        return;
+    }
+
+    // LIVE
+    try {
+        const result = await trading.placeOrder({
+            ticker: kalshiTicker,
+            side: origSide,
+            action: 'buy',
+            count: contracts,
+            yesPrice: origSide === 'yes' ? limitPrice : undefined,
+            noPrice: origSide === 'no' ? limitPrice : undefined,
+        });
+        const order = result.order || {};
+        if (order.status === 'canceled' || order.status === 'rejected') {
+            logTrade('re_entry_failed', { ...tradeInfo, reason: order.status });
+            return;
+        }
+        currentPosition = {
+            ticker: kalshiTicker,
+            side: origSide,
+            contracts: order.count || contracts,
+            entryPrice: limitPrice,
+            orderId: order.order_id,
+            periodKey,
+            entryTime: Date.now(),
+            totalCostCents: contracts * limitPrice,
+            totalContracts: contracts,
+        };
+        logTrade('re_entry', { ...tradeInfo, orderId: order.order_id });
+        dailyStats.tradeCount++;
+        soldThisPeriod = null;
+        console.log(`[trade-executor] LIVE RE-ENTRY: ${contracts}x ${origSide.toUpperCase()} @ ${limitPrice}c — order ${order.order_id}`);
+    } catch (err) {
+        logTrade('re_entry_error', { ...tradeInfo, error: err.message });
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -378,7 +790,10 @@ function getStatus() {
             entryPrice: currentPosition.entryPrice,
             periodKey: currentPosition.periodKey,
             holdingSeconds: Math.round((Date.now() - currentPosition.entryTime) / 1000),
+            totalCostCents: currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice),
+            totalContracts: currentPosition.totalContracts || currentPosition.contracts,
         } : null,
+        soldThisPeriod: soldThisPeriod ? { side: soldThisPeriod.side, reason: soldThisPeriod.reason } : null,
         daily: { ...dailyStats },
         config: {
             baseContracts: config.baseContracts,
@@ -394,6 +809,9 @@ module.exports = {
     onNewPrediction,
     onSellSignal,
     onPeriodEnd,
+    onDipOpportunity,
+    onLateLock,
+    onReentryCheck,
     setKillSwitch,
     setPaperMode,
     resetState,

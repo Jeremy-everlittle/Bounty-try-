@@ -663,10 +663,23 @@ async function fetchAllData() {
                 );
                 store.setSellSignal(sellSignal);
 
-                // ── Auto-trade: evaluate exit ──
+                // ── Auto-trade: evaluate exit (with guaranteed-win protection) ──
                 if (sellSignal) {
-                    tradeExecutor.onSellSignal(sellSignal, minutesAhead).catch(e => console.error('[trade-executor] Sell error:', e.message));
+                    tradeExecutor.onSellSignal(sellSignal, minutesAhead, updated, state.kalshiStrike, state.brtiPrice).catch(e => console.error('[trade-executor] Sell error:', e.message));
                 }
+
+                // ── Auto-trade: mid-period strategies ──
+                // Dip buyer: add to position when price moves against us at better odds
+                tradeExecutor.onDipOpportunity(updated, sellSignal, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
+                    .catch(e => console.error('[trade-executor] Dip buyer error:', e.message));
+
+                // Late lock: max entry when outcome is nearly guaranteed
+                tradeExecutor.onLateLock(updated, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
+                    .catch(e => console.error('[trade-executor] Late lock error:', e.message));
+
+                // Re-entry: get back in after an early sell if conditions recover
+                tradeExecutor.onReentryCheck(updated, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
+                    .catch(e => console.error('[trade-executor] Re-entry error:', e.message));
 
                 // Next period preview in last 3 minutes
                 if (minutesAhead <= 3) {
