@@ -1138,15 +1138,23 @@
                 const strikeSign = strikeDiff >= 0 ? '+' : '-';
                 const strikeCls = strikeDiff >= 0 ? 'hi-off-good' : 'hi-off-bad';
 
-                // Convert server UTC time to local time
+                // Convert to local time and show as 15-min cycle range
                 let displayTime = p.time;
                 if (p.timestamp) {
                     const d = new Date(p.timestamp);
-                    let th = d.getHours();
-                    const tm = d.getMinutes().toString().padStart(2, '0');
-                    const tap = th >= 12 ? 'PM' : 'AM';
-                    th = th % 12 || 12;
-                    displayTime = th + ':' + tm + ' ' + tap;
+                    const mins = d.getMinutes();
+                    const cycleStart = mins - (mins % 15);
+                    const startD = new Date(d);
+                    startD.setMinutes(cycleStart, 0, 0);
+                    const endD = new Date(startD.getTime() + 15 * 60 * 1000);
+                    const fmt = (dt) => {
+                        let h = dt.getHours();
+                        const m = dt.getMinutes().toString().padStart(2, '0');
+                        const ap = h >= 12 ? 'PM' : 'AM';
+                        h = h % 12 || 12;
+                        return h + ':' + m + ' ' + ap;
+                    };
+                    displayTime = fmt(startD) + ' – ' + fmt(endD);
                 }
 
                 html += `<div class="history-item">
