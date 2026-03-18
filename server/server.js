@@ -531,11 +531,28 @@ async function fetchAllData() {
                     engine.gradePreviousPrediction(state.brtiPrice, periodKey);
 
                     // ── Auto-trade: settle position P&L ──
-                    // Get the grade result from the most recent graded entry in prediction log
+                    // Find the most recently graded entry from the PREVIOUS period
                     const log = store.getPredictionLog();
-                    const lastGraded = log.length > 0 ? log[log.length - 1] : null;
-                    if (lastGraded && lastGraded.correct !== undefined && lastGraded.correct !== null) {
+                    let lastGraded = null;
+                    for (let i = log.length - 1; i >= 0; i--) {
+                        if (log[i].correct !== undefined && log[i].correct !== null && log[i].periodKey !== periodKey) {
+                            lastGraded = log[i];
+                            break;
+                        }
+                    }
+                    console.log(`[server] Period transition ${currentPeriod.periodKey} → ${periodKey} | ` +
+                        `predLog size: ${log.length} | lastGraded: ${lastGraded ? lastGraded.periodKey + ' correct=' + lastGraded.correct : 'NONE'}`);
+                    if (lastGraded) {
                         tradeExecutor.onPeriodEnd({ correct: lastGraded.correct, periodKey: lastGraded.periodKey });
+                    } else {
+                        console.warn(`[server] No graded prediction found for period ${currentPeriod.periodKey} — forcing onPeriodEnd with price-based grading`);
+                        // Fallback: grade based on current price vs strike
+                        if (currentPeriod.periodStartPrice && state.brtiPrice) {
+                            const correct = currentPeriod.originalPrediction ?
+                                (currentPeriod.originalPrediction.predictedPrice >= currentPeriod.periodStartPrice) === (state.brtiPrice >= currentPeriod.periodStartPrice)
+                                : false;
+                            tradeExecutor.onPeriodEnd({ correct, periodKey: currentPeriod.periodKey });
+                        }
                     }
                 }
 

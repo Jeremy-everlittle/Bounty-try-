@@ -82,9 +82,28 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     // Don't enter if we already have a position for this period
     if (currentPosition && currentPosition.periodKey === periodKey) return;
 
-    // Close stale position from a previous period (shouldn't happen — they auto-settle)
+    // Close stale position from a previous period — settle it instead of silently discarding
     if (currentPosition && currentPosition.periodKey !== periodKey) {
-        console.log(`[trade-executor] Clearing stale position from ${currentPosition.periodKey}`);
+        console.log(`[trade-executor] Stale position from ${currentPosition.periodKey} — auto-settling before new entry`);
+        // We don't know the actual result, but the position should have been settled by onPeriodEnd.
+        // If it wasn't (race condition), settle as unknown/loss to be conservative.
+        const staleContracts = currentPosition.contracts;
+        const staleEntry = currentPosition.entryPrice;
+        if (staleContracts > 0 && staleEntry > 0) {
+            const pnl = -staleContracts * staleEntry; // assume loss (worst case)
+            dailyStats.losses++;
+            dailyStats.pnlCents += pnl;
+            logTrade('settle', {
+                ticker: currentPosition.ticker,
+                side: currentPosition.side,
+                contracts: staleContracts,
+                entryPrice: staleEntry,
+                correct: false,
+                pnlCents: pnl,
+                dailyPnlCents: dailyStats.pnlCents,
+                note: 'auto-settled stale position (missed onPeriodEnd)',
+            });
+        }
         currentPosition = null;
     }
 
@@ -256,7 +275,11 @@ async function onSellSignal(sellSignal, minutesRemaining) {
 // ═══════════════════════════════════════════════════════════════
 
 function onPeriodEnd(gradeResult) {
-    if (!currentPosition) return;
+    if (!currentPosition) {
+        console.log('[trade-executor] onPeriodEnd called but no currentPosition to settle');
+        return;
+    }
+    console.log(`[trade-executor] onPeriodEnd: settling position ${currentPosition.periodKey}, gradeResult:`, JSON.stringify(gradeResult));
 
     // Position auto-settles on Kalshi. Track the P&L.
     const wasCorrect = gradeResult && gradeResult.correct;
