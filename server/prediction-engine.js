@@ -1673,6 +1673,24 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         }
     }
 
+    // Macro event sizing: reduce during FOMC/CPI/NFP announcements
+    if (marketData.macroEvent && marketData.macroEvent.sizingMultiplier < 1.0) {
+        const macroMult = marketData.macroEvent.sizingMultiplier;
+        betSize *= macroMult;
+        if (marketData.macroEvent.isNearAnnouncement) {
+            betSizeReason = 'Reduced — macro announcement window (FOMC/CPI/NFP)';
+        } else if (marketData.macroEvent.isMacroDay) {
+            betSizeReason = betSize < 0.5 ? 'Small — macro event day' : 'Reduced — macro event day';
+        }
+    }
+
+    // Fear & Greed extreme regime: reduce in euphoria (>80) or extreme fear (<15)
+    if (marketData.fearGreed && marketData.fearGreed.value) {
+        const fg = marketData.fearGreed.value;
+        if (fg > 85) { betSize *= 0.75; betSizeReason = 'Reduced — extreme greed regime'; }
+        else if (fg < 15) { betSize *= 0.75; betSizeReason = 'Reduced — extreme fear regime'; }
+    }
+
     betSize = Math.max(0, Math.min(1.0, betSize));
 
     // ── Fee-adjusted Kelly fraction ──

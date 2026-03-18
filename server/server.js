@@ -279,6 +279,57 @@ async function fetchLiquidations() {
     };
 }
 
+// ── Fear & Greed Index (Alternative.me — free, no key) ──
+// Updates daily; used as regime filter, not directional signal.
+let cachedFearGreed = { value: 50, classification: 'Neutral', lastFetch: 0 };
+async function fetchFearGreed() {
+    // Only fetch once per hour (it updates daily)
+    if (Date.now() - cachedFearGreed.lastFetch < 3600000) return cachedFearGreed;
+    try {
+        const data = await fetchJSON('https://api.alternative.me/fng/?limit=1', 5000);
+        if (data && data.data && data.data[0]) {
+            cachedFearGreed = {
+                value: parseInt(data.data[0].value),
+                classification: data.data[0].value_classification,
+                lastFetch: Date.now()
+            };
+        }
+    } catch (e) { /* keep cached value */ }
+    return cachedFearGreed;
+}
+
+// ── Macro Event Calendar — known high-impact dates ──
+// FOMC meetings 2025-2026 (published by Federal Reserve a year ahead)
+// Format: 'YYYY-MM-DD' of announcement day
+const FOMC_DATES = [
+    '2025-01-29', '2025-03-19', '2025-05-07', '2025-06-18',
+    '2025-07-30', '2025-09-17', '2025-11-05', '2025-12-17',
+    '2026-01-28', '2026-03-18', '2026-04-29', '2026-06-17',
+    '2026-07-29', '2026-09-16', '2026-11-04', '2026-12-16'
+];
+function getMacroEventContext() {
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    const utcHour = now.getUTCHours();
+    const isFOMC = FOMC_DATES.includes(today);
+    // CPI is typically released at 08:30 ET (13:30 UTC) on release day
+    // We flag the entire day as macro-sensitive
+    const dayOfWeek = now.getUTCDay();
+    // NFP: first Friday of month at 08:30 ET
+    const isFirstFriday = dayOfWeek === 5 && now.getUTCDate() <= 7;
+    const isMacroDay = isFOMC || isFirstFriday;
+    // Macro announcements typically at 14:00-14:30 UTC (FOMC) or 13:30 UTC (CPI/NFP)
+    const isNearAnnouncement = isMacroDay && utcHour >= 13 && utcHour <= 15;
+    return {
+        isFOMC,
+        isFirstFriday,
+        isMacroDay,
+        isNearAnnouncement,
+        // Sizing multiplier: reduce bets during macro events
+        sizingMultiplier: isNearAnnouncement ? 0.40 : (isMacroDay ? 0.70 : 1.0)
+    };
+}
+
 // ── Binance 1m Klines ──
 async function fetchHistory() {
     const data = await fetchJSON('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=120');
@@ -312,6 +363,8 @@ const state = {
     openInterest: null,
     openInterestHistory: [], // last 15 OI values for rate-of-change
     liquidations: null,      // recent liquidation data
+    fearGreed: null,         // Alternative.me Fear & Greed index
+    macroEvent: null,        // macro event context (FOMC/CPI/NFP)
     history: [],
     lastUpdate: null,
     periodKey: null,
@@ -355,7 +408,7 @@ async function fetchAllData() {
     console.log(`\n--- Fetch cycle @ ${new Date().toLocaleTimeString()} ---`);
     try {
         // Parallel fetch all data sources
-        const [brti, kalshi, orderBook, trades, fundingRate, history, ethPrice, openInterest, liquidations] = await Promise.allSettled([
+        const [brti, kalshi, orderBook, trades, fundingRate, history, ethPrice, openInterest, liquidations, fearGreed] = await Promise.allSettled([
             fetchBRTIApprox(),
             fetchKalshiData(),
             fetchOrderBook(),
@@ -364,8 +417,11 @@ async function fetchAllData() {
             fetchHistory(),
             fetchEthPrice(),
             fetchOpenInterest(),
-            fetchLiquidations()
+            fetchLiquidations(),
+            fetchFearGreed()
         ]);
+        // Macro event context (no API call needed — calendar-based)
+        state.macroEvent = getMacroEventContext();
 
         if (brti.status === 'fulfilled' && brti.value) {
             state.brtiPrice = brti.value.price;
@@ -412,6 +468,9 @@ async function fetchAllData() {
         if (liquidations.status === 'fulfilled' && liquidations.value) {
             state.liquidations = liquidations.value;
         }
+        if (fearGreed.status === 'fulfilled' && fearGreed.value) {
+            state.fearGreed = fearGreed.value;
+        }
 
         if (history.status === 'fulfilled' && history.value) {
             state.history = history.value;
@@ -454,7 +513,9 @@ async function fetchAllData() {
                         ethPriceHistory: state.ethPriceHistory,
                         openInterest: state.openInterest,
                         openInterestHistory: state.openInterestHistory,
-                    liquidations: state.liquidations
+                    liquidations: state.liquidations,
+                    fearGreed: state.fearGreed,
+                    macroEvent: state.macroEvent
                     };
                     const prediction = engine.handleNewPeriod(periodKey, marketData, minutesAhead, state.kalshiStrike, periodEnd);
                     store.updateCurrentPeriod({
@@ -493,7 +554,9 @@ async function fetchAllData() {
                     ethPriceHistory: state.ethPriceHistory,
                     openInterest: state.openInterest,
                     openInterestHistory: state.openInterestHistory,
-                    liquidations: state.liquidations
+                    liquidations: state.liquidations,
+                    fearGreed: state.fearGreed,
+                    macroEvent: state.macroEvent
                 };
                 const prediction = engine.handleNewPeriod(periodKey, marketData, minutesAhead, state.kalshiStrike, periodEnd);
                 store.updateCurrentPeriod({
@@ -518,7 +581,9 @@ async function fetchAllData() {
                     fundingRate: state.fundingRate,
                     ethPriceHistory: state.ethPriceHistory,
                     openInterestHistory: state.openInterestHistory,
-                    liquidations: state.liquidations
+                    liquidations: state.liquidations,
+                    fearGreed: state.fearGreed,
+                    macroEvent: state.macroEvent
                 };
                 const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike, periodKey);
                 store.updateCurrentPeriod({ updatedPrediction: updated });
@@ -575,7 +640,9 @@ async function fetchAllData() {
                 coolingOff: engine.sessionRisk.coolingOff,
                 edgeDecayAlert: engine.sessionRisk.edgeDecayAlert,
                 riskMultiplier: engine.getSessionRiskMultiplier()
-            }
+            },
+            fearGreed: state.fearGreed,
+            macroEvent: state.macroEvent
         });
 
         console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | ${wss.clients.size} clients`);
