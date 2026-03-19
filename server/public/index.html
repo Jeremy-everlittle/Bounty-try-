@@ -1970,8 +1970,8 @@
                     body: JSON.stringify({ environment: env })
                 });
                 const result = await resp.json();
-                if (!resp.ok) { alert('Failed: ' + (result.error || 'unknown error')); return; }
-                if (!result.configured) alert('Warning: ' + env.toUpperCase() + ' credentials are not configured. Trading will not work.');
+                if (!resp.ok) { showToast(friendlyError(result.error), 'error'); return; }
+                if (!result.configured) showToast(env.toUpperCase() + ' credentials not configured — trading won\'t work.', 'error');
             } catch (e) { console.error('Environment switch failed:', e); }
         }
 
@@ -1991,7 +1991,7 @@
         async function forceBet() {
             const ts = serverData && serverData.tradingStatus;
             if (ts && ts.currentPosition) {
-                alert('Already have a position for this period.');
+                showToast('Already have a position for this period.', 'error');
                 return;
             }
             const pred = serverData && serverData.prediction;
@@ -2024,12 +2024,12 @@
                         btn.disabled = false;
                     }, 5000);
                 } else {
-                    alert('Force bet failed: ' + (result.reason || result.error || 'Unknown error'));
+                    showToast(friendlyError(result.reason || result.error), 'error');
                     btn.textContent = 'FORCE BET';
                     btn.disabled = false;
                 }
             } catch (e) {
-                alert('Force bet error: ' + e.message);
+                showToast(friendlyError(e.message), 'error');
                 btn.textContent = 'FORCE BET';
                 btn.disabled = false;
             }
@@ -2038,7 +2038,7 @@
         async function pressBet() {
             const ts = serverData && serverData.tradingStatus;
             if (!ts || !ts.currentPosition) {
-                alert('No open position to press.');
+                showToast('No open position to press.', 'error');
                 return;
             }
             const p = ts.currentPosition;
@@ -2073,12 +2073,12 @@
                         btn.disabled = false;
                     }, 5000);
                 } else {
-                    alert('Press bet failed: ' + (result.reason || 'Unknown error'));
+                    showToast(friendlyError(result.reason), 'error');
                     btn.textContent = 'PRESS BET';
                     btn.disabled = false;
                 }
             } catch (e) {
-                alert('Press bet error: ' + e.message);
+                showToast(friendlyError(e.message), 'error');
                 btn.textContent = 'PRESS BET';
                 btn.disabled = false;
             }
@@ -2870,6 +2870,38 @@
             }
         });
 
+        // ── Friendly error messages & toast notifications ─────────────
+        function friendlyError(raw) {
+            if (!raw) return 'Something went wrong. Please try again.';
+            const s = String(raw);
+            if (s.includes('→ 503')) return 'Kalshi is temporarily unavailable (503). Try again in a moment.';
+            if (s.includes('→ 429')) return 'Too many requests — Kalshi is rate-limiting. Wait a few seconds.';
+            if (s.includes('→ 401') || s.includes('→ 403')) return 'Authentication error. Check your API keys.';
+            if (s.includes('→ 400')) return 'Bad request — the order parameters may be invalid.';
+            if (s.includes('→ 404')) return 'Market not found. The contract may have expired.';
+            if (s.includes('→ 5')) return 'Kalshi server error. Try again shortly.';
+            if (s.includes('timed out')) return 'Request timed out. Kalshi may be slow — try again.';
+            if (s.includes('Insufficient balance')) return 'Not enough balance to place this order.';
+            if (s.includes('No open position')) return 'No open position to press.';
+            if (s.includes('not configured')) return 'Kalshi API keys not configured.';
+            if (s.includes('No fills')) return 'Order got no fills after multiple attempts. The price may have moved.';
+            if (s.includes('canceled') || s.includes('rejected')) return 'Order was rejected by Kalshi. Price may have moved too far.';
+            if (s.includes('exhausted all attempts')) return 'Could not fill order after multiple tries. Try again.';
+            return s;
+        }
+
+        function showToast(message, type) {
+            const existing = document.getElementById('app-toast');
+            if (existing) existing.remove();
+            const toast = document.createElement('div');
+            toast.id = 'app-toast';
+            const bg = type === 'error' ? 'rgba(248,81,73,0.95)' : type === 'success' ? 'rgba(63,185,80,0.95)' : 'rgba(56,139,253,0.95)';
+            toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:10000;padding:12px 20px;border-radius:10px;font-size:14px;font-weight:600;color:#fff;background:' + bg + ';box-shadow:0 4px 20px rgba(0,0,0,0.5);max-width:90vw;text-align:center;animation:toastIn 0.3s ease;';
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => { toast.style.opacity = '0'; toast.style.transition = 'opacity 0.3s'; setTimeout(() => toast.remove(), 300); }, 4000);
+        }
+
         // ── Config Panel ──────────────────────────────────────────────
         function toggleConfigPanel() {
             const panel = document.getElementById('config-panel');
@@ -2950,7 +2982,7 @@
 
         async function toggleNotifications() {
             if (!('Notification' in window)) {
-                alert('Your browser does not support notifications.');
+                showToast('Your browser does not support notifications.', 'error');
                 return;
             }
             if (!notificationsEnabled) {
@@ -2959,7 +2991,7 @@
                     notificationsEnabled = true;
                     localStorage.setItem('notificationsEnabled', 'true');
                 } else {
-                    alert('Notification permission denied. Please enable it in your browser settings.');
+                    showToast('Notification permission denied. Enable in browser settings.', 'error');
                 }
             } else {
                 notificationsEnabled = false;
