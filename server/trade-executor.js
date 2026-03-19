@@ -209,8 +209,14 @@ function markFillFailed(periodKey) {
 
 /**
  * Get an aggressive limit price that's likely to fill.
- * Checks the orderbook for the best available ask, and pays up to
- * (theoretical price + slippage) to ensure fills.
+ * Checks the Kalshi orderbook for the best available ask, and pays
+ * up to (theoretical price + slippage) to ensure fills.
+ *
+ * Kalshi orderbook format (post-March-12):
+ *   { orderbook_fp: { yes_dollars: [["0.58","10.00"], ...], no_dollars: [...] } }
+ *   Each entry is [price_dollars, count_fp] — BIDS only.
+ *   YES bid at $X = NO ask at $(1.00-X), and vice versa.
+ *
  * Returns a price in cents (5-99).
  */
 async function getAggressivePrice(ticker, side, theoreticalPrice) {
@@ -220,25 +226,36 @@ async function getAggressivePrice(ticker, side, theoreticalPrice) {
     if (config.paperMode) return Math.max(5, Math.min(95, theoreticalPrice));
 
     try {
-        const book = await trading.getOrderbook(ticker);
-        // Orderbook has { yes: [[price, quantity], ...], no: [[price, quantity], ...] }
-        // We want the best ASK for our side (lowest price someone is willing to sell at)
-        // On Kalshi, buying YES at price X = selling NO at (100-X)
-        // The orderbook 'yes' array has bids/asks for YES side
-        const asks = side === 'yes' ? (book.yes || []) : (book.no || []);
+        const resp = await trading.getOrderbook(ticker);
+        const book = resp.orderbook_fp || resp.orderbook || resp;
 
-        if (asks.length > 0) {
-            // Find the best (lowest) ask price
-            const bestAsk = Math.min(...asks.map(a => a[0] || a.price || 99));
+        // Kalshi only shows BIDS. To find the ask for our side:
+        // - If we're buying YES: the ask comes from NO bids (ask = 100 - NO bid price)
+        // - If we're buying NO: the ask comes from YES bids (ask = 100 - YES bid price)
+        const oppositeBids = side === 'yes'
+            ? (book.no_dollars || book.no || [])
+            : (book.yes_dollars || book.yes || []);
+
+        if (oppositeBids.length > 0) {
+            // Convert opposite bids to our ask prices
+            // Opposite bid at $0.08 → our ask at $0.92 (92c)
+            const askPrices = oppositeBids.map(entry => {
+                const bidDollars = parseFloat(entry[0]);
+                return Math.round((1.00 - bidDollars) * 100); // convert to cents
+            });
+
+            // Best ask = lowest price someone is willing to sell at
+            const bestAsk = Math.min(...askPrices);
+
             if (bestAsk <= maxPrice) {
                 console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c (theory=${theoreticalPrice}c) — using ask price`);
                 return bestAsk;
             }
-            console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c > max ${maxPrice}c — using max`);
+            console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c > max ${maxPrice}c — using max ${maxPrice}c`);
             return maxPrice;
         }
+        console.log(`[trade-executor] Orderbook: no opposing bids found — using theory+3c`);
     } catch (e) {
-        // Orderbook fetch failed — use aggressive fallback
         console.log(`[trade-executor] Orderbook fetch failed: ${e.message} — using theory+3c`);
     }
 

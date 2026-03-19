@@ -91,11 +91,14 @@ async function getPositions(eventTicker) {
 
 /**
  * Place an order on Kalshi
+ * Uses the post-March-12 API format: count_fp (string), yes/no_price_dollars (string).
+ * Callers still pass cents integers — we convert here.
+ *
  * @param {Object} params
- * @param {string} params.ticker - Market ticker (e.g. KXBTC15M-26MAR18-T96850)
+ * @param {string} params.ticker - Market ticker
  * @param {'yes'|'no'} params.side - yes or no
  * @param {'buy'|'sell'} params.action - buy or sell
- * @param {number} params.count - Number of contracts
+ * @param {number} params.count - Number of contracts (integer)
  * @param {number} [params.yesPrice] - Limit price in cents (1-99) for yes side
  * @param {number} [params.noPrice] - Limit price in cents (1-99) for no side
  * @param {string} [params.type='limit'] - Order type
@@ -104,23 +107,36 @@ async function getPositions(eventTicker) {
  */
 async function placeOrder({ ticker, side, action, count, yesPrice, noPrice, type = 'limit', timeInForce }) {
     const clientOrderId = crypto.randomUUID();
+
+    // Convert cents (integer) → dollars (string) for the new API format
+    // e.g. 58 cents → "0.58", 5 cents → "0.05"
+    const centsToDollars = (cents) => (cents / 100).toFixed(2);
+
     const body = {
         ticker,
         side,
         action,
-        count,
+        count: count,                          // legacy integer (still accepted)
+        count_fp: count.toFixed(2),             // new: string like "5.00"
         type,
         client_order_id: clientOrderId,
     };
 
-    if (yesPrice !== undefined) body.yes_price = yesPrice;
-    if (noPrice !== undefined) body.no_price = noPrice;
+    // Use new dollar-string format (post-March-12 migration)
+    // Only ONE of yes_price/no_price/yes_price_dollars/no_price_dollars allowed
+    if (yesPrice !== undefined) {
+        body.yes_price_dollars = centsToDollars(yesPrice);
+    }
+    if (noPrice !== undefined) {
+        body.no_price_dollars = centsToDollars(noPrice);
+    }
     if (timeInForce) body.time_in_force = timeInForce;
 
-    console.log(`[kalshi-trading] Placing order: ${action} ${count}x ${side} on ${ticker} @ ${yesPrice || noPrice || 'market'}c`);
+    const priceCents = yesPrice || noPrice || 0;
+    console.log(`[kalshi-trading] Placing order: ${action} ${count}x ${side} on ${ticker} @ ${priceCents}c ($${centsToDollars(priceCents)})`);
     const result = await kalshiFetch('POST', '/portfolio/orders', body);
     const o = result.order || {};
-    console.log(`[kalshi-trading] Order response: id=${o.order_id} status=${o.status} fill_count=${o.fill_count} fill_count_fp=${o.fill_count_fp} remaining_count=${o.remaining_count} remaining_count_fp=${o.remaining_count_fp}`);
+    console.log(`[kalshi-trading] Order response: id=${o.order_id} status=${o.status} fill_count_fp=${o.fill_count_fp} remaining_count_fp=${o.remaining_count_fp} yes_price_dollars=${o.yes_price_dollars} no_price_dollars=${o.no_price_dollars}`);
     return result;
 }
 
