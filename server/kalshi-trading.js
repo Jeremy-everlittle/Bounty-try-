@@ -148,7 +148,12 @@ async function placeOrder({ ticker, side, action, count, yesPrice, noPrice, type
  */
 async function cancelOrder(orderId) {
     console.log(`[kalshi-trading] Cancelling order: ${orderId}`);
-    return kalshiFetch('DELETE', `/portfolio/orders/${orderId}`);
+    const result = await kalshiFetch('DELETE', `/portfolio/orders/${orderId}`);
+    if (result && result.order) {
+        const o = result.order;
+        console.log(`[kalshi-trading] Cancel response: fill_count_fp=${o.fill_count_fp} remaining_count_fp=${o.remaining_count_fp} status=${o.status}`);
+    }
+    return result;
 }
 
 /**

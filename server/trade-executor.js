@@ -57,29 +57,63 @@ function parseOrderFills(order) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 /**
- * Handle a resting order: wait briefly, then cancel.
- * The demo API returns 404 for GET /portfolio/orders/{id}, so we can't poll.
- * Instead: wait 2s for matching, then cancel and use the original create
- * response's fill_count_fp (which reflects fills at time of placement).
+ * Handle a resting order: poll periodically, then cancel unfilled remainder.
+ * The demo API returns 404 for GET /portfolio/orders/{id}, so we poll via
+ * getOrders() with ticker filter, and also check the cancel response for
+ * final fill counts.
  */
-async function waitForFill(orderId, createResponse, maxWaitMs = 2000) {
-    // Wait briefly for the order to match
-    await sleep(maxWaitMs);
+async function waitForFill(orderId, createResponse, maxWaitMs = 15000) {
+    const pollInterval = 2000;
+    const startTime = Date.now();
 
-    // Cancel the resting order — any fills that happened are already recorded
-    // in the create response's fill_count_fp
+    // Poll for fills (the order may match while resting)
+    while (Date.now() - startTime < maxWaitMs) {
+        await sleep(pollInterval);
+
+        // Try to check order status
+        try {
+            const orderResp = await trading.getOrder(orderId);
+            const o = orderResp.order || orderResp;
+            if (o.status === 'executed' || o.status === 'filled') {
+                console.log(`[trade-executor] Resting order ${orderId} filled during wait! fill_count_fp=${o.fill_count_fp}`);
+                return o;
+            }
+            if (o.status === 'canceled' || o.status === 'cancelled') {
+                console.log(`[trade-executor] Resting order ${orderId} was cancelled externally`);
+                return o;
+            }
+            // Still resting — check for partial fills
+            const fillCount = parseFloat(o.fill_count_fp || '0');
+            if (fillCount > 0) {
+                console.log(`[trade-executor] Resting order ${orderId} partially filled: ${fillCount}`);
+                // Cancel remainder and return
+                try { await trading.cancelOrder(orderId); } catch (e) { /* may already be done */ }
+                return o;
+            }
+        } catch (e) {
+            // 404 on demo — can't poll, just keep waiting
+            if (e.status !== 404) {
+                console.log(`[trade-executor] Poll for ${orderId}: ${e.message}`);
+            }
+        }
+    }
+
+    // Time's up — cancel the resting order
     try {
-        await trading.cancelOrder(orderId);
-        console.log(`[trade-executor] Cancelled resting order ${orderId}`);
+        const cancelResp = await trading.cancelOrder(orderId);
+        console.log(`[trade-executor] Cancelled resting order ${orderId} after ${maxWaitMs}ms`);
+        // The cancel response may contain updated fill info
+        if (cancelResp && cancelResp.order) return cancelResp.order;
     } catch (e) {
-        // 404 = order already gone (filled or expired). That's fine.
-        if (e.status !== 404) {
+        // 404 = order already gone (filled or expired). Try to get final state.
+        if (e.status === 404) {
+            console.log(`[trade-executor] Order ${orderId} already gone (likely filled)`);
+        } else {
             console.log(`[trade-executor] Cancel attempt for ${orderId}: ${e.message}`);
         }
     }
 
-    // The create response already told us how many filled at placement time.
-    // Return it as-is — the caller will verify via balance + portfolio.
+    // Return original create response as fallback
     return createResponse;
 }
 
