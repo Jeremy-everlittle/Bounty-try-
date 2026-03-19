@@ -1855,14 +1855,14 @@ function predictPrice(marketData, minutesAhead, strike) {
     // ac1 negative, ac2 positive → oscillation (choppy)
     const acSum = ac1 + ac2 * 0.5; // ac2 weighted less (noisier)
     let driftMultiplier = 1.0;
-    if (acSum < -0.50) driftMultiplier = 0.10;      // very strong mean reversion
-    else if (ac1 < -0.35) driftMultiplier = 0.15;
+    if (acSum < -0.50) driftMultiplier = 0.35;      // was 0.10 — still respect some momentum
+    else if (ac1 < -0.35) driftMultiplier = 0.40;   // was 0.15
     else if (acSum > 0.50) driftMultiplier = 1.0;    // strong persistence
     else if (ac1 > 0.35) driftMultiplier = 0.95;
-    else if (trendRegime.meanReverting) driftMultiplier = 0.25;
+    else if (trendRegime.meanReverting) driftMultiplier = 0.50; // was 0.25
     else if (trendRegime.trending) driftMultiplier = 1.0;
-    // Oscillating market (ac1 neg, ac2 pos): reduce drift, increase reversion
-    else if (ac1 < -0.15 && ac2 > 0.15) driftMultiplier = 0.35;
+    // Oscillating market (ac1 neg, ac2 pos): reduce drift mildly
+    else if (ac1 < -0.15 && ac2 > 0.15) driftMultiplier = 0.60; // was 0.35
 
     // Early period momentum bias — stronger and starts immediately
     const minutesIntoPeriod = 15 - minutesAhead;
@@ -2017,7 +2017,9 @@ function predictPrice(marketData, minutesAhead, strike) {
     const sigRaw = 1 / (1 + Math.exp(-sigK * (timeProgress - sigMid)));
     const sigMin = 1 / (1 + Math.exp(sigK * sigMid));
     const sigMax = 1 / (1 + Math.exp(-sigK * sigMid));
-    const positionalWeight = 0.75 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.23;
+    // Reduced positional weight so signals have more influence on final probability
+    // Was 0.75-0.98 — now 0.55-0.80. This lets momentum/flow signals create tradeable edges.
+    const positionalWeight = 0.55 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.25;
 
     const vwapResult = computeAnchoredVWAP(history);
     const vwapSignal = Math.max(-0.5, Math.min(0.5, vwapResult.deviation * 1000));
@@ -2057,8 +2059,8 @@ function predictPrice(marketData, minutesAhead, strike) {
     const urgencyFade = minutesAhead < 3 ? Math.max(0, (minutesAhead - 1) / 2) : 1.0;
     const immediateBoosted = minutesAhead < 3 ? 1 + (3 - minutesAhead) * 0.3 : 1.0;
 
-    // In choppy markets, reduce all signal weights (less conviction)
-    const chopDampen = choppiness.choppy ? 0.65 : 1.0;
+    // In choppy markets, mild signal reduction (was 0.65 — too aggressive)
+    const chopDampen = choppiness.choppy ? 0.85 : 1.0;
 
     const allSignals = [
         { value: driftZShift, weight: 0.18 }, { value: orderFlowSignal, weight: 0.09 },
@@ -2116,10 +2118,10 @@ function predictPrice(marketData, minutesAhead, strike) {
         // Long/short ratio: contra-indicator at extremes
         longShortSignal      * 0.03
     );
-    // Bayesian shrinkage: retain 30% of signal (was 20%, too aggressive)
-    // In choppy markets, apply extra dampening to prevent false signals
-    const shrinkageFactor = 0.30 * chopDampen;
-    const totalZShift = Math.max(-0.8, Math.min(0.8, rawTotalZShift * agreementMult * shrinkageFactor));
+    // Bayesian shrinkage: retain 55% of signal (was 30% — too conservative, killed all edges)
+    // In choppy markets, only mild dampening
+    const shrinkageFactor = 0.55 * (choppiness.choppy ? 0.80 : 1.0);
+    const totalZShift = Math.max(-1.2, Math.min(1.2, rawTotalZShift * agreementMult * shrinkageFactor));
 
     // Final probability
     const driftAdjustedProb = fatTailCDF(zScore + totalZShift * (1 - positionalWeight) * 0.8, prices);
@@ -2136,12 +2138,12 @@ function predictPrice(marketData, minutesAhead, strike) {
     const bayesResult = bayesianAdjust(clampedProb, volRegime.regime, getBayesTrendLabel(trendRegime));
     let finalProb = bayesResult.adjustedProb;
 
-    // Gamma-aware confidence dampening near strike
-    const isNearStrike = Math.abs(zScore) < 0.8;
-    if (isNearStrike && minutesAhead < 8) {
-        const proximityFactor = 1 - Math.abs(zScore) / 0.8;
-        const timeFactor = (8 - minutesAhead) / 8;
-        const gammaRisk = 1 + proximityFactor * timeFactor * 0.25;
+    // Gamma-aware confidence dampening near strike — reduced impact
+    const isNearStrike = Math.abs(zScore) < 0.5; // was 0.8 — only dampen very close to strike
+    if (isNearStrike && minutesAhead < 5) { // was 8 — only in late period
+        const proximityFactor = 1 - Math.abs(zScore) / 0.5;
+        const timeFactor = (5 - minutesAhead) / 5;
+        const gammaRisk = 1 + proximityFactor * timeFactor * 0.12; // was 0.25
         finalProb = 0.5 + (finalProb - 0.5) / gammaRisk;
     }
 
@@ -2203,17 +2205,15 @@ function predictPrice(marketData, minutesAhead, strike) {
     // T = 1.3 is the recommended default for unverified models.
     // The self-learned overconfidenceRatio above partially handles this,
     // but temperature scaling in logit space is more principled.
-    const TEMPERATURE = 1.10; // mild — learned corrections handle the rest adaptively
+    const TEMPERATURE = 1.02; // very mild (was 1.10 — crushed edge too much)
     if (finalProb > 0.01 && finalProb < 0.99) {
         const logit = Math.log(finalProb / (1 - finalProb));
         const scaledLogit = logit / TEMPERATURE;
         finalProb = 1 / (1 + Math.exp(-scaledLogit));
     }
 
-    // ── Hard probability bounds ──
-    // Research: almost nothing justifies >90% or <10% confidence
-    // in a 15-minute BTC direction at a nearby strike.
-    finalProb = Math.max(0.10, Math.min(0.90, finalProb));
+    // ── Hard probability bounds — widened to allow stronger convictions ──
+    finalProb = Math.max(0.08, Math.min(0.92, finalProb));
 
     // Construct output
     const predictUp = finalProb > 0.5;
