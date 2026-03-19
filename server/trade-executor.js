@@ -17,6 +17,7 @@ const config = {
     paperMode: (process.env.PAPER_MODE || 'true').toLowerCase() === 'true',
     baseContracts: parseInt(process.env.BASE_CONTRACTS || '5', 10),            // was 10 — halved until edge proven with 300+ trades
     maxPositionContracts: Math.min(parseInt(process.env.MAX_POSITION_CONTRACTS || '10', 10), 50), // was 20 — reduced to limit exposure
+    convictionMaxContracts: Math.min(parseInt(process.env.CONVICTION_MAX_CONTRACTS || '30', 10), 100), // higher cap for high-conviction bets
     maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '2500', 10),    // $25 (was $10)
     maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '100', 10),      // was 50
 };
@@ -413,12 +414,17 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 
     const isUp = prediction.predictedPrice >= strike;
     const side = isUp ? 'yes' : 'no';
+    // Conviction scaling: high-conviction bets get a higher position cap
+    const isHighConviction = betQuality.betSize > 1.0;
+    const positionCap = isHighConviction ? config.convictionMaxContracts : config.maxPositionContracts;
     const contracts = Math.max(1, Math.min(
-        config.maxPositionContracts,
+        positionCap,
         Math.round(betQuality.betSize * config.baseContracts)
     ));
-    setThought('buying', `Placing ${isUp ? 'UP' : 'DOWN'} bet: ${contracts}x ${side.toUpperCase()}`, {
+    const convictionLabel = betQuality.convictionTier ? ` [${betQuality.convictionTier}]` : '';
+    setThought('buying', `Placing ${isUp ? 'UP' : 'DOWN'} bet: ${contracts}x ${side.toUpperCase()}${convictionLabel}`, {
         edge: betQuality.edge, quality: betQuality.quality, betSize: betQuality.betSize,
+        conviction: betQuality.convictionTier || 'normal',
     });
 
     // Determine limit price — must be aggressive enough to fill
@@ -789,7 +795,8 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
 
     // How many more contracts can we add?
     const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
-    const maxAdd = config.maxPositionContracts - currentContracts;
+    const dipCap = probForBet >= 0.75 ? config.convictionMaxContracts : config.maxPositionContracts;
+    const maxAdd = dipCap - currentContracts;
     if (maxAdd <= 0) return; // already at max
 
     // Scale add size: bigger dip = add more, but cap at half the original position
@@ -924,7 +931,7 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
         if (currentPosition.side === lockSide) {
             // Already on the right side — add up to max
             const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
-            const addContracts = config.maxPositionContracts - currentContracts;
+            const addContracts = config.convictionMaxContracts - currentContracts; // late-lock = high conviction
             if (addContracts <= 0) return; // already maxed out
             return await executeLockEntry(lockSide, addContracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock_add');
         } else {
@@ -939,7 +946,7 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     const check = canTrade(periodKey);
     if (!check.ok) return;
 
-    const contracts = config.maxPositionContracts;
+    const contracts = config.convictionMaxContracts; // late-lock = high conviction, go big
     await executeLockEntry(lockSide, contracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock');
 }
 
@@ -1097,9 +1104,10 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
     const check = canTrade(periodKey);
     if (!check.ok) return;
 
-    // Re-enter at near-full size (was 60%, now 85%)
+    // Re-enter at near-full size (was 60%, now 85%) — use conviction cap if high conviction
+    const reEntryCap = bq.betSize > 1.0 ? config.convictionMaxContracts : config.maxPositionContracts;
     const contracts = Math.max(1, Math.min(
-        config.maxPositionContracts,
+        reEntryCap,
         Math.round(bq.betSize * config.baseContracts * 0.85)
     ));
     const limitPrice = Math.max(5, Math.min(95, Math.round(probForBet * 100)));
@@ -1332,6 +1340,7 @@ function getStatus() {
         config: {
             baseContracts: config.baseContracts,
             maxPositionContracts: config.maxPositionContracts,
+            convictionMaxContracts: config.convictionMaxContracts,
             maxDailyLossCents: config.maxDailyLossCents,
             maxDailyTrades: config.maxDailyTrades,
         },

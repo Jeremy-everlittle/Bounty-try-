@@ -1720,7 +1720,49 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         else if (fg < 8) { betSize *= 0.85; betSizeReason = 'Slightly reduced — extreme fear'; }
     }
 
-    betSize = Math.max(0, Math.min(1.00, betSize)); // cap at 100% — no overbetting until edge proven
+    // ── CONVICTION SCALING — go bigger on high-confidence setups ──
+    // When multiple signals align and probability is high, scale up aggressively.
+    // betSize > 1.0 triggers the convictionMaxContracts cap in trade-executor.
+    let convictionTier = null;
+
+    if (shouldBet && sessionMult > 0) {
+        const minutesLeft = minutesAhead;
+        // Compute sigma distance: how many standard deviations is price from strike?
+        const currentPrice = prices.length > 0 ? prices[prices.length - 1] : prediction.predictedPrice;
+        const distFromStrike = Math.abs(currentPrice - strike);
+        // Estimate remaining vol: ~0.02% per minute for BTC (annualized ~50% vol)
+        const remainingVolPct = Math.sqrt(Math.max(0.5, minutesLeft) / (365.25 * 24 * 60)) * 0.50;
+        const sigmaFromStrike = remainingVolPct > 0 ? (distFromStrike / currentPrice) / remainingVolPct : 0;
+        const isUp = prediction.predictedPrice >= strike;
+        const onRightSide = (isUp && currentPrice >= strike) || (!isUp && currentPrice < strike);
+
+        // TIER 3: LOCK — price is far on our side near settlement, nearly guaranteed
+        // 85%+ probability, <5 min left, on right side, strong sigma distance
+        if (probForBet >= 0.85 && minutesLeft <= 5 && onRightSide && sigmaFromStrike >= 1.0 && !chop.choppy) {
+            betSize = Math.max(betSize, 3.0);
+            convictionTier = 'LOCK';
+            betSizeReason = 'MAX CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
+                sigmaFromStrike.toFixed(1) + 'σ on right side, ' + minutesLeft.toFixed(0) + 'm left';
+        }
+        // TIER 2: HIGH CONVICTION — strong probability, on right side, good edge
+        // 75%+ probability, on right side or strong edge, not choppy
+        else if (probForBet >= 0.75 && edge >= 0.05 && !chop.choppy && (onRightSide || quality >= 0.70)) {
+            betSize = Math.max(betSize, 2.0);
+            convictionTier = 'HIGH';
+            betSizeReason = 'HIGH CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
+                (edge * 100).toFixed(1) + '% edge' + (onRightSide ? ', on right side' : '');
+        }
+        // TIER 1: ELEVATED — above-average confidence
+        // 65%+ probability, positive edge, quality setup
+        else if (probForBet >= 0.65 && edge >= 0.04 && quality >= 0.60) {
+            betSize = Math.max(betSize, 1.5);
+            convictionTier = 'ELEVATED';
+            betSizeReason = 'ELEVATED CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
+                (edge * 100).toFixed(1) + '% edge';
+        }
+    }
+
+    betSize = Math.max(0, Math.min(3.00, betSize)); // cap at 3x — conviction scaling max
 
     // ── Fee-adjusted Kelly fraction ──
     // The entry price should reflect what we'd ACTUALLY pay, not our probability estimate.
@@ -1754,7 +1796,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     return {
         quality, shouldBet: shouldBetAdjusted, waitForBetter: !shouldBetAdjusted && minutesAhead > 8,
         suggestedWait, edge, factors, choppiness: chop, exhaustion,
-        betSize, betSizeReason,
+        betSize, betSizeReason, convictionTier,
         kellyFraction, kellyHasEdge,
         sessionRisk: {
             consecutiveLosses: sessionRisk.consecutiveLosses,

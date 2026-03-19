@@ -1714,8 +1714,11 @@
             const qPct = (bq.quality * 100).toFixed(0);
             const qColor = bq.quality >= 0.7 ? '#3fb950' : bq.quality >= 0.55 ? '#d29922' : '#f85149';
             const betSize = bq.betSize || 1.0;
-            const betSizeLabel = betSize >= 0.9 ? 'FULL' : betSize >= 0.6 ? 'REDUCED' : betSize >= 0.4 ? 'HALF' : 'SMALL';
-            const betSizeColor = betSize >= 0.9 ? '#3fb950' : betSize >= 0.6 ? '#d29922' : '#f85149';
+            const betSizeLabel = bq.convictionTier === 'LOCK' ? 'LOCK 3x' :
+                                 bq.convictionTier === 'HIGH' ? 'HIGH 2x' :
+                                 bq.convictionTier === 'ELEVATED' ? 'ELEV 1.5x' :
+                                 betSize >= 0.9 ? 'FULL' : betSize >= 0.6 ? 'REDUCED' : betSize >= 0.4 ? 'HALF' : 'SMALL';
+            const betSizeColor = bq.convictionTier ? '#a371f7' : betSize >= 0.9 ? '#3fb950' : betSize >= 0.6 ? '#d29922' : '#f85149';
 
             let qualityBar =
                 '<div class="prebuy-metrics" style="margin-top:4px">' +
@@ -1725,7 +1728,7 @@
                     (bq.choppiness && bq.choppiness.choppy ? '<span class="prebuy-metric" style="color:#d29922">Choppy</span>' : '') +
                     (bq.exhaustion && bq.exhaustion.exhaustion > 0.3 ? '<span class="prebuy-metric" style="color:#d29922">Exhausted</span>' : '') +
                 '</div>' +
-                (bq.betSizeReason && betSize < 0.9 ? '<div class="sell-signal-details" style="margin-top:2px;color:#b0b8c1">' + bq.betSizeReason + '</div>' : '');
+                (bq.betSizeReason && (betSize < 0.9 || bq.convictionTier) ? '<div class="sell-signal-details" style="margin-top:2px;color:' + (bq.convictionTier ? '#a371f7' : '#b0b8c1') + '">' + bq.betSizeReason + '</div>' : '');
 
             // Session risk banner
             const sr = serverData.sessionRisk || bq.sessionRisk;
