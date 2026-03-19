@@ -15,7 +15,7 @@ const decisionLog = require('./decision-logger');
 const config = {
     paperMode: (process.env.PAPER_MODE || 'true').toLowerCase() === 'true',
     baseContracts: parseInt(process.env.BASE_CONTRACTS || '10', 10),           // was 5
-    maxPositionContracts: parseInt(process.env.MAX_POSITION_CONTRACTS || '20', 10), // was 10
+    maxPositionContracts: Math.min(parseInt(process.env.MAX_POSITION_CONTRACTS || '20', 10), 50), // hard cap at 50
     maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '2500', 10),    // $25 (was $10)
     maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '100', 10),      // was 50
 };
@@ -27,6 +27,7 @@ let soldThisPeriod = null;    // Track sold positions for re-entry: { periodKey,
 let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
 let cachedBalance = null;     // { balanceCents, lastFetched }
 const BALANCE_CACHE_MS = 30000; // refresh balance every 30s
+let orderInFlight = false;    // mutex: prevent concurrent order placement
 
 const dailyStats = {
     date: new Date().toISOString().slice(0, 10),
@@ -119,6 +120,7 @@ function canTrade() {
     checkDayRollover();
 
     if (killSwitch) return { ok: false, reason: 'Kill switch active' };
+    if (orderInFlight) return { ok: false, reason: 'Order already in flight' };
     if (!trading.isConfigured() && !config.paperMode) {
         return { ok: false, reason: 'Kalshi API not configured (set KALSHI_API_KEY + KALSHI_PRIVATE_KEY)' };
     }
@@ -129,6 +131,31 @@ function canTrade() {
         return { ok: false, reason: `Daily trade limit reached (${dailyStats.tradeCount})` };
     }
     return { ok: true };
+}
+
+/**
+ * Cap contracts to what we can actually afford.
+ * Returns 0 if we can't afford even 1 contract.
+ */
+async function capContractsByBalance(contracts, pricePerContract) {
+    if (config.paperMode) return contracts;
+    try {
+        const balanceResp = await trading.getBalance();
+        const availableCents = balanceResp.balance;
+        const maxAffordable = Math.floor(availableCents / pricePerContract);
+        if (maxAffordable <= 0) {
+            console.log(`[trade-executor] Can't afford any contracts: balance=${availableCents}c, price=${pricePerContract}c`);
+            return 0;
+        }
+        const capped = Math.min(contracts, maxAffordable);
+        if (capped < contracts) {
+            console.log(`[trade-executor] Capping contracts ${contracts} → ${capped} (balance=${availableCents}c @ ${pricePerContract}c each)`);
+        }
+        return capped;
+    } catch (e) {
+        console.log(`[trade-executor] Balance check failed: ${e.message} — using requested ${contracts}`);
+        return Math.min(contracts, 10); // safe fallback
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -232,21 +259,16 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     }
 
     // ── LIVE ORDER ──
-    try {
-        // Check balance first
-        const balanceResp = await trading.getBalance();
-        const availableCents = balanceResp.balance;
-        const costEstimate = contracts * limitPrice; // max cost in cents
-        if (costEstimate > availableCents) {
-            console.log(`[trade-executor] Insufficient balance: need ${costEstimate}c, have ${availableCents}c`);
-            return;
-        }
+    const cappedContracts = await capContractsByBalance(contracts, limitPrice);
+    if (cappedContracts <= 0) return;
 
+    orderInFlight = true;
+    try {
         const result = await trading.placeOrder({
             ticker: kalshiTicker,
             side,
             action: 'buy',
-            count: contracts,
+            count: cappedContracts,
             yesPrice: side === 'yes' ? limitPrice : undefined,
             noPrice: side === 'no' ? limitPrice : undefined,
         });
@@ -275,8 +297,8 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             return;
         }
 
-        if (filledContracts < contracts) {
-            console.log(`[trade-executor] Partial fill: ${filledContracts}/${contracts} contracts on ${order.order_id}`);
+        if (filledContracts < cappedContracts) {
+            console.log(`[trade-executor] Partial fill: ${filledContracts}/${cappedContracts} contracts on ${order.order_id}`);
         }
 
         currentPosition = {
@@ -288,7 +310,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             periodKey,
             entryTime: Date.now(),
         };
-        logTrade('buy', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: contracts });
+        logTrade('buy', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: cappedContracts });
         dailyStats.tradeCount++;
         console.log(`[trade-executor] LIVE BUY: ${filledContracts}x ${side.toUpperCase()} on ${kalshiTicker} — order ${order.order_id} (${order.status})`);
 
@@ -301,6 +323,8 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         if (err.status === 409) {
             currentPosition = { ticker: kalshiTicker, side, contracts: 0, entryPrice: 0, orderId: 'blocked-409', periodKey, entryTime: Date.now() };
         }
+    } finally {
+        orderInFlight = false;
     }
 }
 
@@ -371,6 +395,11 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
     }
 
     // ── LIVE SELL ──
+    if (orderInFlight) {
+        console.log(`[trade-executor] Sell skipped — order already in flight`);
+        return;
+    }
+    orderInFlight = true;
     try {
         const result = await trading.placeOrder({
             ticker: currentPosition.ticker,
@@ -426,6 +455,8 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         console.error(`[trade-executor] Sell failed:`, err.message, detail ? `| Response: ${detail}` : '');
         logTrade('sell_error', { ...tradeInfo, error: err.message, response: err.response });
         // Don't clear position — will retry next cycle or auto-settle
+    } finally {
+        orderInFlight = false;
     }
 }
 
@@ -566,12 +597,16 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
     }
 
     // LIVE ORDER
+    const cappedAdd = await capContractsByBalance(addContracts, currentLimitPrice);
+    if (cappedAdd <= 0) return;
+
+    orderInFlight = true;
     try {
         const result = await trading.placeOrder({
             ticker: kalshiTicker,
             side: currentPosition.side,
             action: 'buy',
-            count: addContracts,
+            count: cappedAdd,
             yesPrice: currentPosition.side === 'yes' ? currentLimitPrice : undefined,
             noPrice: currentPosition.side === 'no' ? currentLimitPrice : undefined,
         });
@@ -602,6 +637,8 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
         console.log(`[trade-executor] LIVE DIP-BUY: +${filledContracts}x @ ${currentLimitPrice}c — order ${order.order_id} (${order.status})`);
     } catch (err) {
         logTrade('dip_buy_error', { ...tradeInfo, error: err.message });
+    } finally {
+        orderInFlight = false;
     }
 }
 
@@ -711,12 +748,16 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
     }
 
     // LIVE
+    const cappedContracts = await capContractsByBalance(contracts, limitPrice);
+    if (cappedContracts <= 0) return;
+
+    orderInFlight = true;
     try {
         const result = await trading.placeOrder({
             ticker,
             side,
             action: 'buy',
-            count: contracts,
+            count: cappedContracts,
             yesPrice: side === 'yes' ? limitPrice : undefined,
             noPrice: side === 'no' ? limitPrice : undefined,
         });
@@ -759,6 +800,8 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
         console.log(`[trade-executor] LIVE ${strategy.toUpperCase()}: ${filledContracts}x ${side.toUpperCase()} @ ${limitPrice}c — order ${order.order_id} (${order.status})`);
     } catch (err) {
         logTrade(strategy + '_error', { ...tradeInfo, error: err.message });
+    } finally {
+        orderInFlight = false;
     }
 }
 
@@ -849,12 +892,16 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
     }
 
     // LIVE
+    const cappedContracts = await capContractsByBalance(contracts, limitPrice);
+    if (cappedContracts <= 0) return;
+
+    orderInFlight = true;
     try {
         const result = await trading.placeOrder({
             ticker: kalshiTicker,
             side: origSide,
             action: 'buy',
-            count: contracts,
+            count: cappedContracts,
             yesPrice: origSide === 'yes' ? limitPrice : undefined,
             noPrice: origSide === 'no' ? limitPrice : undefined,
         });
@@ -890,6 +937,8 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
         console.log(`[trade-executor] LIVE RE-ENTRY: ${filledContracts}x ${origSide.toUpperCase()} @ ${limitPrice}c — order ${order.order_id} (${order.status})`);
     } catch (err) {
         logTrade('re_entry_error', { ...tradeInfo, error: err.message });
+    } finally {
+        orderInFlight = false;
     }
 }
 

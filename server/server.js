@@ -763,30 +763,39 @@ async function fetchAllData() {
                 // Log price ticks (sampled every 30s)
                 decisionLog.logPriceTick({ currentPrice: state.brtiPrice, strike: state.kalshiStrike, periodKey, minutesAhead, history: state.history });
 
+                // ── Auto-trade: check current status to avoid redundant calls ──
+                const tradeStatus = tradeExecutor.getStatus();
+                const hasPosition = !!(tradeStatus.currentPosition);
+
                 // ── Auto-trade: mid-period entry ──
-                // If no position yet and updated prediction now has edge, enter
-                if (updatedBetQuality && updatedBetQuality.shouldBet) {
-                    tradeExecutor.onNewPrediction(updated, state.kalshiTicker, state.kalshiStrike, periodKey)
+                // Only attempt entry if no position exists for this period
+                if (!hasPosition && updatedBetQuality && updatedBetQuality.shouldBet) {
+                    await tradeExecutor.onNewPrediction(updated, state.kalshiTicker, state.kalshiStrike, periodKey)
                         .catch(e => console.error('[trade-executor] Mid-period entry error:', e.message));
                 }
 
                 // ── Auto-trade: evaluate exit (with guaranteed-win protection) ──
-                if (sellSignal) {
-                    tradeExecutor.onSellSignal(sellSignal, minutesAhead, updated, state.kalshiStrike, state.brtiPrice).catch(e => console.error('[trade-executor] Sell error:', e.message));
+                if (hasPosition && sellSignal) {
+                    await tradeExecutor.onSellSignal(sellSignal, minutesAhead, updated, state.kalshiStrike, state.brtiPrice)
+                        .catch(e => console.error('[trade-executor] Sell error:', e.message));
                 }
 
-                // ── Auto-trade: mid-period strategies ──
+                // ── Auto-trade: mid-period strategies (only when relevant) ──
                 // Dip buyer: add to position when price moves against us at better odds
-                tradeExecutor.onDipOpportunity(updated, sellSignal, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
-                    .catch(e => console.error('[trade-executor] Dip buyer error:', e.message));
+                if (hasPosition) {
+                    await tradeExecutor.onDipOpportunity(updated, sellSignal, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
+                        .catch(e => console.error('[trade-executor] Dip buyer error:', e.message));
+                }
 
-                // Late lock: max entry when outcome is nearly guaranteed
-                tradeExecutor.onLateLock(updated, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
+                // Late lock: max entry when outcome is nearly guaranteed (only if no/small position)
+                await tradeExecutor.onLateLock(updated, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
                     .catch(e => console.error('[trade-executor] Late lock error:', e.message));
 
-                // Re-entry: get back in after an early sell if conditions recover
-                tradeExecutor.onReentryCheck(updated, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
-                    .catch(e => console.error('[trade-executor] Re-entry error:', e.message));
+                // Re-entry: get back in after an early sell if conditions recover (only if no position)
+                if (!hasPosition) {
+                    await tradeExecutor.onReentryCheck(updated, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
+                        .catch(e => console.error('[trade-executor] Re-entry error:', e.message));
+                }
 
                 // Next period preview in last 3 minutes
                 if (minutesAhead <= 3) {
