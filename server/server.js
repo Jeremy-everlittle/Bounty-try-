@@ -118,9 +118,11 @@ async function fetchBRTIApprox() {
 }
 
 // ── Kalshi Market Fetching ──
-// PRODUCTION API for all read-only market data (strike, prices, markets).
-// Demo API is ONLY used by kalshi-trading.js for placing bets & funds.
-const KALSHI_MARKET_API = 'https://trading-api.kalshi.com/trade-api/v2';
+// Use the PUBLIC elections API for all read-only market data (strike, prices).
+// This is the same endpoint that was working before — it returns full market
+// detail including yes_sub_title with the real strike price.
+// Demo API (demo-api.kalshi.co) is ONLY used by kalshi-trading.js for bets & funds.
+const KALSHI_MARKET_API = 'https://api.elections.kalshi.com/trade-api/v2';
 
 async function fetchKalshiData() {
     try {
@@ -1154,7 +1156,7 @@ server.listen(PORT, () => {
     console.log(`History: http://localhost:${PORT}/api/history`);
     console.log(`Trading: http://localhost:${PORT}/api/trading/status`);
     console.log(`Trading mode: ${tradeExecutor.config.paperMode ? 'PAPER (simulated)' : 'LIVE'}${kalshiAuth.isConfigured() ? '' : ' | Kalshi API not configured'}`);
-    console.log(`Kalshi market data: PRODUCTION → ${KALSHI_MARKET_API}`);
+    console.log(`Kalshi market data: PUBLIC API → ${KALSHI_MARKET_API}`);
     console.log(`Kalshi trading: ${kalshiAuth.getEnvironment().toUpperCase()} → ${kalshiAuth.getBaseUrl()}`);
 
     // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
