@@ -134,8 +134,10 @@ async function placeOrder({ ticker, side, action, count, yesPrice, noPrice, type
 
     const priceCents = yesPrice || noPrice || 0;
     console.log(`[kalshi-trading] Placing order: ${action} ${count}x ${side} on ${ticker} @ ${priceCents}c ($${centsToDollars(priceCents)})`);
+    console.log(`[kalshi-trading] REQUEST BODY: ${JSON.stringify(body)}`);
     const result = await kalshiFetch('POST', '/portfolio/orders', body);
     const o = result.order || {};
+    console.log(`[kalshi-trading] FULL RESPONSE: ${JSON.stringify(result)}`);
     console.log(`[kalshi-trading] Order response: id=${o.order_id} status=${o.status} fill_count_fp=${o.fill_count_fp} remaining_count_fp=${o.remaining_count_fp} yes_price_dollars=${o.yes_price_dollars} no_price_dollars=${o.no_price_dollars}`);
     return result;
 }
