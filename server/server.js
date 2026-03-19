@@ -196,30 +196,64 @@ async function fetchKalshiData() {
 function extractStrike(m) {
     if (!m) return null;
 
-    // ── Priority 1: Numeric strike fields from Kalshi API ──
-    // These are the most reliable — direct numeric values from the API.
-    // Kalshi KXBTC15M stores strikes in cents (e.g., 7003106 = $70,031.06)
-    // or as raw dollar values. Handle both.
-    for (const field of ['custom_strike', 'floor_strike', 'cap_strike']) {
-        if (m[field] != null) {
-            const raw = parseFloat(m[field]);
-            if (isNaN(raw) || raw <= 0) continue;
-            // If > 5,000,000 it's likely in cents → divide by 100
-            if (raw > 5000000) {
-                const dollars = raw / 100;
-                if (dollars > 40000 && dollars < 200000) return dollars;
+    // ── Priority 1: Extract target price from the title ──
+    // Kalshi KXBTC15M titles look like: "BTC 15 min · $70,031.06 target"
+    // This is the ACTUAL strike price shown in the Kalshi UI.
+    // The numeric fields (custom_strike, floor_strike) contain the resolution
+    // THRESHOLD ("at least X"), which is slightly different from the target.
+    if (m.title && typeof m.title === 'string') {
+        // Match "$70,031.06 target" pattern
+        const targetMatch = m.title.match(/\$?([\d,]+\.?\d*)\s*target/i);
+        if (targetMatch) {
+            const v = parseFloat(targetMatch[1].replace(/,/g, ''));
+            if (v > 40000 && v < 200000) {
+                console.log(`[strike] Extracted $${v} from title target: "${m.title}"`);
+                return v;
             }
-            // If > 200,000 it's likely in cents with fewer digits
-            if (raw > 200000 && raw < 5000000) {
-                const dollars = raw / 100;
-                if (dollars > 400 && dollars < 200000) return dollars;
-            }
-            // Already in dollars
-            if (raw > 40000 && raw < 200000) return raw;
         }
     }
 
-    // ── Priority 2: Parse from text fields ──
+    // ── Priority 2: Extract from yes_sub_title / subtitle ──
+    // These often contain "X or above" which is the target price
+    for (const field of ['yes_sub_title', 'subtitle']) {
+        if (!m[field] || typeof m[field] !== 'string') continue;
+        const text = m[field];
+
+        let match = text.match(/\$?([\d,]+\.?\d*)\s*(or above|or more|or higher)/i);
+        if (match) {
+            const v = parseFloat(match[1].replace(/,/g, ''));
+            if (v > 40000 && v < 200000) {
+                console.log(`[strike] Extracted $${v} from ${field}: "${text}"`);
+                return v;
+            }
+        }
+    }
+
+    // ── Priority 3: Parse the ticker itself ──
+    // KXBTC15M tickers encode the target: e.g. KXBTC15M-26MAR19-T70031
+    // The T-suffix is the target in whole dollars (T70031 = $70,031)
+    // Some tickers use cents: T7003106 = $70,031.06
+    if (m.ticker && typeof m.ticker === 'string') {
+        const tickerMatch = m.ticker.match(/T(\d+)$/);
+        if (tickerMatch) {
+            const raw = parseInt(tickerMatch[1], 10);
+            // If 5+ digits and in BTC dollar range directly
+            if (raw > 40000 && raw < 200000) {
+                console.log(`[strike] Extracted $${raw} from ticker: ${m.ticker}`);
+                return raw;
+            }
+            // If 7+ digits, likely in cents (e.g., 7003106 = $70,031.06)
+            if (raw > 4000000) {
+                const dollars = raw / 100;
+                if (dollars > 40000 && dollars < 200000) {
+                    console.log(`[strike] Extracted $${dollars} from ticker (cents): ${m.ticker}`);
+                    return dollars;
+                }
+            }
+        }
+    }
+
+    // ── Priority 4: Parse from text fields ──
     const textFields = [
         'yes_sub_title', 'subtitle', 'no_sub_title', 'rules_primary',
         'rules_secondary', 'strike_description', 'settlement_sources_description',
@@ -231,13 +265,6 @@ function extractStrike(m) {
 
         // "at least 69991.26" or "at least $69,991.26"
         let match = text.match(/at least \$?([\d,]+\.?\d*)/i);
-        if (match) {
-            const v = parseFloat(match[1].replace(/,/g, ''));
-            if (v > 40000 && v < 200000) return v;
-        }
-
-        // "$70,031.06 target" or "70031.06 target"
-        match = text.match(/\$?([\d,]+\.?\d*)\s*target/i);
         if (match) {
             const v = parseFloat(match[1].replace(/,/g, ''));
             if (v > 40000 && v < 200000) return v;
@@ -256,12 +283,24 @@ function extractStrike(m) {
             const v = parseFloat(match[1].replace(/,/g, ''));
             if (v > 40000 && v < 200000) return v;
         }
+    }
 
-        // Generic: any number in BTC price range in the text
-        match = text.match(/\$?([\d,]+\.?\d*)/);
-        if (match) {
-            const v = parseFloat(match[1].replace(/,/g, ''));
-            if (v > 40000 && v < 200000) return v;
+    // ── Priority 5: Numeric strike fields (least reliable for display) ──
+    // custom_strike/floor_strike may contain the resolution threshold,
+    // not the display strike. Only use as last resort.
+    for (const field of ['custom_strike', 'floor_strike', 'cap_strike']) {
+        if (m[field] != null) {
+            const raw = parseFloat(m[field]);
+            if (isNaN(raw) || raw <= 0) continue;
+            if (raw > 5000000) {
+                const dollars = raw / 100;
+                if (dollars > 40000 && dollars < 200000) return dollars;
+            }
+            if (raw > 200000 && raw < 5000000) {
+                const dollars = raw / 100;
+                if (dollars > 400 && dollars < 200000) return dollars;
+            }
+            if (raw > 40000 && raw < 200000) return raw;
         }
     }
 
@@ -958,6 +997,34 @@ app.get('/api/error-analysis', (req, res) => {
 
 app.get('/api/learned-corrections', (req, res) => {
     res.json(engine.getLearnedCorrections());
+});
+
+// ── Debug: raw Kalshi market data ──
+app.get('/api/debug/kalshi-raw', (req, res) => {
+    const m = state.kalshiMarket;
+    if (!m) return res.json({ error: 'No Kalshi market loaded yet' });
+    res.json({
+        ticker: m.ticker,
+        title: m.title,
+        subtitle: m.subtitle,
+        yes_sub_title: m.yes_sub_title,
+        no_sub_title: m.no_sub_title,
+        custom_strike: m.custom_strike,
+        floor_strike: m.floor_strike,
+        cap_strike: m.cap_strike,
+        strike_type: m.strike_type,
+        rules_primary: m.rules_primary,
+        rules_secondary: m.rules_secondary,
+        settlement_sources_description: m.settlement_sources_description,
+        event_title: m.event_title,
+        close_time: m.close_time,
+        expiration_time: m.expiration_time,
+        // Include ALL keys so we can see any undocumented fields
+        all_keys: Object.keys(m),
+        // Show what extractStrike returns
+        extractedStrike: state.kalshiStrike,
+        brtiPrice: state.brtiPrice,
+    });
 });
 
 // ── Trading endpoints ──
