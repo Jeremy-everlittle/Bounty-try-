@@ -678,6 +678,13 @@ async function fetchAllData() {
                 // Log price ticks (sampled every 30s)
                 decisionLog.logPriceTick({ currentPrice: state.brtiPrice, strike: state.kalshiStrike, periodKey, minutesAhead, history: state.history });
 
+                // ── Auto-trade: mid-period entry ──
+                // If no position yet and updated prediction now has edge, enter
+                if (updatedBetQuality && updatedBetQuality.shouldBet) {
+                    tradeExecutor.onNewPrediction(updated, state.kalshiTicker, state.kalshiStrike, periodKey)
+                        .catch(e => console.error('[trade-executor] Mid-period entry error:', e.message));
+                }
+
                 // ── Auto-trade: evaluate exit (with guaranteed-win protection) ──
                 if (sellSignal) {
                     tradeExecutor.onSellSignal(sellSignal, minutesAhead, updated, state.kalshiStrike, state.brtiPrice).catch(e => console.error('[trade-executor] Sell error:', e.message));

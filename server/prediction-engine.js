@@ -2527,11 +2527,12 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
         return raw;
     }
 
-    // Adaptive EMA alpha — more responsive as time passes (data becomes more relevant)
-    const alpha = minutesAhead <= 1 ? 0.40
-                : minutesAhead <= 2 ? 0.30
-                : minutesAhead <= 5 ? 0.20
-                : 0.15;
+    // Adaptive EMA alpha — more responsive so edges can develop
+    // Was 0.15-0.40; increased to allow faster probability movement
+    const alpha = minutesAhead <= 1 ? 0.60
+                : minutesAhead <= 2 ? 0.50
+                : minutesAhead <= 5 ? 0.40
+                : 0.30;
     stabilityState.smoothedProbability = alpha * raw.probability + (1 - alpha) * stabilityState.smoothedProbability;
     const smoothedP = stabilityState.smoothedProbability;
 
