@@ -2913,20 +2913,39 @@
             }
 
             if (title) {
-                const n = new Notification(icon + ' ' + title, {
-                    body: body,
-                    tag: 'trade-' + trade.time,
-                    renotify: true,
-                    requireInteraction: false,
-                });
-                // Auto-close after 10s
-                setTimeout(() => n.close(), 10000);
+                // Use service worker notifications (works on mobile + background tabs)
+                if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+                    navigator.serviceWorker.ready.then(reg => {
+                        reg.showNotification(icon + ' ' + title, {
+                            body: body,
+                            tag: 'trade-' + trade.time,
+                            renotify: true,
+                            requireInteraction: false,
+                            vibrate: [200, 100, 200],
+                        });
+                    }).catch(() => {
+                        // Fallback to page notification
+                        try { new Notification(icon + ' ' + title, { body, tag: 'trade-' + trade.time }); } catch(e) {}
+                    });
+                } else {
+                    // No service worker — use page notification (desktop)
+                    try {
+                        const n = new Notification(icon + ' ' + title, {
+                            body: body,
+                            tag: 'trade-' + trade.time,
+                            renotify: true,
+                        });
+                        setTimeout(() => n.close(), 10000);
+                    } catch(e) { console.error('Notification failed:', e); }
+                }
             }
         }
 
-        // Register service worker for notification click handling
+        // Register service worker for notification support (especially mobile)
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js').catch(() => {});
+            navigator.serviceWorker.register('/sw.js').then(reg => {
+                console.log('Service worker registered:', reg.scope);
+            }).catch(e => console.warn('Service worker registration failed:', e));
         }
 
         // ── Boot ──────────────────────────────────────────────────────
