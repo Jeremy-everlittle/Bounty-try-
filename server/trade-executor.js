@@ -97,6 +97,74 @@ async function waitForFill(orderId, maxWaitMs = 5000) {
     }
 }
 
+/**
+ * Verify a position actually exists on Kalshi by checking the portfolio API.
+ * Returns the number of contracts we actually hold, or 0 if none.
+ */
+async function verifyPositionOnKalshi(ticker, side) {
+    if (config.paperMode) return -1; // skip verification in paper mode
+    try {
+        const resp = await trading.getPositions();
+        const positions = resp.market_positions || resp.positions || [];
+        for (const pos of positions) {
+            if (pos.ticker === ticker) {
+                // Kalshi returns yes_count/no_count or market_exposure
+                const count = side === 'yes'
+                    ? (pos.yes_count || parseInt(pos.yes_count_fp) || 0)
+                    : (pos.no_count || parseInt(pos.no_count_fp) || 0);
+                console.log(`[trade-executor] Kalshi position check: ${ticker} ${side} = ${count} contracts`);
+                return count;
+            }
+        }
+        console.log(`[trade-executor] Kalshi position check: NO position found for ${ticker}`);
+        return 0;
+    } catch (e) {
+        console.log(`[trade-executor] Position verification failed: ${e.message}`);
+        return -1; // unknown — don't block on verification failure
+    }
+}
+
+/**
+ * Verify balance actually changed after an order.
+ * Returns true if balance decreased (order cost money), false if unchanged.
+ */
+async function verifyBalanceChanged(previousBalanceCents) {
+    if (config.paperMode) return true;
+    try {
+        const resp = await trading.getBalance();
+        const newBalance = resp.balance;
+        const changed = newBalance < previousBalanceCents;
+        console.log(`[trade-executor] Balance check: was ${previousBalanceCents}c, now ${newBalance}c — ${changed ? 'CHANGED' : 'UNCHANGED'}`);
+        return changed;
+    } catch (e) {
+        console.log(`[trade-executor] Balance check failed: ${e.message}`);
+        return true; // don't block on failure
+    }
+}
+
+/**
+ * Ground-truth verification: after the order API claims a fill,
+ * verify via balance change + portfolio positions that it's real.
+ * Returns the verified contract count (0 if phantom fill detected).
+ */
+async function verifyFillIsReal(orderId, ticker, side, claimedFills, balanceBefore) {
+    const balanceChanged = await verifyBalanceChanged(balanceBefore);
+    if (balanceChanged) return claimedFills; // balance moved — fill is real
+
+    // Balance didn't change — cross-check with portfolio
+    const kalshiCount = await verifyPositionOnKalshi(ticker, side);
+    if (kalshiCount === 0) {
+        console.log(`[trade-executor] PHANTOM FILL: Order ${orderId} claims ${claimedFills} fills but balance unchanged & no position. Discarding.`);
+        return 0;
+    }
+    if (kalshiCount > 0) {
+        console.log(`[trade-executor] Using Kalshi position count: ${kalshiCount} (order claimed ${claimedFills})`);
+        return kalshiCount;
+    }
+    // kalshiCount === -1 means verification failed — trust claimed fills
+    return claimedFills;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Daily reset
 // ═══════════════════════════════════════════════════════════════
@@ -262,6 +330,10 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const cappedContracts = await capContractsByBalance(contracts, limitPrice);
     if (cappedContracts <= 0) return;
 
+    // Snapshot balance before order for verification
+    let balanceBefore = 0;
+    try { balanceBefore = (await trading.getBalance()).balance; } catch (e) { /* continue */ }
+
     orderInFlight = true;
     try {
         const result = await trading.placeOrder({
@@ -289,11 +361,19 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         }
 
         const fills = parseOrderFills(order);
-        const filledContracts = fills.filled;
+        let filledContracts = fills.filled;
 
         if (filledContracts === 0) {
             console.log(`[trade-executor] Order ${order.order_id} got 0 fills — no position taken`);
             logTrade('buy_unfilled', { ...tradeInfo, orderId: order.order_id, finalStatus: order.status });
+            return;
+        }
+
+        // ── GROUND-TRUTH VERIFICATION ──
+        // Don't trust order response alone. Check balance + portfolio to confirm.
+        filledContracts = await verifyFillIsReal(order.order_id, kalshiTicker, side, filledContracts, balanceBefore);
+        if (filledContracts === 0) {
+            logTrade('buy_phantom', { ...tradeInfo, orderId: order.order_id, claimedFills: fills.filled, orderStatus: order.status });
             return;
         }
 
@@ -600,6 +680,9 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
     const cappedAdd = await capContractsByBalance(addContracts, currentLimitPrice);
     if (cappedAdd <= 0) return;
 
+    let balanceBefore = 0;
+    try { balanceBefore = (await trading.getBalance()).balance; } catch (e) { /* continue */ }
+
     orderInFlight = true;
     try {
         const result = await trading.placeOrder({
@@ -624,7 +707,11 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
             logTrade('dip_buy_unfilled', { ...tradeInfo, orderId: order.order_id });
             return;
         }
-        const filledContracts = fills.filled;
+        let filledContracts = await verifyFillIsReal(order.order_id, kalshiTicker, currentPosition.side, fills.filled, balanceBefore);
+        if (filledContracts === 0) {
+            logTrade('dip_buy_phantom', { ...tradeInfo, orderId: order.order_id, claimedFills: fills.filled });
+            return;
+        }
         const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
         const addCost = filledContracts * currentLimitPrice;
         const newTotal = currentContracts + filledContracts;
@@ -751,6 +838,9 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
     const cappedContracts = await capContractsByBalance(contracts, limitPrice);
     if (cappedContracts <= 0) return;
 
+    let balanceBefore = 0;
+    try { balanceBefore = (await trading.getBalance()).balance; } catch (e) { /* continue */ }
+
     orderInFlight = true;
     try {
         const result = await trading.placeOrder({
@@ -775,7 +865,11 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
             logTrade(strategy + '_unfilled', { ...tradeInfo, orderId: order.order_id });
             return;
         }
-        const filledContracts = fills.filled;
+        let filledContracts = await verifyFillIsReal(order.order_id, ticker, side, fills.filled, balanceBefore);
+        if (filledContracts === 0) {
+            logTrade(strategy + '_phantom', { ...tradeInfo, orderId: order.order_id, claimedFills: fills.filled });
+            return;
+        }
         if (currentPosition && currentPosition.periodKey === periodKey) {
             const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
             const addCost = filledContracts * limitPrice;
@@ -895,6 +989,9 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
     const cappedContracts = await capContractsByBalance(contracts, limitPrice);
     if (cappedContracts <= 0) return;
 
+    let balanceBefore = 0;
+    try { balanceBefore = (await trading.getBalance()).balance; } catch (e) { /* continue */ }
+
     orderInFlight = true;
     try {
         const result = await trading.placeOrder({
@@ -919,7 +1016,11 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
             logTrade('re_entry_unfilled', { ...tradeInfo, orderId: order.order_id });
             return;
         }
-        const filledContracts = fills.filled;
+        let filledContracts = await verifyFillIsReal(order.order_id, kalshiTicker, origSide, fills.filled, balanceBefore);
+        if (filledContracts === 0) {
+            logTrade('re_entry_phantom', { ...tradeInfo, orderId: order.order_id, claimedFills: fills.filled });
+            return;
+        }
         currentPosition = {
             ticker: kalshiTicker,
             side: origSide,
