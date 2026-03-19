@@ -1080,6 +1080,16 @@ app.post('/api/trading/force-bet', async (req, res) => {
     }
 });
 
+app.post('/api/trading/press-bet', async (req, res) => {
+    const contracts = req.body?.contracts || null;
+    try {
+        const result = await tradeExecutor.pressBet(contracts);
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ ok: false, reason: err.message });
+    }
+});
+
 app.post('/api/trading/mode', (req, res) => {
     const paperMode = req.body?.paperMode !== false;
     tradeExecutor.setPaperMode(paperMode);

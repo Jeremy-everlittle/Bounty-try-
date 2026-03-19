@@ -799,8 +799,9 @@
                 <button class="trading-btn trading-btn-danger" id="trading-kill-btn" onclick="toggleKillSwitch()">Kill Switch</button>
                 <button class="trading-btn" id="notif-btn" onclick="toggleNotifications()" style="font-size:12px">Notifications: OFF</button>
             </div>
-            <div style="margin-top:6px;">
-                <button class="trading-btn" id="force-bet-btn" onclick="forceBet()" style="width:100%;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(136,87,255,0.15);border-color:rgba(136,87,255,0.4);color:#a371f7;">FORCE BET</button>
+            <div style="margin-top:6px;display:flex;gap:6px;">
+                <button class="trading-btn" id="force-bet-btn" onclick="forceBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(136,87,255,0.15);border-color:rgba(136,87,255,0.4);color:#a371f7;">FORCE BET</button>
+                <button class="trading-btn" id="press-bet-btn" onclick="pressBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(56,139,253,0.15);border-color:rgba(56,139,253,0.4);color:#58a6ff;display:none;">PRESS BET</button>
             </div>
         </div>
 
@@ -1881,8 +1882,9 @@
             // Re-render combined period history when trading data updates
             renderPeriodHistory();
 
-            // Force bet button state
+            // Force bet / Press bet button state
             const forceBtn = document.getElementById('force-bet-btn');
+            const pressBtn = document.getElementById('press-bet-btn');
             if (forceBtn && !forceBtn.disabled) {
                 if (ts.currentPosition) {
                     forceBtn.textContent = 'POSITION OPEN';
@@ -1892,6 +1894,13 @@
                     forceBtn.textContent = 'FORCE BET';
                     forceBtn.style.opacity = '1';
                     forceBtn.style.pointerEvents = 'auto';
+                }
+            }
+            if (pressBtn) {
+                if (ts.currentPosition && !pressBtn.disabled) {
+                    pressBtn.style.display = '';
+                } else if (!ts.currentPosition) {
+                    pressBtn.style.display = 'none';
                 }
             }
 
@@ -1989,6 +1998,49 @@
             } catch (e) {
                 alert('Force bet error: ' + e.message);
                 btn.textContent = 'FORCE BET';
+                btn.disabled = false;
+            }
+        }
+
+        async function pressBet() {
+            const ts = serverData && serverData.tradingStatus;
+            if (!ts || !ts.currentPosition) {
+                alert('No open position to press.');
+                return;
+            }
+            const p = ts.currentPosition;
+            const currentCount = p.totalContracts || p.contracts;
+            if (!confirm('Add more contracts to your ' + p.side.toUpperCase() + ' position? (currently ' + currentCount + 'x @ ' + p.entryPrice + '\u00A2)')) return;
+            const btn = document.getElementById('press-bet-btn');
+            btn.textContent = 'PRESSING...';
+            btn.disabled = true;
+            try {
+                const resp = await fetch('/api/trading/press-bet', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const result = await resp.json();
+                if (result.ok) {
+                    btn.textContent = '+' + result.contracts + 'x @ ' + result.entryPrice + '\u00A2 = ' + result.totalContracts + 'x';
+                    btn.style.background = 'rgba(63,185,80,0.2)';
+                    btn.style.color = '#3fb950';
+                    btn.style.borderColor = 'rgba(63,185,80,0.4)';
+                    setTimeout(() => {
+                        btn.textContent = 'PRESS BET';
+                        btn.style.background = 'rgba(56,139,253,0.15)';
+                        btn.style.color = '#58a6ff';
+                        btn.style.borderColor = 'rgba(56,139,253,0.4)';
+                        btn.disabled = false;
+                    }, 5000);
+                } else {
+                    alert('Press bet failed: ' + (result.reason || 'Unknown error'));
+                    btn.textContent = 'PRESS BET';
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                alert('Press bet error: ' + e.message);
+                btn.textContent = 'PRESS BET';
                 btn.disabled = false;
             }
         }

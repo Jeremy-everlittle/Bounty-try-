@@ -1300,6 +1300,110 @@ function getStatus() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Press Bet — add contracts to an existing open position
+// ═══════════════════════════════════════════════════════════════
+
+async function pressBet(addContracts) {
+    if (!currentPosition) {
+        return { ok: false, reason: 'No open position to press' };
+    }
+
+    const ticker = currentPosition.ticker;
+    const side = currentPosition.side;
+    const periodKey = currentPosition.periodKey;
+    const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
+    const contractsToAdd = addContracts || Math.max(1, config.baseContracts);
+
+    console.log(`[trade-executor] PRESS BET: adding ${contractsToAdd}x ${side.toUpperCase()} to existing ${currentContracts}x on ${ticker}`);
+
+    const tradeInfo = {
+        ticker, side, action: 'buy', contracts: contractsToAdd, periodKey,
+        direction: side === 'yes' ? 'UP' : 'DOWN',
+        strategy: 'press_bet', existingContracts: currentContracts,
+    };
+
+    if (config.paperMode) {
+        const limitPrice = currentPosition.entryPrice; // use same entry price
+        const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+        const addCost = contractsToAdd * limitPrice;
+        const newTotal = currentContracts + contractsToAdd;
+        currentPosition.totalCostCents = oldCost + addCost;
+        currentPosition.totalContracts = newTotal;
+        setThought('bought', `Pressed +${contractsToAdd}x ${side.toUpperCase()} @ ${limitPrice}c (now ${newTotal}x)`, { contracts: newTotal });
+        logTrade('buy', { ...tradeInfo, limitPrice, fillStatus: 'paper-press', filledContracts: contractsToAdd });
+        dailyStats.tradeCount++;
+        return { ok: true, side, contracts: contractsToAdd, entryPrice: limitPrice, totalContracts: newTotal, mode: 'paper' };
+    }
+
+    // Live: get price from orderbook and retry like forceBet
+    const theoreticalPrice = currentPosition.entryPrice; // start from current entry
+    const MAX_ATTEMPTS = 3;
+    const PRICE_BUMP = 3;
+    let minutesRemaining = 15;
+    try {
+        const now = new Date();
+        const mins = now.getMinutes();
+        const periodEnd = (Math.floor(mins / 15) + 1) * 15;
+        minutesRemaining = Math.max(1, periodEnd - mins);
+    } catch(e) { /* fallback */ }
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        const priceEscalation = (attempt - 1) * PRICE_BUMP;
+        const limitPrice = Math.min(95, (await getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaining)) + priceEscalation);
+        const cappedContracts = await capContractsByBalance(contractsToAdd, limitPrice);
+        if (cappedContracts <= 0) {
+            return { ok: false, reason: 'Insufficient balance to press bet' };
+        }
+
+        console.log(`[trade-executor] PRESS BET attempt ${attempt}/${MAX_ATTEMPTS}: +${cappedContracts}x ${side.toUpperCase()} @ ${limitPrice}c`);
+
+        orderInFlight = true;
+        try {
+            const result = await trading.placeOrder({
+                ticker, side, action: 'buy', count: cappedContracts,
+                yesPrice: side === 'yes' ? limitPrice : undefined,
+                noPrice: side === 'no' ? limitPrice : undefined,
+            });
+
+            let order = result.order || {};
+            if (order.status === 'canceled' || order.status === 'rejected') {
+                if (attempt === MAX_ATTEMPTS) return { ok: false, reason: `Order ${order.status} after ${MAX_ATTEMPTS} attempts` };
+                await sleep(1000);
+                continue;
+            }
+
+            if (order.status === 'resting' || order.status === 'open') {
+                order = await waitForFill(order.order_id, order, 8000);
+            }
+
+            const fills = parseOrderFills(order);
+            let filledContracts = fills.filled;
+            if (filledContracts === 0) {
+                if (attempt === MAX_ATTEMPTS) return { ok: false, reason: `No fills after ${MAX_ATTEMPTS} attempts` };
+                await sleep(1000);
+                continue;
+            }
+
+            const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+            const addCost = filledContracts * limitPrice;
+            const newTotal = currentContracts + filledContracts;
+            currentPosition.totalCostCents = oldCost + addCost;
+            currentPosition.totalContracts = newTotal;
+            setThought('bought', `Pressed +${filledContracts}x ${side.toUpperCase()} @ ${limitPrice}c (now ${newTotal}x)`, { contracts: newTotal });
+            logTrade('buy', { ...tradeInfo, limitPrice, orderId: order.order_id, fillStatus: order.status, filledContracts, attempt });
+            dailyStats.tradeCount++;
+            return { ok: true, side, contracts: filledContracts, entryPrice: limitPrice, totalContracts: newTotal, mode: 'live', orderId: order.order_id, attempts: attempt };
+        } catch (err) {
+            if (attempt === MAX_ATTEMPTS) return { ok: false, reason: err.message };
+            await sleep(1000);
+        } finally {
+            orderInFlight = false;
+        }
+    }
+    return { ok: false, reason: 'Press bet exhausted all attempts' };
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Force Bet — manual override, bypasses all quality/Kelly checks
 // ═══════════════════════════════════════════════════════════════
 
@@ -1449,5 +1553,6 @@ module.exports = {
     getStatus,
     onTradeNotify,
     forceBet,
+    pressBet,
     config, // exposed for startup logging
 };
