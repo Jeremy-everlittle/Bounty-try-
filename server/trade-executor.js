@@ -1596,6 +1596,100 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
     return { ok: false, reason: 'Force bet exhausted all retry attempts' };
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Force Sell — manual override, immediately sell entire position
+// ═══════════════════════════════════════════════════════════════
+
+async function forceSell() {
+    if (!currentPosition) {
+        return { ok: false, reason: 'No open position to sell' };
+    }
+
+    const contracts = currentPosition.totalContracts || currentPosition.contracts;
+    const side = currentPosition.side;
+    const ticker = currentPosition.ticker;
+    const periodKey = currentPosition.periodKey;
+
+    console.log(`[trade-executor] FORCE SELL: ${contracts}x ${side.toUpperCase()} on ${ticker}`);
+
+    const tradeInfo = {
+        ticker, side, contracts, action: 'sell', periodKey,
+        strategy: 'force_sell', reason: 'manual_force_sell',
+    };
+
+    if (config.paperMode) {
+        const sellPrice = Math.max(1, currentPosition.entryPrice - 5);
+        console.log(`[trade-executor] PAPER FORCE SELL: ${contracts}x ${side.toUpperCase()} @ ~${sellPrice}c`);
+        logTrade('sell', { ...tradeInfo, limitPrice: sellPrice, fillStatus: 'paper-force-sell' });
+        dailyStats.tradeCount++;
+        soldThisPeriod = { periodKey, side, ticker, soldAt: Date.now(), reason: 'force_sell' };
+        currentPosition = null;
+        return { ok: true, side, contracts, mode: 'paper' };
+    }
+
+    // Live: aggressive sell — try multiple price levels
+    if (orderInFlight) {
+        return { ok: false, reason: 'Another order is in flight — wait a moment' };
+    }
+
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        // Start aggressive, get more desperate each attempt
+        const discount = 5 + (attempt - 1) * 10; // 5c, 15c, 25c discount
+        const limitPrice = Math.max(1, currentPosition.entryPrice - discount);
+
+        console.log(`[trade-executor] FORCE SELL attempt ${attempt}/${MAX_ATTEMPTS}: ${contracts}x ${side.toUpperCase()} @ ${limitPrice}c`);
+
+        orderInFlight = true;
+        try {
+            const result = await trading.placeOrder({
+                ticker, side, action: 'sell', count: contracts,
+                yesPrice: side === 'yes' ? limitPrice : undefined,
+                noPrice: side === 'no' ? limitPrice : undefined,
+            });
+
+            let order = result.order || {};
+            if (order.status === 'resting' || order.status === 'open') {
+                order = await waitForFill(order.order_id, order, 5000);
+            }
+
+            const fills = parseOrderFills(order);
+            if (fills.filled === 0) {
+                if (attempt === MAX_ATTEMPTS) {
+                    logTrade('sell_unfilled', { ...tradeInfo, orderId: order.order_id });
+                    return { ok: false, reason: 'Could not fill sell after ' + MAX_ATTEMPTS + ' attempts' };
+                }
+                await sleep(500);
+                continue;
+            }
+
+            if (fills.filled < contracts) {
+                currentPosition.contracts -= fills.filled;
+                if (currentPosition.totalContracts) currentPosition.totalContracts -= fills.filled;
+                logTrade('sell_partial', { ...tradeInfo, orderId: order.order_id, filledContracts: fills.filled, remaining: currentPosition.contracts });
+                dailyStats.tradeCount++;
+                return { ok: true, side, contracts: fills.filled, remaining: currentPosition.contracts, mode: 'live', partial: true };
+            }
+
+            // Fully sold
+            logTrade('sell', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts: fills.filled });
+            dailyStats.tradeCount++;
+            soldThisPeriod = { periodKey, side, ticker, soldAt: Date.now(), reason: 'force_sell' };
+            currentPosition = null;
+            return { ok: true, side, contracts: fills.filled, mode: 'live', orderId: order.order_id };
+        } catch (err) {
+            if (attempt === MAX_ATTEMPTS) {
+                logTrade('sell_error', { ...tradeInfo, error: err.message });
+                return { ok: false, reason: err.message };
+            }
+            await sleep(500);
+        } finally {
+            orderInFlight = false;
+        }
+    }
+    return { ok: false, reason: 'Force sell exhausted all attempts' };
+}
+
 module.exports = {
     onNewPrediction,
     onSellSignal,
@@ -1610,5 +1704,6 @@ module.exports = {
     onTradeNotify,
     forceBet,
     pressBet,
+    forceSell,
     config, // exposed for startup logging
 };

@@ -1090,6 +1090,15 @@ app.post('/api/trading/press-bet', async (req, res) => {
     }
 });
 
+app.post('/api/trading/force-sell', async (req, res) => {
+    try {
+        const result = await tradeExecutor.forceSell();
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ ok: false, reason: err.message });
+    }
+});
+
 app.post('/api/trading/config', (req, res) => {
     const updates = req.body;
     if (!updates || typeof updates !== 'object') {

@@ -128,6 +128,12 @@
             max-width: 400px;
             margin-bottom: 16px;
         }
+        #current-card {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
 
         .card-label {
             font-size: 12px;
@@ -732,39 +738,43 @@
 
         <div class="bet-badge" id="bet-badge">--</div>
 
-        <div class="pred-row original">
-            <div class="pred-row-label">Original</div>
-            <div class="price predicted-price" id="original-predicted-price">--</div>
-            <div id="original-predicted-change"></div>
-            <div id="original-risk-badge"></div>
-            <div class="confidence" id="original-confidence">
-                <div class="confidence-label">Original Confidence</div>
-                <div class="confidence-bar">
-                    <div class="confidence-fill" id="original-confidence-fill" style="width: 0%"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;" id="pred-columns">
+            <div class="pred-row original" style="border:1px solid rgba(139,148,158,0.1);border-radius:8px;padding:8px;">
+                <div class="pred-row-label">Original</div>
+                <div class="price predicted-price" id="original-predicted-price" style="font-size:20px;">--</div>
+                <div id="original-predicted-change"></div>
+                <div id="original-risk-badge"></div>
+                <div class="confidence" id="original-confidence">
+                    <div class="confidence-label">Confidence</div>
+                    <div class="confidence-bar">
+                        <div class="confidence-fill" id="original-confidence-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="confidence-value" id="original-confidence-value">--</div>
                 </div>
-                <div class="confidence-value" id="original-confidence-value">--</div>
             </div>
-        </div>
 
-        <div class="pred-row updated" id="updated-row" style="display:none;">
-            <div class="pred-row-label">Updated</div>
-            <div class="bet-badge updated-bet-badge" id="updated-bet-badge"></div>
-            <div class="price predicted-price updated-color" id="updated-predicted-price">--</div>
-            <div id="updated-predicted-change"></div>
-            <div id="updated-risk-badge"></div>
-            <div class="confidence" id="updated-confidence">
-                <div class="confidence-label">Updated Confidence</div>
-                <div class="confidence-bar">
-                    <div class="confidence-fill" id="updated-confidence-fill" style="width: 0%"></div>
+            <div class="pred-row updated" id="updated-row" style="display:none;border:1px solid rgba(139,148,158,0.1);border-radius:8px;padding:8px;">
+                <div class="pred-row-label">Updated</div>
+                <div class="bet-badge updated-bet-badge" id="updated-bet-badge"></div>
+                <div class="price predicted-price updated-color" id="updated-predicted-price" style="font-size:20px;">--</div>
+                <div id="updated-predicted-change"></div>
+                <div id="updated-risk-badge"></div>
+                <div class="confidence" id="updated-confidence">
+                    <div class="confidence-label">Confidence</div>
+                    <div class="confidence-bar">
+                        <div class="confidence-fill" id="updated-confidence-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="confidence-value" id="updated-confidence-value">--</div>
                 </div>
-                <div class="confidence-value" id="updated-confidence-value">--</div>
             </div>
         </div>
 
         <div id="prebuy-signal-badge"></div>
         <div id="sell-signal-badge"></div>
+    </div>
 
-        <!-- Auto-Trading Panel -->
+    <!-- Auto-Trading Card (separate) -->
+    <div class="card" id="trading-card-wrapper">
         <div class="trading-panel" id="trading-panel">
             <div class="trading-panel-header">
                 <span class="trading-panel-title">Auto Trading</span>
@@ -802,6 +812,7 @@
             <div style="margin-top:6px;display:flex;gap:6px;">
                 <button class="trading-btn" id="force-bet-btn" onclick="forceBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(136,87,255,0.15);border-color:rgba(136,87,255,0.4);color:#a371f7;">FORCE BET</button>
                 <button class="trading-btn" id="press-bet-btn" onclick="pressBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(56,139,253,0.15);border-color:rgba(56,139,253,0.4);color:#58a6ff;display:none;">PRESS BET</button>
+                <button class="trading-btn trading-btn-danger" id="force-sell-btn" onclick="forceSellPosition()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(248,81,73,0.15);border-color:rgba(248,81,73,0.4);color:#f85149;display:none;">FORCE SELL</button>
             </div>
             <!-- Settings gear toggle -->
             <div style="margin-top:8px;">
@@ -1802,13 +1813,16 @@
         function renderTradingPanel() {
             const ts = serverData && serverData.tradingStatus ? serverData.tradingStatus : null;
             const panel = document.getElementById('trading-panel');
+            const panelWrapper = document.getElementById('trading-card-wrapper');
             if (!panel) return;
 
             if (!ts) {
                 panel.style.display = 'none';
+                if (panelWrapper) panelWrapper.style.display = 'none';
                 return;
             }
             panel.style.display = '';
+            if (panelWrapper) panelWrapper.style.display = '';
 
             // Environment toggle
             const currentEnv = serverData.kalshiEnvironment || 'demo';
@@ -1940,6 +1954,14 @@
                     pressBtn.style.display = '';
                 } else if (!ts.currentPosition) {
                     pressBtn.style.display = 'none';
+                }
+            }
+            const forceSellBtn = document.getElementById('force-sell-btn');
+            if (forceSellBtn) {
+                if (ts.currentPosition && !forceSellBtn.disabled) {
+                    forceSellBtn.style.display = '';
+                } else if (!ts.currentPosition) {
+                    forceSellBtn.style.display = 'none';
                 }
             }
 
@@ -2086,6 +2108,51 @@
             } catch (e) {
                 showToast(friendlyError(e.message), 'error');
                 btn.textContent = 'PRESS BET';
+                btn.disabled = false;
+            }
+        }
+
+        async function forceSellPosition() {
+            const ts = serverData && serverData.tradingStatus;
+            if (!ts || !ts.currentPosition) {
+                showToast('No open position to sell.', 'error');
+                return;
+            }
+            const p = ts.currentPosition;
+            const currentCount = p.totalContracts || p.contracts;
+            if (!confirm('FORCE SELL ' + currentCount + 'x ' + p.side.toUpperCase() + ' position immediately?')) return;
+            const btn = document.getElementById('force-sell-btn');
+            btn.textContent = 'SELLING...';
+            btn.disabled = true;
+            try {
+                const resp = await fetch('/api/trading/force-sell', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const result = await resp.json();
+                if (result.ok) {
+                    showToast('Position sold: ' + result.contracts + 'x ' + result.side.toUpperCase() + (result.partial ? ' (partial)' : ''), 'success');
+                    btn.textContent = 'SOLD';
+                    btn.style.background = 'rgba(63,185,80,0.2)';
+                    btn.style.color = '#3fb950';
+                    btn.style.borderColor = 'rgba(63,185,80,0.4)';
+                    setTimeout(() => {
+                        btn.textContent = 'FORCE SELL';
+                        btn.style.background = 'rgba(248,81,73,0.15)';
+                        btn.style.color = '#f85149';
+                        btn.style.borderColor = 'rgba(248,81,73,0.4)';
+                        btn.disabled = false;
+                        btn.style.display = 'none';
+                    }, 3000);
+                } else {
+                    showToast(friendlyError(result.reason), 'error');
+                    btn.textContent = 'FORCE SELL';
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                showToast(friendlyError(e.message), 'error');
+                btn.textContent = 'FORCE SELL';
                 btn.disabled = false;
             }
         }
