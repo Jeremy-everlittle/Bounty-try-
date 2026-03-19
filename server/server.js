@@ -183,12 +183,41 @@ async function fetchKalshiData() {
             console.log(`[kalshi] Detail fetch failed for ${best.ticker}: ${e.message}`);
         }
 
-        // Extract strike
-        const strike = extractStrike(detailedMarket);
+        // Try extracting strike from the demo API response first
+        let strike = extractStrike(detailedMarket);
+
+        // If demo API didn't have the strike, try the production API as fallback
+        // (production API may have more complete data but might be blocked)
+        if (!strike) {
+            try {
+                const prodUrl = 'https://trading-api.kalshi.com/trade-api/v2/markets/' + best.ticker;
+                const controller2 = new AbortController();
+                const timer2 = setTimeout(() => controller2.abort(), 5000);
+                const res2 = await fetch(prodUrl, { signal: controller2.signal });
+                clearTimeout(timer2);
+                if (res2.ok) {
+                    const prodDetail = await res2.json();
+                    if (prodDetail && prodDetail.market) {
+                        strike = extractStrike(prodDetail.market);
+                        if (strike) {
+                            console.log(`[kalshi] Got strike=$${strike} from production API fallback`);
+                            detailedMarket = prodDetail.market; // use richer data
+                        }
+                    }
+                }
+            } catch (e) {
+                // Production API blocked/unavailable — that's fine, BRTI fallback handles it
+            }
+        }
+
         const closeTime = new Date(best.close_time || best.expiration_time).toISOString();
 
-        // Debug: log ALL fields from the market object so we can see what's available
-        console.log(`[kalshi-debug] ticker=${best.ticker} | strike=${strike} | title=${detailedMarket.title} | custom_strike=${detailedMarket.custom_strike} | floor_strike=${detailedMarket.floor_strike} | cap_strike=${detailedMarket.cap_strike} | yes_sub_title=${detailedMarket.yes_sub_title} | rules_primary=${(detailedMarket.rules_primary || '').substring(0, 150)} | all_keys=[${Object.keys(detailedMarket).join(',')}]`);
+        // Reduce log spam — only log debug every 6th cycle (~60s)
+        if (!fetchKalshiData._logCounter) fetchKalshiData._logCounter = 0;
+        fetchKalshiData._logCounter++;
+        if (fetchKalshiData._logCounter % 6 === 1) {
+            console.log(`[kalshi-debug] ticker=${best.ticker} | strike=${strike} | yes_sub_title=${detailedMarket.yes_sub_title} | source=${strike ? 'api' : 'none (BRTI fallback will be used)'}`);
+        }
 
         return { market: detailedMarket, strike, closeTime, ticker: best.ticker };
     } catch (e) {
@@ -435,7 +464,8 @@ const state = {
     brtiSources: '',
     kalshiStrike: null,
     _lastStrikePeriodKey: null,  // tracks which period the strike was locked for
-    _strikeSource: null,         // 'api' when from Kalshi, null when waiting
+    _strikeSource: null,         // 'api' or 'brti' — tracks where strike came from
+    _brtiStrikeBuffer: [],       // BRTI readings collected before period start for averaging
     kalshiCloseTime: null,
     kalshiTicker: null,
     kalshiMarket: null,
@@ -520,28 +550,49 @@ async function fetchAllData() {
             state.kalshiTicker = k.ticker;
             state.kalshiMarket = k.market;
 
-            // Strike management: ONLY use the Kalshi API strike.
-            // No fallbacks — if the API says "TBD", we wait.
+            // ── Strike Management ──
+            // Kalshi's "BTC Up or Down" market uses the 60-second BRTI
+            // average just BEFORE the window opens as the strike.
+            // The demo API never populates this (yes_sub_title stays "TBD").
+            // Strategy:
+            //   1. If Kalshi API provides a strike → use it (production API)
+            //   2. Otherwise, use the BRTI reading at period start as strike
+            //      (this closely approximates Kalshi's 60s BRTI average)
+            //   3. Lock the strike for the entire 15-min period
+            //   4. If API strike appears later, upgrade to it
             const currentPeriodKey = getPeriodKey();
             const isNewPeriod = currentPeriodKey !== state._lastStrikePeriodKey;
 
             if (isNewPeriod) {
-                // New period — reset strike (will be null until Kalshi sets it)
-                state.kalshiStrike = null;
-                state._strikeSource = null;
+                // New period — lock BRTI as strike immediately
+                // Use the average of recent BRTI readings if available
+                const prevStrike = state.kalshiStrike;
+                if (state._brtiStrikeBuffer.length >= 3) {
+                    // Average recent readings (approximates Kalshi's 60s BRTI avg)
+                    const avg = state._brtiStrikeBuffer.reduce((a, b) => a + b, 0) / state._brtiStrikeBuffer.length;
+                    state.kalshiStrike = avg;
+                    console.log(`[strike] Period ${currentPeriodKey}: BRTI avg strike=$${avg.toFixed(2)} (${state._brtiStrikeBuffer.length} samples)`);
+                } else if (state.brtiPrice) {
+                    state.kalshiStrike = state.brtiPrice;
+                    console.log(`[strike] Period ${currentPeriodKey}: BRTI instant strike=$${state.brtiPrice.toFixed(2)}`);
+                }
+                state._strikeSource = 'brti';
                 state._lastStrikePeriodKey = currentPeriodKey;
-                console.log(`[strike] New period ${currentPeriodKey} — waiting for Kalshi API strike`);
+                state._brtiStrikeBuffer = []; // reset for next period
             }
 
-            if (k.strike) {
-                // Kalshi API returned a real strike
-                if (state._strikeSource !== 'api' || state.kalshiStrike !== k.strike) {
-                    state.kalshiStrike = k.strike;
-                    state._strikeSource = 'api';
-                    console.log(`[strike] Got strike=$${k.strike.toFixed(2)} for period ${currentPeriodKey} from Kalshi API`);
-                }
-            } else if (!state.kalshiStrike) {
-                console.log(`[strike] Kalshi API returned no strike for ${currentPeriodKey} (yes_sub_title="${k.market?.yes_sub_title || 'N/A'}")`);
+            // Always collect BRTI readings for the next period's strike
+            if (state.brtiPrice) {
+                state._brtiStrikeBuffer.push(state.brtiPrice);
+                // Keep last ~60s of readings (6 readings at 10s interval)
+                if (state._brtiStrikeBuffer.length > 12) state._brtiStrikeBuffer.shift();
+            }
+
+            // If Kalshi API provides a real strike, upgrade from BRTI fallback
+            if (k.strike && state._strikeSource !== 'api') {
+                state.kalshiStrike = k.strike;
+                state._strikeSource = 'api';
+                console.log(`[strike] Upgraded to API strike=$${k.strike.toFixed(2)} for ${currentPeriodKey}`);
             }
         }
 
