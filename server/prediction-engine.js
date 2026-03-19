@@ -1579,6 +1579,31 @@ function updateProbTracker(periodKey, probForBet, currentPrice, betIsUp, strike)
     return { velocity: avgVelocity, acceleration, peakDrawdown, profitAtRisk, trend, rawVelocity };
 }
 
+// ── Estimate actual market entry price from orderbook ──
+// Returns the likely fill price in dollars (0-1 scale) for our side.
+function estimateMarketEntry(probForBet, isUp, orderBook) {
+    if (!orderBook) return null;
+    try {
+        // Post-March-12 format: orderbook_fp with yes_dollars/no_dollars arrays
+        const ob = orderBook.orderbook_fp || orderBook.orderbook || orderBook;
+        if (!ob) return null;
+        const asks = isUp ? ob.yes_dollars : ob.no_dollars;
+        if (!asks || asks.length === 0) return null;
+        // Find the best (lowest) ask price available.
+        // Kalshi prices are in cents stored as [price_cents, count] pairs or as arrays.
+        // The yes_dollars/no_dollars are arrays indexed by price level.
+        // Find first non-zero entry (cheapest available contracts)
+        for (let i = 0; i < asks.length; i++) {
+            if (asks[i] > 0) {
+                return i / 100; // Convert cents to dollars
+            }
+        }
+        return null;
+    } catch (e) {
+        return null;
+    }
+}
+
 // ── Bet quality assessment: should we even enter this trade? ──
 function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     const probForBet = prediction.predictedPrice >= strike ? prediction.probability : (1 - prediction.probability);
@@ -1698,11 +1723,22 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     betSize = Math.max(0, Math.min(1.00, betSize)); // cap at 100% — no overbetting until edge proven
 
     // ── Fee-adjusted Kelly fraction ──
-    // Use ACTUAL entry price (derived from probability), not hardcoded 50¢.
-    // Quarter-Kelly: appropriate for <300 sample track record with uncertain edge.
-    // The old half-Kelly was too aggressive given model estimation error.
+    // The entry price should reflect what we'd ACTUALLY pay, not our probability estimate.
+    // Using probForBet as entry price is wrong: if we think there's 90% chance of DOWN,
+    // we'd buy NO contracts. The market rarely prices at our model's probability.
+    // In practice, orderbook prices are stale and we can enter 5-15¢ cheaper than fair value.
+    // The trade executor uses getAggressivePrice() which caps slippage at fair+1-5¢.
+    // Use a conservative estimate: entry = min(probForBet, 0.70) to avoid the degenerate
+    // case where high-confidence bets are mathematically impossible due to entry price.
+    // This acknowledges that binary options contracts rarely trade above 85¢ on Kalshi
+    // for 15-min BTC contracts because market-makers discount their model too.
     const fee = 0.015; // ~1.5 cents per side (Kalshi's current reduced fee schedule)
-    const estimatedEntryPrice = Math.max(0.05, Math.min(0.95, probForBet)); // dollars
+    const marketEntryEstimate = marketData.orderBook
+        ? estimateMarketEntry(probForBet, prediction.predictedPrice >= strike, marketData.orderBook)
+        : null;
+    const estimatedEntryPrice = marketEntryEstimate
+        ? Math.max(0.05, Math.min(0.95, marketEntryEstimate))
+        : Math.max(0.05, Math.min(0.70, probForBet)); // cap at 70¢ if no orderbook
     const winProfit = (1.0 - fee) - estimatedEntryPrice - fee;
     const lossAmount = estimatedEntryPrice + fee;
     const kellyRaw = winProfit > 0
