@@ -38,6 +38,63 @@ const dailyStats = {
 
 const tradeLog = [];           // recent trades for dashboard (max 100)
 const MAX_TRADE_LOG = 100;
+const pendingOrders = [];      // orders placed but not yet confirmed filled
+
+// ── Fill verification helpers ──
+// Kalshi deprecated integer count fields (March 12, 2026).
+// Use _fp string fields ("10.00") with fallback to legacy integers.
+
+function parseOrderFills(order) {
+    const filled = parseFloat(order.fill_count_fp) || order.fill_count || 0;
+    const remaining = parseFloat(order.remaining_count_fp) || order.remaining_count || 0;
+    const initial = parseFloat(order.initial_count_fp) || order.initial_count || order.count || 0;
+    return { filled: Math.round(filled), remaining: Math.round(remaining), initial: Math.round(initial) };
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/**
+ * Wait for an order to fill, polling up to maxWaitMs.
+ * Returns the final order state. Cancels if still resting after timeout.
+ */
+async function waitForFill(orderId, maxWaitMs = 5000) {
+    const pollInterval = 1000;
+    const maxPolls = Math.ceil(maxWaitMs / pollInterval);
+
+    for (let i = 0; i < maxPolls; i++) {
+        await sleep(pollInterval);
+        try {
+            const resp = await trading.getOrder(orderId);
+            const order = resp.order || resp;
+            if (order.status === 'executed' || order.status === 'canceled' || order.status === 'rejected') {
+                return order;
+            }
+            // Check if partially filled
+            const fills = parseOrderFills(order);
+            if (fills.remaining === 0 && fills.filled > 0) {
+                return order; // fully filled even if status hasn't updated
+            }
+        } catch (e) {
+            console.log(`[trade-executor] Poll error for order ${orderId}: ${e.message}`);
+        }
+    }
+
+    // Timed out — cancel the resting order and return whatever filled
+    console.log(`[trade-executor] Order ${orderId} still resting after ${maxWaitMs}ms — cancelling`);
+    try {
+        await trading.cancelOrder(orderId);
+    } catch (e) {
+        // May fail if it filled between our check and cancel — that's fine
+        console.log(`[trade-executor] Cancel attempt for ${orderId}: ${e.message}`);
+    }
+    // Fetch final state after cancel
+    try {
+        const resp = await trading.getOrder(orderId);
+        return resp.order || resp;
+    } catch (e) {
+        return { status: 'canceled', fill_count_fp: '0' };
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Daily reset
@@ -185,9 +242,6 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             return;
         }
 
-        // Use GTC (good-til-canceled) so the order rests on the book if not
-        // immediately matched.  FOK/IOC fail with 409 on demo when there is
-        // no opposing liquidity.
         const result = await trading.placeOrder({
             ticker: kalshiTicker,
             side,
@@ -197,25 +251,46 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             noPrice: side === 'no' ? limitPrice : undefined,
         });
 
-        const order = result.order || {};
+        let order = result.order || {};
         if (order.status === 'canceled' || order.status === 'rejected') {
             console.log(`[trade-executor] Order not filled: ${order.status} — ${order.cancel_reason || 'unknown'}`);
             logTrade('buy_failed', { ...tradeInfo, reason: order.status });
             return;
         }
 
+        // ── FILL VERIFICATION ──
+        // GTC orders may come back as 'resting' (on the book, not yet matched).
+        // Wait up to 5s for fill, then cancel any unfilled remainder.
+        if (order.status === 'resting' || order.status === 'open') {
+            console.log(`[trade-executor] Order ${order.order_id} is ${order.status} — waiting for fill...`);
+            order = await waitForFill(order.order_id, 5000);
+        }
+
+        const fills = parseOrderFills(order);
+        const filledContracts = fills.filled;
+
+        if (filledContracts === 0) {
+            console.log(`[trade-executor] Order ${order.order_id} got 0 fills — no position taken`);
+            logTrade('buy_unfilled', { ...tradeInfo, orderId: order.order_id, finalStatus: order.status });
+            return;
+        }
+
+        if (filledContracts < contracts) {
+            console.log(`[trade-executor] Partial fill: ${filledContracts}/${contracts} contracts on ${order.order_id}`);
+        }
+
         currentPosition = {
             ticker: kalshiTicker,
             side,
-            contracts: order.count || contracts,
+            contracts: filledContracts,
             entryPrice: limitPrice,
             orderId: order.order_id,
             periodKey,
             entryTime: Date.now(),
         };
-        logTrade('buy', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status });
+        logTrade('buy', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: contracts });
         dailyStats.tradeCount++;
-        console.log(`[trade-executor] LIVE BUY: ${contracts}x ${side.toUpperCase()} on ${kalshiTicker} — order ${order.order_id}`);
+        console.log(`[trade-executor] LIVE BUY: ${filledContracts}x ${side.toUpperCase()} on ${kalshiTicker} — order ${order.order_id} (${order.status})`);
 
     } catch (err) {
         const detail = err.response ? JSON.stringify(err.response) : '';
@@ -307,11 +382,36 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             noPrice: currentPosition.side === 'no' ? Math.max(1, currentPosition.entryPrice - 10) : undefined,
         });
 
-        const order = result.order || {};
+        let order = result.order || {};
         console.log(`[trade-executor] LIVE SELL: order ${order.order_id} status=${order.status}`);
-        logTrade('sell', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status });
+
+        // ── FILL VERIFICATION ──
+        if (order.status === 'resting' || order.status === 'open') {
+            console.log(`[trade-executor] Sell order ${order.order_id} is ${order.status} — waiting for fill...`);
+            order = await waitForFill(order.order_id, 5000);
+        }
+
+        const fills = parseOrderFills(order);
+        const filledContracts = fills.filled;
+
+        if (filledContracts === 0) {
+            console.log(`[trade-executor] Sell order ${order.order_id} got 0 fills — position NOT closed`);
+            logTrade('sell_unfilled', { ...tradeInfo, orderId: order.order_id, finalStatus: order.status });
+            // Don't clear position — still holding
+            return;
+        }
+
+        if (filledContracts < currentPosition.contracts) {
+            console.log(`[trade-executor] Partial sell: ${filledContracts}/${currentPosition.contracts} — reducing position`);
+            currentPosition.contracts -= filledContracts;
+            logTrade('sell_partial', { ...tradeInfo, orderId: order.order_id, filledContracts, remaining: currentPosition.contracts });
+            dailyStats.tradeCount++;
+            return;
+        }
+
+        // Fully sold
+        logTrade('sell', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts });
         dailyStats.tradeCount++;
-        // Record for potential re-entry
         soldThisPeriod = {
             periodKey: currentPosition.periodKey,
             side: currentPosition.side,
@@ -475,21 +575,31 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
             yesPrice: currentPosition.side === 'yes' ? currentLimitPrice : undefined,
             noPrice: currentPosition.side === 'no' ? currentLimitPrice : undefined,
         });
-        const order = result.order || {};
+        let order = result.order || {};
         if (order.status === 'canceled' || order.status === 'rejected') {
             logTrade('dip_buy_failed', { ...tradeInfo, reason: order.status });
             return;
         }
+        // ── FILL VERIFICATION ──
+        if (order.status === 'resting' || order.status === 'open') {
+            order = await waitForFill(order.order_id, 5000);
+        }
+        const fills = parseOrderFills(order);
+        if (fills.filled === 0) {
+            logTrade('dip_buy_unfilled', { ...tradeInfo, orderId: order.order_id });
+            return;
+        }
+        const filledContracts = fills.filled;
         const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
-        const addCost = addContracts * currentLimitPrice;
-        const newTotal = currentContracts + addContracts;
+        const addCost = filledContracts * currentLimitPrice;
+        const newTotal = currentContracts + filledContracts;
         currentPosition.totalCostCents = oldCost + addCost;
         currentPosition.totalContracts = newTotal;
         currentPosition.contracts = newTotal;
         currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal);
-        logTrade('dip_buy', { ...tradeInfo, orderId: order.order_id });
+        logTrade('dip_buy', { ...tradeInfo, orderId: order.order_id, filledContracts });
         dailyStats.tradeCount++;
-        console.log(`[trade-executor] LIVE DIP-BUY: +${addContracts}x @ ${currentLimitPrice}c — order ${order.order_id}`);
+        console.log(`[trade-executor] LIVE DIP-BUY: +${filledContracts}x @ ${currentLimitPrice}c — order ${order.order_id} (${order.status})`);
     } catch (err) {
         logTrade('dip_buy_error', { ...tradeInfo, error: err.message });
     }
@@ -610,33 +720,43 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
             yesPrice: side === 'yes' ? limitPrice : undefined,
             noPrice: side === 'no' ? limitPrice : undefined,
         });
-        const order = result.order || {};
+        let order = result.order || {};
         if (order.status === 'canceled' || order.status === 'rejected') {
             logTrade(strategy + '_failed', { ...tradeInfo, reason: order.status });
             return;
         }
+        // ── FILL VERIFICATION ──
+        if (order.status === 'resting' || order.status === 'open') {
+            order = await waitForFill(order.order_id, 5000);
+        }
+        const fills = parseOrderFills(order);
+        if (fills.filled === 0) {
+            logTrade(strategy + '_unfilled', { ...tradeInfo, orderId: order.order_id });
+            return;
+        }
+        const filledContracts = fills.filled;
         if (currentPosition && currentPosition.periodKey === periodKey) {
             const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
-            const addCost = contracts * limitPrice;
-            const newTotal = (currentPosition.totalContracts || currentPosition.contracts) + contracts;
+            const addCost = filledContracts * limitPrice;
+            const newTotal = (currentPosition.totalContracts || currentPosition.contracts) + filledContracts;
             currentPosition.totalCostCents = oldCost + addCost;
             currentPosition.totalContracts = newTotal;
             currentPosition.contracts = newTotal;
             currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal);
         } else {
             currentPosition = {
-                ticker, side, contracts: order.count || contracts,
+                ticker, side, contracts: filledContracts,
                 entryPrice: limitPrice,
                 orderId: order.order_id,
                 periodKey,
                 entryTime: Date.now(),
-                totalCostCents: contracts * limitPrice,
-                totalContracts: contracts,
+                totalCostCents: filledContracts * limitPrice,
+                totalContracts: filledContracts,
             };
         }
-        logTrade(strategy, { ...tradeInfo, orderId: order.order_id });
+        logTrade(strategy, { ...tradeInfo, orderId: order.order_id, filledContracts });
         dailyStats.tradeCount++;
-        console.log(`[trade-executor] LIVE ${strategy.toUpperCase()}: ${contracts}x ${side.toUpperCase()} @ ${limitPrice}c — order ${order.order_id}`);
+        console.log(`[trade-executor] LIVE ${strategy.toUpperCase()}: ${filledContracts}x ${side.toUpperCase()} @ ${limitPrice}c — order ${order.order_id} (${order.status})`);
     } catch (err) {
         logTrade(strategy + '_error', { ...tradeInfo, error: err.message });
     }
@@ -738,26 +858,36 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
             yesPrice: origSide === 'yes' ? limitPrice : undefined,
             noPrice: origSide === 'no' ? limitPrice : undefined,
         });
-        const order = result.order || {};
+        let order = result.order || {};
         if (order.status === 'canceled' || order.status === 'rejected') {
             logTrade('re_entry_failed', { ...tradeInfo, reason: order.status });
             return;
         }
+        // ── FILL VERIFICATION ──
+        if (order.status === 'resting' || order.status === 'open') {
+            order = await waitForFill(order.order_id, 5000);
+        }
+        const fills = parseOrderFills(order);
+        if (fills.filled === 0) {
+            logTrade('re_entry_unfilled', { ...tradeInfo, orderId: order.order_id });
+            return;
+        }
+        const filledContracts = fills.filled;
         currentPosition = {
             ticker: kalshiTicker,
             side: origSide,
-            contracts: order.count || contracts,
+            contracts: filledContracts,
             entryPrice: limitPrice,
             orderId: order.order_id,
             periodKey,
             entryTime: Date.now(),
-            totalCostCents: contracts * limitPrice,
-            totalContracts: contracts,
+            totalCostCents: filledContracts * limitPrice,
+            totalContracts: filledContracts,
         };
-        logTrade('re_entry', { ...tradeInfo, orderId: order.order_id });
+        logTrade('re_entry', { ...tradeInfo, orderId: order.order_id, filledContracts });
         dailyStats.tradeCount++;
         soldThisPeriod = null;
-        console.log(`[trade-executor] LIVE RE-ENTRY: ${contracts}x ${origSide.toUpperCase()} @ ${limitPrice}c — order ${order.order_id}`);
+        console.log(`[trade-executor] LIVE RE-ENTRY: ${filledContracts}x ${origSide.toUpperCase()} @ ${limitPrice}c — order ${order.order_id} (${order.status})`);
     } catch (err) {
         logTrade('re_entry_error', { ...tradeInfo, error: err.message });
     }
