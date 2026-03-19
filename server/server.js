@@ -1033,11 +1033,16 @@ app.post('/api/trading/environment', (req, res) => {
         tradeExecutor.setKillSwitch(true);
         kalshiAuth.setEnvironment(env);
         tradeExecutor.resetState();
+        // SAFETY: switching to production forces paper mode on — user must explicitly disable it
+        if (env === 'production') {
+            tradeExecutor.setPaperMode(true);
+        }
         const configured = kalshiAuth.isConfigured();
+        const safetyNote = env === 'production' ? ' Paper mode enabled — disable manually to trade with real money.' : '';
         res.json({
             environment: env,
             configured,
-            message: `Switched to ${env.toUpperCase()}${configured ? '' : ' (credentials not configured!)'}. Kill switch activated — re-enable trading manually.`
+            message: `Switched to ${env.toUpperCase()}${configured ? '' : ' (credentials not configured!)'}. Kill switch activated — re-enable trading manually.${safetyNote}`
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -1169,6 +1174,9 @@ server.listen(PORT, () => {
     console.log(`Trading mode: ${tradeExecutor.config.paperMode ? 'PAPER (simulated)' : 'LIVE'}${kalshiAuth.isConfigured() ? '' : ' | Kalshi API not configured'}`);
     console.log(`Kalshi market data: PUBLIC API → ${KALSHI_MARKET_API}`);
     console.log(`Kalshi trading: ${kalshiAuth.getEnvironment().toUpperCase()} → ${kalshiAuth.getBaseUrl()}`);
+    if (kalshiAuth.getEnvironment() === 'production' && !tradeExecutor.config.paperMode) {
+        console.warn('⚠️  WARNING: LIVE TRADING WITH REAL MONEY IS ACTIVE. Set KALSHI_ENV=demo or PAPER_MODE=true to disable.');
+    }
 
     // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
     async function fetchLoop() {

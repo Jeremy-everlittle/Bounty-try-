@@ -24,10 +24,9 @@ const path = require('path');
 
 let _privateKey = null;
 let _apiKeyId = null;
-// Default to production if production credentials are available, otherwise demo.
-// The demo API (demo-api.kalshi.co) is a sandbox that returns status=executed
-// without actually matching orders. Only the production API creates real fills.
-let _currentEnv = (process.env.KALSHI_API_KEY && process.env.KALSHI_PRIVATE_KEY)
+// SAFETY: Always default to demo. Live/production trading requires explicit opt-in
+// by setting KALSHI_ENV=production. This prevents accidental real-money trades.
+let _currentEnv = (process.env.KALSHI_ENV || 'demo').toLowerCase() === 'production'
     ? 'production'
     : 'demo';
 
