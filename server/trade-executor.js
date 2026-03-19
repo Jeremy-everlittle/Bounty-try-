@@ -1268,6 +1268,114 @@ function getStatus() {
     };
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Force Bet — manual override, bypasses all quality/Kelly checks
+// ═══════════════════════════════════════════════════════════════
+
+async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideContracts) {
+    if (!prediction || !kalshiTicker || strike === null) {
+        return { ok: false, reason: 'Missing prediction, ticker, or strike data' };
+    }
+
+    // Don't double-enter same period
+    if (currentPosition && currentPosition.periodKey === periodKey) {
+        return { ok: false, reason: 'Already have a position for this period' };
+    }
+
+    // Close stale position from a previous period
+    if (currentPosition && currentPosition.periodKey !== periodKey) {
+        console.log(`[trade-executor] Force bet: auto-settling stale position from ${currentPosition.periodKey}`);
+        const staleContracts = currentPosition.totalContracts || currentPosition.contracts;
+        const staleCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+        if (staleContracts > 0 && staleCost > 0) {
+            const pnl = -staleCost;
+            dailyStats.losses++;
+            dailyStats.pnlCents += pnl;
+            logTrade('settle', {
+                ticker: currentPosition.ticker, side: currentPosition.side,
+                contracts: staleContracts, entryPrice: Math.round(staleCost / staleContracts),
+                correct: false, pnlCents: pnl, dailyPnlCents: dailyStats.pnlCents,
+                note: 'auto-settled stale position before force bet',
+            });
+        }
+        currentPosition = null;
+    }
+
+    const isUp = prediction.predictedPrice >= strike;
+    const side = isUp ? 'yes' : 'no';
+    const direction = isUp ? 'UP' : 'DOWN';
+    const probForBet = isUp ? prediction.probability : (1 - prediction.probability);
+    const theoreticalPrice = Math.round(probForBet * 100);
+    const contracts = overrideContracts || Math.max(1, config.baseContracts);
+
+    console.log(`[trade-executor] FORCE BET: ${contracts}x ${side.toUpperCase()} (${direction}) on ${kalshiTicker} @ ~${theoreticalPrice}c`);
+
+    const tradeInfo = {
+        ticker: kalshiTicker, side, action: 'buy', contracts, periodKey,
+        direction, edge: 'FORCED', quality: 'FORCED', betSize: '1.00',
+        strategy: 'force_bet',
+    };
+
+    if (config.paperMode) {
+        const limitPrice = Math.max(5, Math.min(95, theoreticalPrice));
+        currentPosition = {
+            ticker: kalshiTicker, side, contracts, entryPrice: limitPrice,
+            orderId: 'force-paper-' + Date.now(), periodKey, entryTime: Date.now(),
+            totalCostCents: contracts * limitPrice, totalContracts: contracts,
+        };
+        logTrade('buy', { ...tradeInfo, limitPrice, fillStatus: 'paper-forced' });
+        dailyStats.tradeCount++;
+        return { ok: true, side, direction, contracts, entryPrice: limitPrice, mode: 'paper' };
+    }
+
+    // Live order
+    const minutesRemaining = 15; // conservative estimate
+    const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, minutesRemaining);
+    const cappedContracts = await capContractsByBalance(contracts, limitPrice);
+    if (cappedContracts <= 0) {
+        return { ok: false, reason: 'Insufficient balance for force bet' };
+    }
+
+    orderInFlight = true;
+    try {
+        const result = await trading.placeOrder({
+            ticker: kalshiTicker, side, action: 'buy', count: cappedContracts,
+            yesPrice: side === 'yes' ? limitPrice : undefined,
+            noPrice: side === 'no' ? limitPrice : undefined,
+        });
+
+        let order = result.order || {};
+        if (order.status === 'canceled' || order.status === 'rejected') {
+            return { ok: false, reason: `Order ${order.status}: ${order.cancel_reason || 'unknown'}` };
+        }
+
+        if (order.status === 'resting' || order.status === 'open') {
+            order = await waitForFill(order.order_id, order);
+        }
+
+        const fills = parseOrderFills(order);
+        let filledContracts = fills.filled;
+        if (filledContracts === 0) {
+            logTrade('buy_unfilled', { ...tradeInfo, orderId: order.order_id, finalStatus: order.status });
+            return { ok: false, reason: 'Order got 0 fills' };
+        }
+
+        currentPosition = {
+            ticker: kalshiTicker, side, contracts: filledContracts, entryPrice: limitPrice,
+            orderId: order.order_id, periodKey, entryTime: Date.now(),
+            totalCostCents: filledContracts * limitPrice, totalContracts: filledContracts,
+        };
+        logTrade('buy', { ...tradeInfo, limitPrice, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: cappedContracts });
+        dailyStats.tradeCount++;
+        return { ok: true, side, direction, contracts: filledContracts, entryPrice: limitPrice, mode: 'live', orderId: order.order_id };
+    } catch (err) {
+        logTrade('buy_error', { ...tradeInfo, error: err.message, response: err.response });
+        return { ok: false, reason: err.message };
+    } finally {
+        orderInFlight = false;
+    }
+}
+
 module.exports = {
     onNewPrediction,
     onSellSignal,
@@ -1280,5 +1388,6 @@ module.exports = {
     resetState,
     getStatus,
     onTradeNotify,
+    forceBet,
     config, // exposed for startup logging
 };

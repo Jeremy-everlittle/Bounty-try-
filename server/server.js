@@ -1060,6 +1060,26 @@ app.post('/api/trading/kill-switch', (req, res) => {
     res.json({ killSwitch: active, message: active ? 'Kill switch ACTIVATED — all trading halted' : 'Kill switch deactivated' });
 });
 
+app.post('/api/trading/force-bet', async (req, res) => {
+    const contracts = req.body?.contracts; // optional override
+    const currentPeriod = store.getCurrentPeriod();
+    const prediction = currentPeriod?.updatedPrediction || currentPeriod?.originalPrediction;
+    const ticker = state.kalshiTicker;
+    const strike = state.kalshiStrike;
+    const periodKey = state.periodKey;
+
+    if (!prediction) return res.status(400).json({ error: 'No prediction available for current period' });
+    if (!ticker) return res.status(400).json({ error: 'No Kalshi ticker available' });
+    if (!strike) return res.status(400).json({ error: 'No strike price available' });
+
+    try {
+        const result = await tradeExecutor.forceBet(prediction, ticker, strike, periodKey, contracts || null);
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ ok: false, reason: err.message });
+    }
+});
+
 app.post('/api/trading/mode', (req, res) => {
     const paperMode = req.body?.paperMode !== false;
     tradeExecutor.setPaperMode(paperMode);

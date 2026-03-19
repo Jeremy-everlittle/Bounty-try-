@@ -763,6 +763,9 @@
                 <button class="trading-btn trading-btn-danger" id="trading-kill-btn" onclick="toggleKillSwitch()">Kill Switch</button>
                 <button class="trading-btn" id="notif-btn" onclick="toggleNotifications()" style="font-size:12px">Notifications: OFF</button>
             </div>
+            <div style="margin-top:6px;">
+                <button class="trading-btn" id="force-bet-btn" onclick="forceBet()" style="width:100%;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(136,87,255,0.15);border-color:rgba(136,87,255,0.4);color:#a371f7;">FORCE BET</button>
+            </div>
         </div>
 
         <!-- Wallet removed - will be re-added later -->
@@ -1810,6 +1813,20 @@
             // Re-render combined period history when trading data updates
             renderPeriodHistory();
 
+            // Force bet button state
+            const forceBtn = document.getElementById('force-bet-btn');
+            if (forceBtn && !forceBtn.disabled) {
+                if (ts.currentPosition) {
+                    forceBtn.textContent = 'POSITION OPEN';
+                    forceBtn.style.opacity = '0.4';
+                    forceBtn.style.pointerEvents = 'none';
+                } else {
+                    forceBtn.textContent = 'FORCE BET';
+                    forceBtn.style.opacity = '1';
+                    forceBtn.style.pointerEvents = 'auto';
+                }
+            }
+
             // Kill switch button state
             const killBtn = document.getElementById('trading-kill-btn');
             if (ts.killSwitch) {
@@ -1858,6 +1875,53 @@
             } else {
                 list.style.display = 'none';
                 toggle.classList.add('collapsed');
+            }
+        }
+
+        async function forceBet() {
+            const ts = serverData && serverData.tradingStatus;
+            if (ts && ts.currentPosition) {
+                alert('Already have a position for this period.');
+                return;
+            }
+            const pred = serverData && serverData.prediction;
+            const dir = pred && pred.updatedPrediction
+                ? (pred.updatedPrediction.predictedPrice >= (serverData.kalshiStrike || 0) ? 'UP' : 'DOWN')
+                : pred && pred.originalPrediction
+                ? (pred.originalPrediction.predictedPrice >= (serverData.kalshiStrike || 0) ? 'UP' : 'DOWN')
+                : '??';
+            if (!confirm('Force a ' + dir + ' bet for this period?')) return;
+            const btn = document.getElementById('force-bet-btn');
+            btn.textContent = 'PLACING...';
+            btn.disabled = true;
+            try {
+                const resp = await fetch('/api/trading/force-bet', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const result = await resp.json();
+                if (result.ok) {
+                    btn.textContent = result.direction + ' ' + result.contracts + 'x @ ' + result.entryPrice + '\u00A2';
+                    btn.style.background = 'rgba(63,185,80,0.2)';
+                    btn.style.color = '#3fb950';
+                    btn.style.borderColor = 'rgba(63,185,80,0.4)';
+                    setTimeout(() => {
+                        btn.textContent = 'FORCE BET';
+                        btn.style.background = 'rgba(136,87,255,0.15)';
+                        btn.style.color = '#a371f7';
+                        btn.style.borderColor = 'rgba(136,87,255,0.4)';
+                        btn.disabled = false;
+                    }, 5000);
+                } else {
+                    alert('Force bet failed: ' + (result.reason || result.error || 'Unknown error'));
+                    btn.textContent = 'FORCE BET';
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                alert('Force bet error: ' + e.message);
+                btn.textContent = 'FORCE BET';
+                btn.disabled = false;
             }
         }
 
