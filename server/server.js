@@ -118,11 +118,14 @@ async function fetchBRTIApprox() {
 }
 
 // ── Kalshi Market Fetching ──
+// PRODUCTION API for all read-only market data (strike, prices, markets).
+// Demo API is ONLY used by kalshi-trading.js for placing bets & funds.
+const KALSHI_MARKET_API = 'https://trading-api.kalshi.com/trade-api/v2';
+
 async function fetchKalshiData() {
     try {
-        const kalshiBase = kalshiAuth.getBaseUrl() + '/trade-api/v2';
         let data = await fetchJSON(
-            kalshiBase + '/markets?series_ticker=KXBTC15M&status=open&limit=100'
+            KALSHI_MARKET_API + '/markets?series_ticker=KXBTC15M&status=open&limit=100'
         );
         let markets = data ? (data.markets || []) : [];
 
@@ -133,7 +136,7 @@ async function fetchKalshiData() {
         // Fallback to unfiltered if needed
         if (markets.length === 0 || !hasFuture) {
             const allData = await fetchJSON(
-                kalshiBase + '/markets?series_ticker=KXBTC15M&limit=100'
+                KALSHI_MARKET_API + '/markets?series_ticker=KXBTC15M&limit=100'
             );
             if (allData && allData.markets) {
                 const existingTickers = new Set(markets.map(m => m.ticker));
@@ -156,67 +159,37 @@ async function fetchKalshiData() {
 
         if (!best) return { market: null, strike: null, closeTime: null, ticker: null };
 
-        // Get detailed market data — try with auth headers for full field access
+        // Get detailed market data from PRODUCTION API
         let detailedMarket = best;
         try {
-            const detailPath = '/trade-api/v2/markets/' + best.ticker;
-            const headers = kalshiAuth.isConfigured()
-                ? kalshiAuth.getAuthHeaders('GET', detailPath)
-                : {};
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), 8000);
-            const res = await fetch(kalshiBase + '/markets/' + best.ticker, {
+            const res = await fetch(KALSHI_MARKET_API + '/markets/' + best.ticker, {
                 signal: controller.signal,
-                headers,
             });
             clearTimeout(timer);
             if (res.ok) {
                 const detail = await res.json();
                 if (detail && detail.market) {
                     detailedMarket = detail.market;
-                    console.log(`[kalshi] Detail fetch OK for ${best.ticker}`);
+                    console.log(`[kalshi] Detail fetch OK for ${best.ticker} (production API)`);
                 }
             } else {
-                console.log(`[kalshi] Detail fetch ${res.status} for ${best.ticker}, using list data`);
+                console.log(`[kalshi] Detail fetch ${res.status} for ${best.ticker}`);
             }
         } catch (e) {
             console.log(`[kalshi] Detail fetch failed for ${best.ticker}: ${e.message}`);
         }
 
-        // Try extracting strike from the demo API response first
-        let strike = extractStrike(detailedMarket);
-
-        // If demo API didn't have the strike, try the production API as fallback
-        // (production API may have more complete data but might be blocked)
-        if (!strike) {
-            try {
-                const prodUrl = 'https://trading-api.kalshi.com/trade-api/v2/markets/' + best.ticker;
-                const controller2 = new AbortController();
-                const timer2 = setTimeout(() => controller2.abort(), 5000);
-                const res2 = await fetch(prodUrl, { signal: controller2.signal });
-                clearTimeout(timer2);
-                if (res2.ok) {
-                    const prodDetail = await res2.json();
-                    if (prodDetail && prodDetail.market) {
-                        strike = extractStrike(prodDetail.market);
-                        if (strike) {
-                            console.log(`[kalshi] Got strike=$${strike} from production API fallback`);
-                            detailedMarket = prodDetail.market; // use richer data
-                        }
-                    }
-                }
-            } catch (e) {
-                // Production API blocked/unavailable — that's fine, BRTI fallback handles it
-            }
-        }
-
+        // Extract strike from production API data
+        const strike = extractStrike(detailedMarket);
         const closeTime = new Date(best.close_time || best.expiration_time).toISOString();
 
         // Reduce log spam — only log debug every 6th cycle (~60s)
         if (!fetchKalshiData._logCounter) fetchKalshiData._logCounter = 0;
         fetchKalshiData._logCounter++;
         if (fetchKalshiData._logCounter % 6 === 1) {
-            console.log(`[kalshi-debug] ticker=${best.ticker} | strike=${strike} | yes_sub_title=${detailedMarket.yes_sub_title} | source=${strike ? 'api' : 'none (BRTI fallback will be used)'}`);
+            console.log(`[kalshi-debug] ticker=${best.ticker} | strike=${strike} | yes_sub_title=${detailedMarket.yes_sub_title} | title=${detailedMarket.title}`);
         }
 
         return { market: detailedMarket, strike, closeTime, ticker: best.ticker };
@@ -1196,7 +1169,8 @@ server.listen(PORT, () => {
     console.log(`History: http://localhost:${PORT}/api/history`);
     console.log(`Trading: http://localhost:${PORT}/api/trading/status`);
     console.log(`Trading mode: ${tradeExecutor.config.paperMode ? 'PAPER (simulated)' : 'LIVE'}${kalshiAuth.isConfigured() ? '' : ' | Kalshi API not configured'}`);
-    console.log(`Kalshi environment: ${kalshiAuth.getEnvironment().toUpperCase()} → ${kalshiAuth.getBaseUrl()}`);
+    console.log(`Kalshi market data: PRODUCTION → ${KALSHI_MARKET_API}`);
+    console.log(`Kalshi trading: ${kalshiAuth.getEnvironment().toUpperCase()} → ${kalshiAuth.getBaseUrl()}`);
 
     // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
     async function fetchLoop() {
