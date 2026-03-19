@@ -146,8 +146,8 @@ function extractMarketConditions(marketData) {
 
     if (marketData.orderBook) {
         const ob = marketData.orderBook;
-        const bidDepth = ob.bids ? ob.bids.slice(0, 5).reduce((s, b) => s + (b[1] || 0), 0) : 0;
-        const askDepth = ob.asks ? ob.asks.slice(0, 5).reduce((s, a) => s + (a[1] || 0), 0) : 0;
+        const bidDepth = ob.bids ? ob.bids.slice(0, 5).reduce((s, b) => s + (parseFloat(b[1]) || 0), 0) : 0;
+        const askDepth = ob.asks ? ob.asks.slice(0, 5).reduce((s, a) => s + (parseFloat(a[1]) || 0), 0) : 0;
         const total = bidDepth + askDepth;
         conditions.orderBookImbalance = total > 0 ? ((bidDepth - askDepth) / total).toFixed(3) : '0';
         conditions.bidDepth5 = bidDepth.toFixed(2);

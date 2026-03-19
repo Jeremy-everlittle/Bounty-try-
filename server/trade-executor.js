@@ -10,6 +10,7 @@
 
 const trading = require('./kalshi-trading');
 const decisionLog = require('./decision-logger');
+const { getEnvironment } = require('./kalshi-auth');
 
 // ── Configuration (from env, with safe defaults) ──
 const config = {
@@ -133,6 +134,13 @@ async function verifyBalanceChanged(previousBalanceCents) {
  * Returns the verified contract count (0 if phantom fill detected).
  */
 async function verifyFillIsReal(orderId, ticker, side, claimedFills, balanceBefore) {
+    // Demo API: balance & portfolio endpoints don't reflect demo orders.
+    // The demo API's status=executed IS the simulation — trust it.
+    if (getEnvironment() === 'demo') {
+        console.log(`[trade-executor] Demo mode: trusting API response (${claimedFills} fills) — skipping balance/portfolio verification`);
+        return claimedFills;
+    }
+
     const balanceChanged = await verifyBalanceChanged(balanceBefore);
     if (balanceChanged) return claimedFills; // balance moved — fill is real
 
