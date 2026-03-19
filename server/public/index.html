@@ -1866,7 +1866,7 @@
                 posArea.innerHTML = '<div class="trading-position">' +
                     '<div class="trading-position-label">OPEN POSITION</div>' +
                     '<div class="trading-position-detail">' +
-                    p.contracts + 'x ' + p.side.toUpperCase() + ' @ ' + p.entryPrice + '\u00A2' +
+                    (p.totalContracts || p.contracts) + 'x ' + p.side.toUpperCase() + ' @ ' + p.entryPrice + '\u00A2' +
                     ' &middot; ' + holdStr +
                     '</div>' +
                     '<div style="display:flex;gap:12px;margin-top:4px">' +
@@ -2026,6 +2026,12 @@
                     btn.style.background = 'rgba(63,185,80,0.2)';
                     btn.style.color = '#3fb950';
                     btn.style.borderColor = 'rgba(63,185,80,0.4)';
+                    // Refresh trading status so UI shows updated position immediately
+                    try {
+                        const statusResp = await fetch('/api/trading/status');
+                        const status = await statusResp.json();
+                        if (serverData) serverData.tradingStatus = status;
+                    } catch(e) { /* next WS broadcast will catch up */ }
                     setTimeout(() => {
                         btn.textContent = 'PRESS BET';
                         btn.style.background = 'rgba(56,139,253,0.15)';
