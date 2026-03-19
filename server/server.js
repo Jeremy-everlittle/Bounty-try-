@@ -170,6 +170,22 @@ async function fetchKalshiData() {
         const strike = extractStrike(detailedMarket);
         const closeTime = new Date(best.close_time || best.expiration_time).toISOString();
 
+        // Debug: log all strike-related fields from the Kalshi API
+        const strikeDebug = {
+            ticker: best.ticker,
+            title: detailedMarket.title,
+            yes_sub_title: detailedMarket.yes_sub_title,
+            subtitle: detailedMarket.subtitle,
+            no_sub_title: detailedMarket.no_sub_title,
+            custom_strike: detailedMarket.custom_strike,
+            floor_strike: detailedMarket.floor_strike,
+            cap_strike: detailedMarket.cap_strike,
+            strike_type: detailedMarket.strike_type,
+            rules_primary: detailedMarket.rules_primary?.substring(0, 200),
+            extractedStrike: strike,
+        };
+        console.log(`[kalshi-debug] Market fields: ${JSON.stringify(strikeDebug)}`);
+
         return { market: detailedMarket, strike, closeTime, ticker: best.ticker };
     } catch (e) {
         console.error('Kalshi fetch error:', e.message);
@@ -178,36 +194,77 @@ async function fetchKalshiData() {
 }
 
 function extractStrike(m) {
+    if (!m) return null;
+
+    // ── Priority 1: Numeric strike fields from Kalshi API ──
+    // These are the most reliable — direct numeric values from the API.
+    // Kalshi KXBTC15M stores strikes in cents (e.g., 7003106 = $70,031.06)
+    // or as raw dollar values. Handle both.
+    for (const field of ['custom_strike', 'floor_strike', 'cap_strike']) {
+        if (m[field] != null) {
+            const raw = parseFloat(m[field]);
+            if (isNaN(raw) || raw <= 0) continue;
+            // If > 5,000,000 it's likely in cents → divide by 100
+            if (raw > 5000000) {
+                const dollars = raw / 100;
+                if (dollars > 40000 && dollars < 200000) return dollars;
+            }
+            // If > 200,000 it's likely in cents with fewer digits
+            if (raw > 200000 && raw < 5000000) {
+                const dollars = raw / 100;
+                if (dollars > 400 && dollars < 200000) return dollars;
+            }
+            // Already in dollars
+            if (raw > 40000 && raw < 200000) return raw;
+        }
+    }
+
+    // ── Priority 2: Parse from text fields ──
     const textFields = [
         'yes_sub_title', 'subtitle', 'no_sub_title', 'rules_primary',
         'rules_secondary', 'strike_description', 'settlement_sources_description',
         'title', 'event_title'
     ];
     for (const field of textFields) {
-        if (m[field] && typeof m[field] === 'string') {
-            let match = m[field].match(/at least ([\d,]+\.?\d*)/i);
-            if (match) return parseFloat(match[1].replace(/,/g, ''));
-            match = m[field].match(/\$?([\d,]+\.?\d*)\s*(or above|or more|or higher)/i);
-            if (match) return parseFloat(match[1].replace(/,/g, ''));
-            match = m[field].match(/above\s+\$?([\d,]+\.?\d*)/i);
-            if (match) { const v = parseFloat(match[1].replace(/,/g, '')); if (v > 50000 && v < 150000) return v; }
-            match = m[field].match(/\$?([\d,]+\.?\d*)/);
-            if (match) { const v = parseFloat(match[1].replace(/,/g, '')); if (v > 50000 && v < 150000) return v; }
+        if (!m[field] || typeof m[field] !== 'string') continue;
+        const text = m[field];
+
+        // "at least 69991.26" or "at least $69,991.26"
+        let match = text.match(/at least \$?([\d,]+\.?\d*)/i);
+        if (match) {
+            const v = parseFloat(match[1].replace(/,/g, ''));
+            if (v > 40000 && v < 200000) return v;
+        }
+
+        // "$70,031.06 target" or "70031.06 target"
+        match = text.match(/\$?([\d,]+\.?\d*)\s*target/i);
+        if (match) {
+            const v = parseFloat(match[1].replace(/,/g, ''));
+            if (v > 40000 && v < 200000) return v;
+        }
+
+        // "or above", "or more", "or higher"
+        match = text.match(/\$?([\d,]+\.?\d*)\s*(or above|or more|or higher)/i);
+        if (match) {
+            const v = parseFloat(match[1].replace(/,/g, ''));
+            if (v > 40000 && v < 200000) return v;
+        }
+
+        // "above $70,031.06"
+        match = text.match(/above\s+\$?([\d,]+\.?\d*)/i);
+        if (match) {
+            const v = parseFloat(match[1].replace(/,/g, ''));
+            if (v > 40000 && v < 200000) return v;
+        }
+
+        // Generic: any number in BTC price range in the text
+        match = text.match(/\$?([\d,]+\.?\d*)/);
+        if (match) {
+            const v = parseFloat(match[1].replace(/,/g, ''));
+            if (v > 40000 && v < 200000) return v;
         }
     }
-    if (m.custom_strike != null) {
-        const raw = parseFloat(m.custom_strike);
-        if (raw > 50000 && raw < 150000) return raw;
-        if (raw > 5000000) return raw / 100;
-    }
-    if (m.floor_strike != null) {
-        const raw = parseFloat(m.floor_strike);
-        if (!isNaN(raw) && raw > 0) return raw > 200000 ? raw / 100 : raw;
-    }
-    if (m.cap_strike != null) {
-        const raw = parseFloat(m.cap_strike);
-        if (!isNaN(raw) && raw > 0) return raw > 200000 ? raw / 100 : raw;
-    }
+
     return null;
 }
 
