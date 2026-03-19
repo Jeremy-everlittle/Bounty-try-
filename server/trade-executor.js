@@ -9,6 +9,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 const trading = require('./kalshi-trading');
+const decisionLog = require('./decision-logger');
 
 // ── Configuration (from env, with safe defaults) ──
 const config = {
@@ -81,7 +82,19 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     if (!prediction || !kalshiTicker || strike === null) return;
 
     const betQuality = prediction._betQuality;
-    if (!betQuality || !betQuality.shouldBet || betQuality.betSize <= 0) return;
+    if (!betQuality || !betQuality.shouldBet || betQuality.betSize <= 0) {
+        decisionLog.logSkip({
+            periodKey,
+            reason: !betQuality ? 'No bet quality data' : !betQuality.shouldBet ? betQuality.reason : 'Bet size is 0',
+            minutesAhead: null,
+            probability: prediction?.probability,
+            edge: betQuality?.edge,
+            currentPrice: prediction?.predictedPrice,
+            strike,
+            details: betQuality ? { quality: betQuality.quality, betSize: betQuality.betSize, factors: betQuality.factors } : null,
+        });
+        return;
+    }
 
     // Don't enter if we already have a position for this period
     if (currentPosition && currentPosition.periodKey === periodKey) return;
@@ -114,6 +127,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const check = canTrade();
     if (!check.ok) {
         console.log(`[trade-executor] Skipping entry: ${check.reason}`);
+        decisionLog.logSkip({ periodKey, reason: 'canTrade failed: ' + check.reason, currentPrice: prediction?.predictedPrice, strike });
         return;
     }
 
@@ -155,6 +169,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             entryTime: Date.now(),
         };
         logTrade('buy', tradeInfo);
+        decisionLog.logTradeExecution({ ...tradeInfo, strategy: 'initial', currentPrice: prediction.predictedPrice, strike, probability: (probForBet * 100).toFixed(1) + '%' });
         dailyStats.tradeCount++;
         return;
     }
@@ -248,7 +263,10 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         (sellSignal.level === 'consider_selling' && minutesRemaining < 0.75)      // was 1.5 min
     );
 
-    if (!shouldSell) return;
+    if (!shouldSell) {
+        decisionLog.logSellDecision({ sellSignal, minutesRemaining, acted: false, reason: 'Thresholds not met for sell', currentPrice, strike });
+        return;
+    }
 
     const tradeInfo = {
         ticker: currentPosition.ticker,
@@ -263,6 +281,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
     if (config.paperMode) {
         console.log(`[trade-executor] PAPER SELL: ${currentPosition.contracts}x ${currentPosition.side.toUpperCase()} on ${currentPosition.ticker} — reason: ${sellSignal.level}`);
         logTrade('sell', tradeInfo);
+        decisionLog.logSellDecision({ sellSignal, minutesRemaining, acted: true, reason: sellSignal.level, currentPrice, strike });
         dailyStats.tradeCount++;
         // Record for potential re-entry
         soldThisPeriod = {
@@ -349,6 +368,21 @@ function onPeriodEnd(gradeResult) {
 
     console.log(`[trade-executor] Period settled: ${wasCorrect ? 'WIN' : 'LOSS'} | P&L: ${pnl > 0 ? '+' : ''}${(pnl / 100).toFixed(2)} | Daily: ${dailyStats.pnlCents > 0 ? '+' : ''}$${(dailyStats.pnlCents / 100).toFixed(2)}`);
 
+    decisionLog.logSettlement({
+        periodKey: currentPosition.periodKey,
+        wasCorrect,
+        pnlCents: pnl,
+        dailyPnlCents: dailyStats.pnlCents,
+        contracts,
+        entryPrice,
+        side: currentPosition.side,
+        strikePrice: gradeResult?.strikePrice,
+        settlementPrice: gradeResult?.settlementPrice,
+        predDirection: gradeResult?.predictedDirection,
+        predProbability: gradeResult?.probability,
+        actualDirection: gradeResult?.actualDirection,
+    });
+
     currentPosition = null;
     soldThisPeriod = null; // reset for new period
 }
@@ -426,6 +460,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
         currentPosition.contracts = newTotal;
         currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal); // weighted avg
         logTrade('dip_buy', tradeInfo);
+        decisionLog.logTradeExecution({ ...tradeInfo, strategy: 'dip_buyer', currentPrice, strike });
         dailyStats.tradeCount++;
         return;
     }
@@ -560,6 +595,7 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
             };
         }
         logTrade(strategy, tradeInfo);
+        decisionLog.logTradeExecution({ ...tradeInfo, strategy });
         dailyStats.tradeCount++;
         return;
     }
@@ -686,6 +722,7 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
             totalContracts: contracts,
         };
         logTrade('re_entry', tradeInfo);
+        decisionLog.logTradeExecution({ ...tradeInfo, strategy: 're_entry', currentPrice, strike, probability: (probForBet * 100).toFixed(1) + '%' });
         dailyStats.tradeCount++;
         soldThisPeriod = null; // consumed
         return;

@@ -8,6 +8,7 @@ const { execSync } = require('child_process');
 
 const store = require('./store');
 const engine = require('./prediction-engine');
+const decisionLog = require('./decision-logger');
 const tradeExecutor = require('./trade-executor');
 const kalshiAuth = require('./kalshi-auth');
 
@@ -590,6 +591,10 @@ async function fetchAllData() {
                     const qualStr = bq ? (bq.shouldBet ? 'BET' : 'SKIP') + ' (Q=' + (bq.quality*100).toFixed(0) + '% E=' + (bq.edge*100).toFixed(1) + '%)' : '';
                     console.log(`Prediction: ${prediction.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(prediction.probability * 100).toFixed(1)}% | Conf=${(prediction.confidence * 100).toFixed(0)}% | ${qualStr}`);
 
+                    // ── Decision log: new period prediction ──
+                    decisionLog.logNewPeriod({ periodKey, strike: state.kalshiStrike, currentPrice: state.brtiPrice, minutesAhead, kalshiTicker: state.kalshiTicker });
+                    decisionLog.logPrediction({ periodKey, strike: state.kalshiStrike, currentPrice: state.brtiPrice, prediction, betQuality: bq, minutesAhead, marketData });
+
                     // ── Auto-trade: evaluate entry ──
                     tradeExecutor.onNewPrediction(prediction, state.kalshiTicker, state.kalshiStrike, periodKey).catch(e => console.error('[trade-executor] Entry error:', e.message));
                 } else {
@@ -633,6 +638,9 @@ async function fetchAllData() {
                 const qualStr = bq ? (bq.shouldBet ? 'BET' : 'SKIP') + ' (Q=' + (bq.quality*100).toFixed(0) + '% E=' + (bq.edge*100).toFixed(1) + '%)' : '';
                 console.log(`Late prediction: ${prediction.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(prediction.probability * 100).toFixed(1)}% | ${qualStr}`);
 
+                // ── Decision log: late prediction ──
+                decisionLog.logPrediction({ periodKey, strike: state.kalshiStrike, currentPrice: state.brtiPrice, prediction, betQuality: bq, minutesAhead, marketData });
+
                 // ── Auto-trade: evaluate late entry ──
                 tradeExecutor.onNewPrediction(prediction, state.kalshiTicker, state.kalshiStrike, periodKey).catch(e => console.error('[trade-executor] Late entry error:', e.message));
             } else if (currentPeriod.originalPrediction && state.kalshiStrike) {
@@ -662,6 +670,13 @@ async function fetchAllData() {
                     state.kalshiStrike, state.brtiPrice, minutesAhead
                 );
                 store.setSellSignal(sellSignal);
+
+                // ── Decision log: sell signal evaluation ──
+                if (sellSignal && sellSignal.level !== 'hold' && sellSignal.level !== 'winning' && sellSignal.level !== 'strong_hold') {
+                    decisionLog.logSellDecision({ sellSignal, minutesRemaining: minutesAhead, acted: false, currentPrice: state.brtiPrice, strike: state.kalshiStrike });
+                }
+                // Log price ticks (sampled every 30s)
+                decisionLog.logPriceTick({ currentPrice: state.brtiPrice, strike: state.kalshiStrike, periodKey, minutesAhead, history: state.history });
 
                 // ── Auto-trade: evaluate exit (with guaranteed-win protection) ──
                 if (sellSignal) {
@@ -908,6 +923,85 @@ app.post('/api/trading/environment', (req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// DECISION LOG API — Read decision logs for analysis
+// ═══════════════════════════════════════════════════════════════
+
+app.get('/api/logs', (req, res) => {
+    const files = decisionLog.listLogs();
+    res.json({ files, logDir: decisionLog.LOG_DIR });
+});
+
+app.get('/api/logs/today', (req, res) => {
+    const content = decisionLog.readTodaysLog();
+    const lines = content.trim().split('\n').filter(l => l);
+    const parsed = [];
+    for (const line of lines) {
+        try { parsed.push(JSON.parse(line)); } catch (e) { parsed.push({ raw: line }); }
+    }
+    res.json({ date: new Date().toISOString().slice(0, 10), entries: parsed, count: parsed.length });
+});
+
+app.get('/api/logs/:date', (req, res) => {
+    const content = decisionLog.readLog(req.params.date);
+    const lines = content.trim().split('\n').filter(l => l);
+    const parsed = [];
+    for (const line of lines) {
+        try { parsed.push(JSON.parse(line)); } catch (e) { parsed.push({ raw: line }); }
+    }
+    res.json({ date: req.params.date, entries: parsed, count: parsed.length });
+});
+
+// Filter by event type: /api/logs/today/filter?event=PREDICTION&event=TRADE
+app.get('/api/logs/today/filter', (req, res) => {
+    const eventTypes = [].concat(req.query.event || []);
+    const content = decisionLog.readTodaysLog();
+    const lines = content.trim().split('\n').filter(l => l);
+    const parsed = [];
+    for (const line of lines) {
+        try {
+            const entry = JSON.parse(line);
+            if (eventTypes.length === 0 || eventTypes.includes(entry.event)) {
+                parsed.push(entry);
+            }
+        } catch (e) { /* skip */ }
+    }
+    res.json({ date: new Date().toISOString().slice(0, 10), filter: eventTypes, entries: parsed, count: parsed.length });
+});
+
+// Summary: counts by event type + win/loss stats
+app.get('/api/logs/today/summary', (req, res) => {
+    const content = decisionLog.readTodaysLog();
+    const lines = content.trim().split('\n').filter(l => l);
+    const counts = {};
+    let wins = 0, losses = 0, totalPnl = 0;
+    const bets = [], skips = [];
+    for (const line of lines) {
+        try {
+            const entry = JSON.parse(line);
+            counts[entry.event] = (counts[entry.event] || 0) + 1;
+            if (entry.event === 'SETTLEMENT') {
+                if (entry.result === 'WIN') wins++;
+                else losses++;
+            }
+            if (entry.event === 'PREDICTION' && entry.betDecision === 'BET') bets.push(entry);
+            if (entry.event === 'PREDICTION' && entry.betDecision === 'SKIP') skips.push(entry);
+        } catch (e) { /* skip */ }
+    }
+    const skipReasons = {};
+    for (const s of skips) {
+        const reason = s.skipReason || 'unknown';
+        skipReasons[reason] = (skipReasons[reason] || 0) + 1;
+    }
+    res.json({
+        date: new Date().toISOString().slice(0, 10),
+        totalEntries: lines.length,
+        eventCounts: counts,
+        tradingStats: { bets: bets.length, skips: skips.length, wins, losses, winRate: wins + losses > 0 ? ((wins / (wins + losses)) * 100).toFixed(1) + '%' : 'N/A' },
+        skipReasons,
+    });
 });
 
 // ═══════════════════════════════════════════════════════════════
