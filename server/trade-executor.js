@@ -254,11 +254,9 @@ function markFillFailed(periodKey) {
  * Returns a price in cents (5-99).
  */
 async function getAggressivePrice(ticker, side, theoreticalPrice) {
-    const MAX_SLIPPAGE = 5; // willing to pay up to 5c above theoretical
-    const maxPrice = Math.min(97, theoreticalPrice + MAX_SLIPPAGE);
-
     if (config.paperMode) return Math.max(5, Math.min(95, theoreticalPrice));
 
+    // Try to get the best price from the orderbook
     try {
         const resp = await trading.getOrderbook(ticker);
         const book = resp.orderbook_fp || resp.orderbook || resp;
@@ -271,30 +269,29 @@ async function getAggressivePrice(ticker, side, theoreticalPrice) {
             : (book.yes_dollars || book.yes || []);
 
         if (oppositeBids.length > 0) {
-            // Convert opposite bids to our ask prices
-            // Opposite bid at $0.08 → our ask at $0.92 (92c)
             const askPrices = oppositeBids.map(entry => {
                 const bidDollars = parseFloat(entry[0]);
-                return Math.round((1.00 - bidDollars) * 100); // convert to cents
+                return Math.round((1.00 - bidDollars) * 100);
             });
-
-            // Best ask = lowest price someone is willing to sell at
             const bestAsk = Math.min(...askPrices);
-
-            if (bestAsk <= maxPrice) {
-                console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c (theory=${theoreticalPrice}c) — using ask price`);
-                return bestAsk;
-            }
-            console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c > max ${maxPrice}c — using max ${maxPrice}c`);
-            return maxPrice;
+            // Pay the ask price to guarantee fill — this is "market buy"
+            const price = Math.min(95, bestAsk);
+            console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c — buying at ${price}c`);
+            return Math.max(5, price);
         }
-        console.log(`[trade-executor] Orderbook: no opposing bids found — using theory+3c`);
+        console.log(`[trade-executor] Orderbook: no opposing bids — using aggressive market price`);
     } catch (e) {
-        console.log(`[trade-executor] Orderbook fetch failed: ${e.message} — using theory+3c`);
+        console.log(`[trade-executor] Orderbook fetch failed: ${e.message} — using aggressive market price`);
     }
 
-    // Fallback: bid above theoretical to increase fill probability
-    return Math.max(5, Math.min(97, theoreticalPrice + 3));
+    // No orderbook data: use aggressive price to guarantee fill.
+    // For high-confidence bets (theory > 60c), just pay up to 95c.
+    // For lower confidence, cap at theory + 10c.
+    const aggressivePrice = theoreticalPrice >= 60
+        ? Math.min(95, theoreticalPrice + 10)
+        : Math.min(90, theoreticalPrice + 10);
+    console.log(`[trade-executor] Using aggressive price: ${aggressivePrice}c (theory=${theoreticalPrice}c)`);
+    return Math.max(5, aggressivePrice);
 }
 
 /**
