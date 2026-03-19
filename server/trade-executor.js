@@ -1267,25 +1267,66 @@ async function refreshBalance() {
     }
 }
 
+let lastPositionSync = 0;
+const POSITION_SYNC_MS = 15000; // sync with Kalshi every 15s
+
+async function syncPositionWithKalshi() {
+    if (config.paperMode) return;
+    if (!currentPosition || !currentPosition.ticker) return;
+    if (Date.now() - lastPositionSync < POSITION_SYNC_MS) return;
+    lastPositionSync = Date.now();
+
+    try {
+        const resp = await trading.getPositions();
+        const positions = resp.market_positions || resp.positions || [];
+        const match = positions.find(p => p.ticker === currentPosition.ticker);
+
+        if (match) {
+            // Kalshi reports position quantity and average cost
+            const kalshiContracts = match.position || match.total_traded || 0;
+            const kalshiCostCents = match.market_exposure ? Math.round(match.market_exposure * 100) : null;
+
+            if (kalshiContracts > 0) {
+                const oldTotal = currentPosition.totalContracts || currentPosition.contracts;
+                if (kalshiContracts !== oldTotal) {
+                    console.log(`[trade-executor] Position sync: app=${oldTotal} Kalshi=${kalshiContracts} contracts — updating`);
+                    currentPosition.totalContracts = kalshiContracts;
+                }
+                if (kalshiCostCents && kalshiCostCents !== currentPosition.totalCostCents) {
+                    console.log(`[trade-executor] Position sync: app cost=${currentPosition.totalCostCents}c Kalshi cost=${kalshiCostCents}c — updating`);
+                    currentPosition.totalCostCents = kalshiCostCents;
+                }
+            }
+        }
+    } catch (e) {
+        // Silently fail — will retry next cycle
+    }
+}
+
 function getStatus() {
     checkDayRollover();
-    // Trigger async balance refresh (non-blocking)
+    // Trigger async balance refresh + position sync (non-blocking)
     refreshBalance();
+    syncPositionWithKalshi();
     return {
         paperMode: config.paperMode,
         killSwitch,
         configured: trading.isConfigured(),
         balanceCents: cachedBalance ? cachedBalance.balanceCents : null,
-        currentPosition: currentPosition ? {
-            ticker: currentPosition.ticker,
-            side: currentPosition.side,
-            contracts: currentPosition.contracts,
-            entryPrice: currentPosition.entryPrice,
-            periodKey: currentPosition.periodKey,
-            holdingSeconds: Math.round((Date.now() - currentPosition.entryTime) / 1000),
-            totalCostCents: currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice),
-            totalContracts: currentPosition.totalContracts || currentPosition.contracts,
-        } : null,
+        currentPosition: currentPosition ? (() => {
+            const totalCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+            const totalContracts = currentPosition.totalContracts || currentPosition.contracts;
+            return {
+                ticker: currentPosition.ticker,
+                side: currentPosition.side,
+                contracts: currentPosition.contracts,
+                entryPrice: Math.round(totalCost / totalContracts), // weighted average, not first entry
+                periodKey: currentPosition.periodKey,
+                holdingSeconds: Math.round((Date.now() - currentPosition.entryTime) / 1000),
+                totalCostCents: totalCost,
+                totalContracts: totalContracts,
+            };
+        })() : null,
         soldThisPeriod: soldThisPeriod ? { side: soldThisPeriod.side, reason: soldThisPeriod.reason } : null,
         daily: { ...dailyStats },
         config: {
@@ -1349,7 +1390,8 @@ async function pressBet(addContracts) {
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         const priceEscalation = (attempt - 1) * PRICE_BUMP;
-        const limitPrice = Math.min(95, (await getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaining)) + priceEscalation);
+        // Bump theoretical input, not the result — getAggressivePrice caps at orderbook ask
+        const limitPrice = await getAggressivePrice(ticker, side, theoreticalPrice + priceEscalation, minutesRemaining);
         const cappedContracts = await capContractsByBalance(contractsToAdd, limitPrice);
         if (cappedContracts <= 0) {
             return { ok: false, reason: 'Insufficient balance to press bet' };
@@ -1477,7 +1519,8 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
 
     for (let attempt = 1; attempt <= MAX_FORCE_ATTEMPTS; attempt++) {
         const priceEscalation = (attempt - 1) * PRICE_BUMP;
-        const limitPrice = Math.min(95, (await getAggressivePrice(kalshiTicker, side, theoreticalPrice, minutesRemaining)) + priceEscalation);
+        // Bump theoretical input, not the result — getAggressivePrice caps at orderbook ask
+        const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice + priceEscalation, minutesRemaining);
         const cappedContracts = await capContractsByBalance(contracts, limitPrice);
         if (cappedContracts <= 0) {
             return { ok: false, reason: 'Insufficient balance for force bet' };
