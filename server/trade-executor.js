@@ -48,7 +48,7 @@ const dailyStats = {
 };
 
 const tradeLog = [];           // recent trades for dashboard (max 100)
-const MAX_TRADE_LOG = 100;
+const MAX_TRADE_LOG = 500;
 const pendingOrders = [];      // orders placed but not yet confirmed filled
 
 // ── Fill verification helpers ──
@@ -398,6 +398,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
                 correct: false,
                 pnlCents: pnl,
                 dailyPnlCents: dailyStats.pnlCents,
+                periodKey: currentPosition.periodKey,
                 note: 'auto-settled stale position (missed onPeriodEnd)',
             });
         }
@@ -607,6 +608,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         side: currentPosition.side,
         contracts: currentPosition.contracts,
         action: 'sell',
+        periodKey: currentPosition.periodKey,
         reason: sellSignal.level,
         urgency: sellSignal.urgency,
         minutesRemaining: minutesRemaining.toFixed(1),
@@ -732,6 +734,7 @@ function onPeriodEnd(gradeResult) {
         correct: wasCorrect,
         pnlCents: pnl,
         dailyPnlCents: dailyStats.pnlCents,
+        periodKey: currentPosition.periodKey,
     });
 
     setThought('settled', `${wasCorrect ? 'WON' : 'LOST'}: ${pnl > 0 ? '+' : ''}$${(pnl / 100).toFixed(2)}`, { pnlCents: pnl, wasCorrect });
@@ -1344,7 +1347,7 @@ function getStatus() {
             maxDailyLossCents: config.maxDailyLossCents,
             maxDailyTrades: config.maxDailyTrades,
         },
-        recentTrades: tradeLog.slice(0, 50),
+        recentTrades: tradeLog.slice(0, 200),
         thought: { ...traderThought },
     };
 }
@@ -1481,6 +1484,7 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
                 ticker: currentPosition.ticker, side: currentPosition.side,
                 contracts: staleContracts, entryPrice: Math.round(staleCost / staleContracts),
                 correct: false, pnlCents: pnl, dailyPnlCents: dailyStats.pnlCents,
+                periodKey: currentPosition.periodKey,
                 note: 'auto-settled stale position before force bet',
             });
         }

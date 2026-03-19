@@ -1423,7 +1423,13 @@
                             typeColor = t.correct ? '#3fb950' : '#f85149';
                             typeLabel = t.correct ? 'WIN' : 'LOSS';
                         } else if (t.type === 'buy') {
-                            typeBg = 'rgba(56,139,253,0.2)'; typeColor = '#58a6ff'; typeLabel = 'BUY';
+                            if (t.strategy === 'force_bet') {
+                                typeBg = 'rgba(136,87,255,0.2)'; typeColor = '#a371f7'; typeLabel = 'FORCE';
+                            } else if (t.strategy === 'press_bet') {
+                                typeBg = 'rgba(56,139,253,0.25)'; typeColor = '#79c0ff'; typeLabel = 'PRESS';
+                            } else {
+                                typeBg = 'rgba(56,139,253,0.2)'; typeColor = '#58a6ff'; typeLabel = 'BUY';
+                            }
                         } else if (t.type === 'dip_buy') {
                             typeBg = 'rgba(136,87,255,0.2)'; typeColor = '#a371f7'; typeLabel = 'DIP BUY';
                         } else if (t.type === 'late_lock' || t.type === 'late_lock_add') {
