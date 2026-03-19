@@ -1090,6 +1090,27 @@ app.post('/api/trading/press-bet', async (req, res) => {
     }
 });
 
+app.post('/api/trading/config', (req, res) => {
+    const updates = req.body;
+    if (!updates || typeof updates !== 'object') {
+        return res.status(400).json({ error: 'Invalid config' });
+    }
+    const cfg = tradeExecutor.config;
+    const allowed = ['baseContracts', 'maxPositionContracts', 'convictionMaxContracts', 'maxDailyLossCents', 'maxDailyTrades'];
+    const applied = {};
+    for (const key of allowed) {
+        if (updates[key] !== undefined) {
+            const val = parseInt(updates[key], 10);
+            if (!isNaN(val) && val > 0) {
+                cfg[key] = val;
+                applied[key] = val;
+            }
+        }
+    }
+    console.log('[server] Config updated:', applied);
+    res.json({ ok: true, config: { baseContracts: cfg.baseContracts, maxPositionContracts: cfg.maxPositionContracts, convictionMaxContracts: cfg.convictionMaxContracts, maxDailyLossCents: cfg.maxDailyLossCents, maxDailyTrades: cfg.maxDailyTrades } });
+});
+
 app.post('/api/trading/mode', (req, res) => {
     const paperMode = req.body?.paperMode !== false;
     tradeExecutor.setPaperMode(paperMode);

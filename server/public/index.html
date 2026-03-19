@@ -803,6 +803,36 @@
                 <button class="trading-btn" id="force-bet-btn" onclick="forceBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(136,87,255,0.15);border-color:rgba(136,87,255,0.4);color:#a371f7;">FORCE BET</button>
                 <button class="trading-btn" id="press-bet-btn" onclick="pressBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(56,139,253,0.15);border-color:rgba(56,139,253,0.4);color:#58a6ff;display:none;">PRESS BET</button>
             </div>
+            <!-- Settings gear toggle -->
+            <div style="margin-top:8px;">
+                <button class="trading-btn" id="config-toggle-btn" onclick="toggleConfigPanel()" style="width:100%;padding:6px 0;font-size:11px;background:rgba(139,148,158,0.08);border-color:rgba(139,148,158,0.2);color:#8b949e;">Settings</button>
+            </div>
+            <!-- Collapsible config panel -->
+            <div id="config-panel" style="display:none;margin-top:8px;padding:10px;background:rgba(22,27,34,0.6);border:1px solid rgba(139,148,158,0.15);border-radius:8px;">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                    <div>
+                        <label style="font-size:10px;color:#8b949e;display:block;margin-bottom:2px;">Base Contracts</label>
+                        <input type="number" id="cfg-baseContracts" min="1" style="width:100%;padding:4px 6px;font-size:13px;background:#0d1117;border:1px solid rgba(139,148,158,0.3);border-radius:4px;color:#e6edf3;">
+                    </div>
+                    <div>
+                        <label style="font-size:10px;color:#8b949e;display:block;margin-bottom:2px;">Max Position</label>
+                        <input type="number" id="cfg-maxPositionContracts" min="1" style="width:100%;padding:4px 6px;font-size:13px;background:#0d1117;border:1px solid rgba(139,148,158,0.3);border-radius:4px;color:#e6edf3;">
+                    </div>
+                    <div>
+                        <label style="font-size:10px;color:#8b949e;display:block;margin-bottom:2px;">Conviction Max</label>
+                        <input type="number" id="cfg-convictionMaxContracts" min="1" style="width:100%;padding:4px 6px;font-size:13px;background:#0d1117;border:1px solid rgba(139,148,158,0.3);border-radius:4px;color:#e6edf3;">
+                    </div>
+                    <div>
+                        <label style="font-size:10px;color:#8b949e;display:block;margin-bottom:2px;">Daily Loss Limit ($)</label>
+                        <input type="number" id="cfg-maxDailyLossCents" min="1" step="1" style="width:100%;padding:4px 6px;font-size:13px;background:#0d1117;border:1px solid rgba(139,148,158,0.3);border-radius:4px;color:#e6edf3;">
+                    </div>
+                    <div>
+                        <label style="font-size:10px;color:#8b949e;display:block;margin-bottom:2px;">Max Daily Trades</label>
+                        <input type="number" id="cfg-maxDailyTrades" min="1" style="width:100%;padding:4px 6px;font-size:13px;background:#0d1117;border:1px solid rgba(139,148,158,0.3);border-radius:4px;color:#e6edf3;">
+                    </div>
+                </div>
+                <button class="trading-btn" id="cfg-save-btn" onclick="saveConfig()" style="width:100%;margin-top:8px;padding:6px 0;font-size:12px;font-weight:700;background:rgba(63,185,80,0.15);border-color:rgba(63,185,80,0.4);color:#3fb950;">Save Settings</button>
+            </div>
         </div>
 
         <!-- Wallet removed - will be re-added later -->
@@ -2839,6 +2869,67 @@
                 drawChart(priceHistory, priceHistory[priceHistory.length - 1].price, predictionPoint, targetLabel);
             }
         });
+
+        // ── Config Panel ──────────────────────────────────────────────
+        function toggleConfigPanel() {
+            const panel = document.getElementById('config-panel');
+            if (panel.style.display === 'none') {
+                panel.style.display = '';
+                populateConfigFields();
+            } else {
+                panel.style.display = 'none';
+            }
+        }
+
+        function populateConfigFields() {
+            const ts = serverData && serverData.tradingStatus;
+            if (!ts || !ts.config) return;
+            const c = ts.config;
+            document.getElementById('cfg-baseContracts').value = c.baseContracts || '';
+            document.getElementById('cfg-maxPositionContracts').value = c.maxPositionContracts || '';
+            document.getElementById('cfg-convictionMaxContracts').value = c.convictionMaxContracts || '';
+            document.getElementById('cfg-maxDailyLossCents').value = c.maxDailyLossCents ? (c.maxDailyLossCents / 100).toFixed(0) : '';
+            document.getElementById('cfg-maxDailyTrades').value = c.maxDailyTrades || '';
+        }
+
+        async function saveConfig() {
+            const btn = document.getElementById('cfg-save-btn');
+            const body = {};
+            const base = parseInt(document.getElementById('cfg-baseContracts').value);
+            const maxPos = parseInt(document.getElementById('cfg-maxPositionContracts').value);
+            const convMax = parseInt(document.getElementById('cfg-convictionMaxContracts').value);
+            const dailyLoss = parseFloat(document.getElementById('cfg-maxDailyLossCents').value);
+            const maxTrades = parseInt(document.getElementById('cfg-maxDailyTrades').value);
+            if (base > 0) body.baseContracts = base;
+            if (maxPos > 0) body.maxPositionContracts = maxPos;
+            if (convMax > 0) body.convictionMaxContracts = convMax;
+            if (dailyLoss > 0) body.maxDailyLossCents = Math.round(dailyLoss * 100);
+            if (maxTrades > 0) body.maxDailyTrades = maxTrades;
+
+            btn.textContent = 'Saving...';
+            btn.disabled = true;
+            try {
+                const resp = await fetch('/api/trading/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const result = await resp.json();
+                if (result.ok) {
+                    btn.textContent = 'Saved!';
+                    btn.style.color = '#3fb950';
+                    setTimeout(() => { btn.textContent = 'Save Settings'; btn.disabled = false; btn.style.color = '#3fb950'; }, 2000);
+                } else {
+                    btn.textContent = 'Error';
+                    btn.style.color = '#f85149';
+                    setTimeout(() => { btn.textContent = 'Save Settings'; btn.disabled = false; btn.style.color = '#3fb950'; }, 2000);
+                }
+            } catch (e) {
+                btn.textContent = 'Error';
+                btn.style.color = '#f85149';
+                setTimeout(() => { btn.textContent = 'Save Settings'; btn.disabled = false; btn.style.color = '#3fb950'; }, 2000);
+            }
+        }
 
         // ── Notifications ────────────────────────────────────────────
         let notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true';
