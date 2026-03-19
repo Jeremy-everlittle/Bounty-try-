@@ -118,16 +118,11 @@ async function fetchBRTIApprox() {
 }
 
 // ── Kalshi Market Fetching ──
-// ALWAYS use the PUBLIC production API for read-only market data.
-// The demo API may require auth and return limited fields.
-// Trading endpoints still use the configured environment (demo/prod).
-const KALSHI_PUBLIC_API = 'https://trading-api.kalshi.com/trade-api/v2';
-
 async function fetchKalshiData() {
     try {
-        // Use public production API for market data (no auth required)
+        const kalshiBase = kalshiAuth.getBaseUrl() + '/trade-api/v2';
         let data = await fetchJSON(
-            KALSHI_PUBLIC_API + '/markets?series_ticker=KXBTC15M&status=open&limit=100'
+            kalshiBase + '/markets?series_ticker=KXBTC15M&status=open&limit=100'
         );
         let markets = data ? (data.markets || []) : [];
 
@@ -138,7 +133,7 @@ async function fetchKalshiData() {
         // Fallback to unfiltered if needed
         if (markets.length === 0 || !hasFuture) {
             const allData = await fetchJSON(
-                KALSHI_PUBLIC_API + '/markets?series_ticker=KXBTC15M&limit=100'
+                kalshiBase + '/markets?series_ticker=KXBTC15M&limit=100'
             );
             if (allData && allData.markets) {
                 const existingTickers = new Set(markets.map(m => m.ticker));
@@ -161,17 +156,28 @@ async function fetchKalshiData() {
 
         if (!best) return { market: null, strike: null, closeTime: null, ticker: null };
 
-        // Get detailed market data from public API
+        // Get detailed market data — try with auth headers for full field access
         let detailedMarket = best;
         try {
-            const detail = await fetchJSON(
-                KALSHI_PUBLIC_API + '/markets/' + best.ticker
-            );
-            if (detail && detail.market) {
-                detailedMarket = detail.market;
-                console.log(`[kalshi] Detail fetch OK for ${best.ticker}`);
+            const detailPath = '/trade-api/v2/markets/' + best.ticker;
+            const headers = kalshiAuth.isConfigured()
+                ? kalshiAuth.getAuthHeaders('GET', detailPath)
+                : {};
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 8000);
+            const res = await fetch(kalshiBase + '/markets/' + best.ticker, {
+                signal: controller.signal,
+                headers,
+            });
+            clearTimeout(timer);
+            if (res.ok) {
+                const detail = await res.json();
+                if (detail && detail.market) {
+                    detailedMarket = detail.market;
+                    console.log(`[kalshi] Detail fetch OK for ${best.ticker}`);
+                }
             } else {
-                console.log(`[kalshi] Detail fetch returned null for ${best.ticker}, using list data`);
+                console.log(`[kalshi] Detail fetch ${res.status} for ${best.ticker}, using list data`);
             }
         } catch (e) {
             console.log(`[kalshi] Detail fetch failed for ${best.ticker}: ${e.message}`);
@@ -181,22 +187,8 @@ async function fetchKalshiData() {
         const strike = extractStrike(detailedMarket);
         const closeTime = new Date(best.close_time || best.expiration_time).toISOString();
 
-        // Debug: log all strike-related fields from the Kalshi API
-        const strikeDebug = {
-            ticker: best.ticker,
-            title: detailedMarket.title,
-            yes_sub_title: detailedMarket.yes_sub_title,
-            subtitle: detailedMarket.subtitle,
-            no_sub_title: detailedMarket.no_sub_title,
-            custom_strike: detailedMarket.custom_strike,
-            floor_strike: detailedMarket.floor_strike,
-            cap_strike: detailedMarket.cap_strike,
-            strike_type: detailedMarket.strike_type,
-            rules_primary: detailedMarket.rules_primary?.substring(0, 200),
-            extractedStrike: strike,
-            usedDetailEndpoint: detailedMarket !== best,
-        };
-        console.log(`[kalshi-debug] Market fields: ${JSON.stringify(strikeDebug)}`);
+        // Debug: log ALL fields from the market object so we can see what's available
+        console.log(`[kalshi-debug] ticker=${best.ticker} | strike=${strike} | title=${detailedMarket.title} | custom_strike=${detailedMarket.custom_strike} | floor_strike=${detailedMarket.floor_strike} | cap_strike=${detailedMarket.cap_strike} | yes_sub_title=${detailedMarket.yes_sub_title} | rules_primary=${(detailedMarket.rules_primary || '').substring(0, 150)} | all_keys=[${Object.keys(detailedMarket).join(',')}]`);
 
         return { market: detailedMarket, strike, closeTime, ticker: best.ticker };
     } catch (e) {
@@ -1011,31 +1003,17 @@ app.get('/api/learned-corrections', (req, res) => {
     res.json(engine.getLearnedCorrections());
 });
 
-// ── Debug: raw Kalshi market data ──
+// ── Debug: raw Kalshi market data (dumps EVERYTHING) ──
 app.get('/api/debug/kalshi-raw', (req, res) => {
     const m = state.kalshiMarket;
     if (!m) return res.json({ error: 'No Kalshi market loaded yet' });
+    // Return the ENTIRE market object plus our extracted values
     res.json({
-        ticker: m.ticker,
-        title: m.title,
-        subtitle: m.subtitle,
-        yes_sub_title: m.yes_sub_title,
-        no_sub_title: m.no_sub_title,
-        custom_strike: m.custom_strike,
-        floor_strike: m.floor_strike,
-        cap_strike: m.cap_strike,
-        strike_type: m.strike_type,
-        rules_primary: m.rules_primary,
-        rules_secondary: m.rules_secondary,
-        settlement_sources_description: m.settlement_sources_description,
-        event_title: m.event_title,
-        close_time: m.close_time,
-        expiration_time: m.expiration_time,
-        // Include ALL keys so we can see any undocumented fields
-        all_keys: Object.keys(m),
-        // Show what extractStrike returns
-        extractedStrike: state.kalshiStrike,
-        brtiPrice: state.brtiPrice,
+        _extractedStrike: state.kalshiStrike,
+        _brtiPrice: state.brtiPrice,
+        _kalshiTicker: state.kalshiTicker,
+        _allKeys: Object.keys(m),
+        ...m,
     });
 });
 
