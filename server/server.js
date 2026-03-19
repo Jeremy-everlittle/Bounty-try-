@@ -197,117 +197,73 @@ async function fetchKalshiData() {
     }
 }
 
+// Extract strike price ONLY from Kalshi API fields. No fallbacks or guessing.
 function extractStrike(m) {
     if (!m) return null;
 
-    // ── Priority 1: Extract target price from the title ──
-    // Kalshi KXBTC15M titles look like: "BTC 15 min · $70,031.06 target"
-    // This is the ACTUAL strike price shown in the Kalshi UI.
-    // The numeric fields (custom_strike, floor_strike) contain the resolution
-    // THRESHOLD ("at least X"), which is slightly different from the target.
+    // ── 1: "Target price: $X" in yes_sub_title / no_sub_title ──
+    for (const field of ['yes_sub_title', 'no_sub_title', 'subtitle']) {
+        if (!m[field] || typeof m[field] !== 'string') continue;
+        const text = m[field];
+        if (/TBD/i.test(text)) continue; // Not set yet
+
+        const match = text.match(/(?:Target price|target):\s*\$?([\d,]+\.?\d*)/i);
+        if (match) {
+            const v = parseFloat(match[1].replace(/,/g, ''));
+            if (v > 10000 && v < 500000) {
+                console.log(`[strike] From ${field}: $${v}`);
+                return v;
+            }
+        }
+    }
+
+    // ── 2: "$X target" in title ──
     if (m.title && typeof m.title === 'string') {
-        // Match "$70,031.06 target" pattern
-        const targetMatch = m.title.match(/\$?([\d,]+\.?\d*)\s*target/i);
-        if (targetMatch) {
-            const v = parseFloat(targetMatch[1].replace(/,/g, ''));
-            if (v > 40000 && v < 200000) {
-                console.log(`[strike] Extracted $${v} from title target: "${m.title}"`);
+        const match = m.title.match(/\$?([\d,]+\.?\d*)\s*target/i);
+        if (match) {
+            const v = parseFloat(match[1].replace(/,/g, ''));
+            if (v > 10000 && v < 500000) {
+                console.log(`[strike] From title: $${v}`);
                 return v;
             }
         }
     }
 
-    // ── Priority 2: Extract from yes_sub_title / subtitle ──
-    // These often contain "X or above" which is the target price
-    for (const field of ['yes_sub_title', 'subtitle']) {
+    // ── 3: "X or above" in text fields ──
+    for (const field of ['yes_sub_title', 'subtitle', 'no_sub_title']) {
         if (!m[field] || typeof m[field] !== 'string') continue;
-        const text = m[field];
-
-        let match = text.match(/\$?([\d,]+\.?\d*)\s*(or above|or more|or higher)/i);
+        const match = m[field].match(/\$?([\d,]+\.?\d*)\s*(or above|or more|or higher)/i);
         if (match) {
             const v = parseFloat(match[1].replace(/,/g, ''));
-            if (v > 40000 && v < 200000) {
-                console.log(`[strike] Extracted $${v} from ${field}: "${text}"`);
+            if (v > 10000 && v < 500000) {
+                console.log(`[strike] From ${field} "or above": $${v}`);
                 return v;
             }
         }
     }
 
-    // ── Priority 3: Parse the ticker itself ──
-    // KXBTC15M tickers encode the target: e.g. KXBTC15M-26MAR19-T70031
-    // The T-suffix is the target in whole dollars (T70031 = $70,031)
-    // Some tickers use cents: T7003106 = $70,031.06
-    if (m.ticker && typeof m.ticker === 'string') {
-        const tickerMatch = m.ticker.match(/T(\d+)$/);
-        if (tickerMatch) {
-            const raw = parseInt(tickerMatch[1], 10);
-            // If 5+ digits and in BTC dollar range directly
-            if (raw > 40000 && raw < 200000) {
-                console.log(`[strike] Extracted $${raw} from ticker: ${m.ticker}`);
-                return raw;
-            }
-            // If 7+ digits, likely in cents (e.g., 7003106 = $70,031.06)
-            if (raw > 4000000) {
-                const dollars = raw / 100;
-                if (dollars > 40000 && dollars < 200000) {
-                    console.log(`[strike] Extracted $${dollars} from ticker (cents): ${m.ticker}`);
-                    return dollars;
-                }
-            }
-        }
-    }
-
-    // ── Priority 4: Parse from text fields ──
-    const textFields = [
-        'yes_sub_title', 'subtitle', 'no_sub_title', 'rules_primary',
-        'rules_secondary', 'strike_description', 'settlement_sources_description',
-        'title', 'event_title'
-    ];
-    for (const field of textFields) {
-        if (!m[field] || typeof m[field] !== 'string') continue;
-        const text = m[field];
-
-        // "at least 69991.26" or "at least $69,991.26"
-        let match = text.match(/at least \$?([\d,]+\.?\d*)/i);
-        if (match) {
-            const v = parseFloat(match[1].replace(/,/g, ''));
-            if (v > 40000 && v < 200000) return v;
-        }
-
-        // "or above", "or more", "or higher"
-        match = text.match(/\$?([\d,]+\.?\d*)\s*(or above|or more|or higher)/i);
-        if (match) {
-            const v = parseFloat(match[1].replace(/,/g, ''));
-            if (v > 40000 && v < 200000) return v;
-        }
-
-        // "above $70,031.06"
-        match = text.match(/above\s+\$?([\d,]+\.?\d*)/i);
-        if (match) {
-            const v = parseFloat(match[1].replace(/,/g, ''));
-            if (v > 40000 && v < 200000) return v;
-        }
-    }
-
-    // ── Priority 5: Numeric strike fields (least reliable for display) ──
-    // custom_strike/floor_strike may contain the resolution threshold,
-    // not the display strike. Only use as last resort.
+    // ── 4: Numeric API fields ──
     for (const field of ['custom_strike', 'floor_strike', 'cap_strike']) {
         if (m[field] != null) {
             const raw = parseFloat(m[field]);
             if (isNaN(raw) || raw <= 0) continue;
+            // Could be in cents (e.g. 6959612 = $69,596.12)
             if (raw > 5000000) {
                 const dollars = raw / 100;
-                if (dollars > 40000 && dollars < 200000) return dollars;
+                if (dollars > 10000 && dollars < 500000) {
+                    console.log(`[strike] From ${field} (cents): $${dollars}`);
+                    return dollars;
+                }
             }
-            if (raw > 200000 && raw < 5000000) {
-                const dollars = raw / 100;
-                if (dollars > 400 && dollars < 200000) return dollars;
+            if (raw > 10000 && raw < 500000) {
+                console.log(`[strike] From ${field}: $${raw}`);
+                return raw;
             }
-            if (raw > 40000 && raw < 200000) return raw;
         }
     }
 
+    // No strike found — return null (do NOT guess or use BRTI)
+    console.log(`[strike] No strike found in API. yes_sub_title="${m.yes_sub_title}" title="${m.title}"`);
     return null;
 }
 
@@ -479,6 +435,7 @@ const state = {
     brtiSources: '',
     kalshiStrike: null,
     _lastStrikePeriodKey: null,  // tracks which period the strike was locked for
+    _strikeSource: null,         // 'api' when from Kalshi, null when waiting
     kalshiCloseTime: null,
     kalshiTicker: null,
     kalshiMarket: null,
@@ -563,24 +520,28 @@ async function fetchAllData() {
             state.kalshiTicker = k.ticker;
             state.kalshiMarket = k.market;
 
-            // Only update strike on period transitions or if not yet set.
-            // The strike must be LOCKED for the entire 15-minute period —
-            // overwriting it every tick was causing the strike to track the
-            // current price, making every prediction ~50% (zero edge).
+            // Strike management: ONLY use the Kalshi API strike.
+            // No fallbacks — if the API says "TBD", we wait.
             const currentPeriodKey = getPeriodKey();
             const isNewPeriod = currentPeriodKey !== state._lastStrikePeriodKey;
 
-            if (isNewPeriod || state.kalshiStrike === null) {
-                if (k.strike) {
+            if (isNewPeriod) {
+                // New period — reset strike (will be null until Kalshi sets it)
+                state.kalshiStrike = null;
+                state._strikeSource = null;
+                state._lastStrikePeriodKey = currentPeriodKey;
+                console.log(`[strike] New period ${currentPeriodKey} — waiting for Kalshi API strike`);
+            }
+
+            if (k.strike) {
+                // Kalshi API returned a real strike
+                if (state._strikeSource !== 'api' || state.kalshiStrike !== k.strike) {
                     state.kalshiStrike = k.strike;
-                    state._lastStrikePeriodKey = currentPeriodKey;
-                    console.log(`[strike] Locked strike=$${k.strike.toFixed(2)} for period ${currentPeriodKey} (from Kalshi API)`);
-                } else if (k.closeTime && state.brtiPrice) {
-                    // Fallback: use BRTI as strike ONLY at period start
-                    state.kalshiStrike = state.brtiPrice;
-                    state._lastStrikePeriodKey = currentPeriodKey;
-                    console.log(`[strike] Locked strike=$${state.brtiPrice.toFixed(2)} for period ${currentPeriodKey} (BRTI fallback — Kalshi returned no strike)`);
+                    state._strikeSource = 'api';
+                    console.log(`[strike] Got strike=$${k.strike.toFixed(2)} for period ${currentPeriodKey} from Kalshi API`);
                 }
+            } else if (!state.kalshiStrike) {
+                console.log(`[strike] Kalshi API returned no strike for ${currentPeriodKey} (yes_sub_title="${k.market?.yes_sub_title || 'N/A'}")`);
             }
         }
 
