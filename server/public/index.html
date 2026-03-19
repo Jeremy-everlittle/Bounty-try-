@@ -657,6 +657,41 @@
         .period-pnl-value { font-size: 14px; font-weight: 700; }
         .period-accuracy { font-size: 10px; color: #8b949e; margin-top: 4px; }
         .period-no-trades { font-size: 10px; color: #484f58; font-style: italic; margin-top: 4px; }
+        /* ── Trader Thought Bubble ── */
+        .trader-thought { margin-top: 8px; padding: 8px 10px; border-radius: 6px; font-size: 11px; }
+        .trader-thought-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 3px; }
+        .trader-thought-msg { font-weight: 600; font-size: 12px; }
+        .trader-thought-detail { font-size: 10px; margin-top: 3px; color: rgba(255,255,255,0.5); }
+        .trader-thought.thought-idle { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); }
+        .trader-thought.thought-idle .trader-thought-label { color: #8b949e; }
+        .trader-thought.thought-idle .trader-thought-msg { color: #8b949e; }
+        .trader-thought.thought-skip { background: rgba(210,153,34,0.1); border: 1px solid rgba(210,153,34,0.25); }
+        .trader-thought.thought-skip .trader-thought-label { color: #d29922; }
+        .trader-thought.thought-skip .trader-thought-msg { color: #d29922; }
+        .trader-thought.thought-buying { background: rgba(56,139,253,0.1); border: 1px solid rgba(56,139,253,0.25); }
+        .trader-thought.thought-buying .trader-thought-label { color: #58a6ff; }
+        .trader-thought.thought-buying .trader-thought-msg { color: #58a6ff; }
+        .trader-thought.thought-bought { background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.25); }
+        .trader-thought.thought-bought .trader-thought-label { color: #3fb950; }
+        .trader-thought.thought-bought .trader-thought-msg { color: #3fb950; }
+        .trader-thought.thought-holding { background: rgba(56,139,253,0.08); border: 1px solid rgba(56,139,253,0.2); }
+        .trader-thought.thought-holding .trader-thought-label { color: #58a6ff; }
+        .trader-thought.thought-holding .trader-thought-msg { color: #79c0ff; }
+        .trader-thought.thought-winning { background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.25); }
+        .trader-thought.thought-winning .trader-thought-label { color: #3fb950; }
+        .trader-thought.thought-winning .trader-thought-msg { color: #56d364; }
+        .trader-thought.thought-losing { background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.25); }
+        .trader-thought.thought-losing .trader-thought-label { color: #f85149; }
+        .trader-thought.thought-losing .trader-thought-msg { color: #f85149; }
+        .trader-thought.thought-selling { background: rgba(248,81,73,0.15); border: 1px solid rgba(248,81,73,0.3); }
+        .trader-thought.thought-selling .trader-thought-label { color: #f85149; }
+        .trader-thought.thought-selling .trader-thought-msg { color: #f85149; }
+        .trader-thought.thought-settled { background: rgba(136,87,255,0.1); border: 1px solid rgba(136,87,255,0.25); }
+        .trader-thought.thought-settled .trader-thought-label { color: #a371f7; }
+        .trader-thought.thought-settled .trader-thought-msg { color: #d2a8ff; }
+        .trader-thought.thought-blocked { background: rgba(248,81,73,0.08); border: 1px solid rgba(248,81,73,0.2); }
+        .trader-thought.thought-blocked .trader-thought-label { color: #f85149; }
+        .trader-thought.thought-blocked .trader-thought-msg { color: #f85149; }
         .trading-controls { display: flex; gap: 6px; margin-top: 8px; }
         .trading-btn { font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: #e6edf3; cursor: pointer; }
         .trading-btn:hover { background: rgba(255,255,255,0.1); }
@@ -757,6 +792,7 @@
                     <div class="trading-stat-value" id="trading-wl">0/0</div>
                 </div>
             </div>
+            <div id="trader-thought-area"></div>
             <div id="trading-position-area"></div>
             <div class="trading-controls">
                 <button class="trading-btn" id="trading-mode-btn" onclick="toggleTradingMode()">Toggle Mode</button>
@@ -1783,6 +1819,38 @@
 
             document.getElementById('trading-count').textContent = ts.daily.tradeCount;
             document.getElementById('trading-wl').textContent = ts.daily.wins + '/' + ts.daily.losses;
+
+            // Auto-trader thought
+            const thoughtArea = document.getElementById('trader-thought-area');
+            if (thoughtArea && ts.thought) {
+                const t = ts.thought;
+                const ago = Math.round((Date.now() - t.timestamp) / 1000);
+                const agoStr = ago < 60 ? ago + 's ago' : Math.floor(ago / 60) + 'm ago';
+                let detailHtml = '';
+                if (t.detail) {
+                    const parts = [];
+                    if (t.detail.edge !== undefined) parts.push('Edge: ' + (t.detail.edge * 100).toFixed(1) + '%');
+                    if (t.detail.quality !== undefined) parts.push('Quality: ' + (t.detail.quality * 100).toFixed(0) + '%');
+                    if (t.detail.probability !== undefined) parts.push('Prob: ' + (t.detail.probability * 100).toFixed(0) + '%');
+                    if (t.detail.kellyHasEdge !== undefined) parts.push('Kelly: ' + (t.detail.kellyHasEdge ? 'yes' : 'no'));
+                    if (t.detail.sigmaDistance) parts.push(t.detail.sigmaDistance + '\u03C3 from strike');
+                    if (t.detail.minutesRemaining !== undefined) parts.push(parseFloat(t.detail.minutesRemaining).toFixed(1) + 'm left');
+                    if (t.detail.side) parts.push(t.detail.side.toUpperCase());
+                    if (t.detail.contracts) parts.push(t.detail.contracts + ' contracts');
+                    if (t.detail.waitForBetter) parts.push('Waiting for better entry');
+                    if (t.detail.factors) {
+                        const f = t.detail.factors;
+                        const failed = Object.entries(f).filter(([k, v]) => !v).map(([k]) => k);
+                        if (failed.length > 0) parts.push('Failed: ' + failed.join(', '));
+                    }
+                    if (parts.length > 0) detailHtml = '<div class="trader-thought-detail">' + parts.join(' \u00B7 ') + '</div>';
+                }
+                thoughtArea.innerHTML = '<div class="trader-thought thought-' + t.status + '">' +
+                    '<div class="trader-thought-label">Auto Trader \u00B7 ' + agoStr + '</div>' +
+                    '<div class="trader-thought-msg">' + t.message + '</div>' +
+                    detailHtml +
+                    '</div>';
+            }
 
             // Current position
             const posArea = document.getElementById('trading-position-area');

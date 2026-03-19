@@ -31,6 +31,13 @@ const BALANCE_CACHE_MS = 30000; // refresh balance every 30s
 let orderInFlight = false;    // mutex: prevent concurrent order placement
 let fillFailedPeriods = {};   // { periodKey: timestamp } — cooldown after phantom/unfilled
 
+// Auto-trader thought status — exposed to the frontend
+let traderThought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
+
+function setThought(status, message, detail) {
+    traderThought = { status, message, timestamp: Date.now(), detail: detail || null };
+}
+
 const dailyStats = {
     date: new Date().toISOString().slice(0, 10),
     pnlCents: 0,
@@ -345,21 +352,30 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 
     const betQuality = prediction._betQuality;
     if (!betQuality || !betQuality.shouldBet || betQuality.betSize <= 0) {
+        const reason = !betQuality ? 'No bet quality data' : !betQuality.shouldBet ? betQuality.reason : 'Bet size is 0';
+        setThought('skip', reason, {
+            edge: betQuality?.edge, quality: betQuality?.quality,
+            waitForBetter: betQuality?.waitForBetter, suggestedWait: betQuality?.suggestedWait,
+            probability: prediction?.probability, factors: betQuality?.factors,
+            kellyHasEdge: betQuality?.kellyHasEdge,
+        });
         decisionLog.logSkip({
-            periodKey,
-            reason: !betQuality ? 'No bet quality data' : !betQuality.shouldBet ? betQuality.reason : 'Bet size is 0',
-            minutesAhead: null,
-            probability: prediction?.probability,
-            edge: betQuality?.edge,
-            currentPrice: prediction?.predictedPrice,
-            strike,
+            periodKey, reason, minutesAhead: null,
+            probability: prediction?.probability, edge: betQuality?.edge,
+            currentPrice: prediction?.predictedPrice, strike,
             details: betQuality ? { quality: betQuality.quality, betSize: betQuality.betSize, factors: betQuality.factors } : null,
         });
         return;
     }
 
     // Don't enter if we already have a position for this period
-    if (currentPosition && currentPosition.periodKey === periodKey) return;
+    if (currentPosition && currentPosition.periodKey === periodKey) {
+        setThought('holding', 'Holding position for this period', {
+            side: currentPosition.side, contracts: currentPosition.totalContracts || currentPosition.contracts,
+            entryPrice: currentPosition.entryPrice,
+        });
+        return;
+    }
 
     // Close stale position from a previous period — settle it instead of silently discarding
     if (currentPosition && currentPosition.periodKey !== periodKey) {
@@ -389,6 +405,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 
     const check = canTrade(periodKey);
     if (!check.ok) {
+        setThought('blocked', check.reason);
         console.log(`[trade-executor] Skipping entry: ${check.reason}`);
         decisionLog.logSkip({ periodKey, reason: 'canTrade failed: ' + check.reason, currentPrice: prediction?.predictedPrice, strike });
         return;
@@ -400,6 +417,9 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         config.maxPositionContracts,
         Math.round(betQuality.betSize * config.baseContracts)
     ));
+    setThought('buying', `Placing ${isUp ? 'UP' : 'DOWN'} bet: ${contracts}x ${side.toUpperCase()}`, {
+        edge: betQuality.edge, quality: betQuality.quality, betSize: betQuality.betSize,
+    });
 
     // Determine limit price — must be aggressive enough to fill
     // Use probability as our max willingness-to-pay, but try the orderbook first
@@ -421,6 +441,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     };
 
     if (config.paperMode) {
+        setThought('bought', `Bought ${contracts}x ${side.toUpperCase()} @ ${limitPrice}c (paper)`, { edge: betQuality.edge, quality: betQuality.quality });
         console.log(`[trade-executor] PAPER BUY: ${contracts}x ${side.toUpperCase()} on ${kalshiTicker} @ ${limitPrice}c | Edge=${tradeInfo.edge} Quality=${tradeInfo.quality}`);
         currentPosition = {
             ticker: kalshiTicker,
@@ -540,6 +561,10 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 
         // NEVER sell a winning position. Settlement pays 100¢. Any sell price < 100¢ loses money.
         if (onRightSide) {
+            setThought('winning', 'On right side of strike — holding to settlement', {
+                side: currentPosition.side, distFromStrike: ((currentPrice - strike) / strike * 100).toFixed(3) + '%',
+                minutesRemaining,
+            });
             return;
         }
 
@@ -555,8 +580,12 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         const isMathematicallyDead = (sigmaDistance >= 2.5 && minutesRemaining < 1.5) || sigmaDistance >= 3.0;
         if (!isMathematicallyDead) {
             // Hold — recovery is still plausible or spread eats any salvage value
+            setThought('losing', `Wrong side (${sigmaDistance.toFixed(1)}σ) — holding, recovery possible`, {
+                sigmaDistance: sigmaDistance.toFixed(1), minutesRemaining, recoveryProb: sigmaDistance < 2 ? '~5%' : '~1%',
+            });
             return;
         }
+        setThought('selling', `Mathematically dead (${sigmaDistance.toFixed(1)}σ, ${minutesRemaining.toFixed(1)}m left) — selling`);
     }
 
     // Only lost_cause sells reach this point (wrong side, >2.5σ, <1.5 min)
@@ -699,6 +728,7 @@ function onPeriodEnd(gradeResult) {
         dailyPnlCents: dailyStats.pnlCents,
     });
 
+    setThought('settled', `${wasCorrect ? 'WON' : 'LOST'}: ${pnl > 0 ? '+' : ''}$${(pnl / 100).toFixed(2)}`, { pnlCents: pnl, wasCorrect });
     console.log(`[trade-executor] Period settled: ${wasCorrect ? 'WIN' : 'LOSS'} | P&L: ${pnl > 0 ? '+' : ''}${(pnl / 100).toFixed(2)} | Daily: ${dailyStats.pnlCents > 0 ? '+' : ''}$${(dailyStats.pnlCents / 100).toFixed(2)}`);
 
     decisionLog.logSettlement({
@@ -1265,6 +1295,7 @@ function getStatus() {
             maxDailyTrades: config.maxDailyTrades,
         },
         recentTrades: tradeLog.slice(0, 50),
+        thought: { ...traderThought },
     };
 }
 
@@ -1328,52 +1359,81 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
         return { ok: true, side, direction, contracts, entryPrice: limitPrice, mode: 'paper' };
     }
 
-    // Live order
-    const minutesRemaining = 15; // conservative estimate
-    const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, minutesRemaining);
-    const cappedContracts = await capContractsByBalance(contracts, limitPrice);
-    if (cappedContracts <= 0) {
-        return { ok: false, reason: 'Insufficient balance for force bet' };
-    }
-
-    orderInFlight = true;
+    // Live order — retry with escalating price up to 3 attempts
+    const MAX_FORCE_ATTEMPTS = 3;
+    const PRICE_BUMP = 3; // bump 3¢ each retry
+    let minutesRemaining = 15;
+    // Estimate minutes remaining from period key if possible
     try {
-        const result = await trading.placeOrder({
-            ticker: kalshiTicker, side, action: 'buy', count: cappedContracts,
-            yesPrice: side === 'yes' ? limitPrice : undefined,
-            noPrice: side === 'no' ? limitPrice : undefined,
-        });
+        const now = new Date();
+        const mins = now.getMinutes();
+        const periodEnd = (Math.floor(mins / 15) + 1) * 15;
+        minutesRemaining = Math.max(1, periodEnd - mins);
+    } catch(e) { /* fallback to 15 */ }
 
-        let order = result.order || {};
-        if (order.status === 'canceled' || order.status === 'rejected') {
-            return { ok: false, reason: `Order ${order.status}: ${order.cancel_reason || 'unknown'}` };
+    for (let attempt = 1; attempt <= MAX_FORCE_ATTEMPTS; attempt++) {
+        const priceEscalation = (attempt - 1) * PRICE_BUMP;
+        const limitPrice = Math.min(95, (await getAggressivePrice(kalshiTicker, side, theoreticalPrice, minutesRemaining)) + priceEscalation);
+        const cappedContracts = await capContractsByBalance(contracts, limitPrice);
+        if (cappedContracts <= 0) {
+            return { ok: false, reason: 'Insufficient balance for force bet' };
         }
 
-        if (order.status === 'resting' || order.status === 'open') {
-            order = await waitForFill(order.order_id, order);
-        }
+        console.log(`[trade-executor] FORCE BET attempt ${attempt}/${MAX_FORCE_ATTEMPTS}: ${cappedContracts}x ${side.toUpperCase()} @ ${limitPrice}c`);
 
-        const fills = parseOrderFills(order);
-        let filledContracts = fills.filled;
-        if (filledContracts === 0) {
-            logTrade('buy_unfilled', { ...tradeInfo, orderId: order.order_id, finalStatus: order.status });
-            return { ok: false, reason: 'Order got 0 fills' };
-        }
+        orderInFlight = true;
+        try {
+            const result = await trading.placeOrder({
+                ticker: kalshiTicker, side, action: 'buy', count: cappedContracts,
+                yesPrice: side === 'yes' ? limitPrice : undefined,
+                noPrice: side === 'no' ? limitPrice : undefined,
+            });
 
-        currentPosition = {
-            ticker: kalshiTicker, side, contracts: filledContracts, entryPrice: limitPrice,
-            orderId: order.order_id, periodKey, entryTime: Date.now(),
-            totalCostCents: filledContracts * limitPrice, totalContracts: filledContracts,
-        };
-        logTrade('buy', { ...tradeInfo, limitPrice, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: cappedContracts });
-        dailyStats.tradeCount++;
-        return { ok: true, side, direction, contracts: filledContracts, entryPrice: limitPrice, mode: 'live', orderId: order.order_id };
-    } catch (err) {
-        logTrade('buy_error', { ...tradeInfo, error: err.message, response: err.response });
-        return { ok: false, reason: err.message };
-    } finally {
-        orderInFlight = false;
+            let order = result.order || {};
+            if (order.status === 'canceled' || order.status === 'rejected') {
+                if (attempt === MAX_FORCE_ATTEMPTS) {
+                    return { ok: false, reason: `Order ${order.status} after ${MAX_FORCE_ATTEMPTS} attempts: ${order.cancel_reason || 'unknown'}` };
+                }
+                console.log(`[trade-executor] Force bet attempt ${attempt} rejected — retrying with higher price`);
+                await sleep(1000);
+                continue;
+            }
+
+            if (order.status === 'resting' || order.status === 'open') {
+                order = await waitForFill(order.order_id, order, 8000); // shorter wait for force
+            }
+
+            const fills = parseOrderFills(order);
+            let filledContracts = fills.filled;
+            if (filledContracts === 0) {
+                logTrade('buy_unfilled', { ...tradeInfo, limitPrice, orderId: order.order_id, finalStatus: order.status, attempt });
+                if (attempt === MAX_FORCE_ATTEMPTS) {
+                    return { ok: false, reason: `No fills after ${MAX_FORCE_ATTEMPTS} attempts (last price: ${limitPrice}c)` };
+                }
+                console.log(`[trade-executor] Force bet attempt ${attempt} unfilled at ${limitPrice}c — retrying +${PRICE_BUMP}c`);
+                await sleep(1000);
+                continue;
+            }
+
+            currentPosition = {
+                ticker: kalshiTicker, side, contracts: filledContracts, entryPrice: limitPrice,
+                orderId: order.order_id, periodKey, entryTime: Date.now(),
+                totalCostCents: filledContracts * limitPrice, totalContracts: filledContracts,
+            };
+            logTrade('buy', { ...tradeInfo, limitPrice, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: cappedContracts, attempt });
+            dailyStats.tradeCount++;
+            return { ok: true, side, direction, contracts: filledContracts, entryPrice: limitPrice, mode: 'live', orderId: order.order_id, attempts: attempt };
+        } catch (err) {
+            logTrade('buy_error', { ...tradeInfo, error: err.message, response: err.response, attempt });
+            if (attempt === MAX_FORCE_ATTEMPTS) {
+                return { ok: false, reason: `Error after ${MAX_FORCE_ATTEMPTS} attempts: ${err.message}` };
+            }
+            await sleep(1000);
+        } finally {
+            orderInFlight = false;
+        }
     }
+    return { ok: false, reason: 'Force bet exhausted all retry attempts' };
 }
 
 module.exports = {
