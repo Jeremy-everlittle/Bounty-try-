@@ -366,10 +366,11 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         console.log(`[trade-executor] Stale position from ${currentPosition.periodKey} — auto-settling before new entry`);
         // We don't know the actual result, but the position should have been settled by onPeriodEnd.
         // If it wasn't (race condition), settle as unknown/loss to be conservative.
-        const staleContracts = currentPosition.contracts;
-        const staleEntry = currentPosition.entryPrice;
-        if (staleContracts > 0 && staleEntry > 0) {
-            const pnl = -staleContracts * staleEntry; // assume loss (worst case)
+        const staleContracts = currentPosition.totalContracts || currentPosition.contracts;
+        const staleCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+        const staleEntry = staleContracts > 0 ? Math.round(staleCost / staleContracts) : currentPosition.entryPrice;
+        if (staleContracts > 0 && staleCost > 0) {
+            const pnl = -staleCost; // assume loss (worst case)
             dailyStats.losses++;
             dailyStats.pnlCents += pnl;
             logTrade('settle', {
@@ -672,16 +673,18 @@ function onPeriodEnd(gradeResult) {
 
     // Position auto-settles on Kalshi. Track the P&L.
     const wasCorrect = gradeResult && gradeResult.correct;
-    const contracts = currentPosition.contracts;
-    const entryPrice = currentPosition.entryPrice;
+    // Use totalContracts/totalCostCents to include dip buys, late locks, re-entries
+    const contracts = currentPosition.totalContracts || currentPosition.contracts;
+    const totalCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+    const avgEntryPrice = contracts > 0 ? Math.round(totalCost / contracts) : currentPosition.entryPrice;
 
-    // P&L: if correct, payout is 100c per contract - entry. If wrong, lose entry.
+    // P&L: if correct, payout is 100c per contract - total cost. If wrong, lose total cost.
     let pnl;
     if (wasCorrect) {
-        pnl = contracts * (100 - entryPrice); // profit per contract
+        pnl = (contracts * 100) - totalCost; // total payout minus total cost
         dailyStats.wins++;
     } else {
-        pnl = -contracts * entryPrice; // loss per contract
+        pnl = -totalCost; // lose everything paid
         dailyStats.losses++;
     }
     dailyStats.pnlCents += pnl;
@@ -690,7 +693,7 @@ function onPeriodEnd(gradeResult) {
         ticker: currentPosition.ticker,
         side: currentPosition.side,
         contracts,
-        entryPrice,
+        entryPrice: avgEntryPrice,
         correct: wasCorrect,
         pnlCents: pnl,
         dailyPnlCents: dailyStats.pnlCents,
@@ -704,7 +707,8 @@ function onPeriodEnd(gradeResult) {
         pnlCents: pnl,
         dailyPnlCents: dailyStats.pnlCents,
         contracts,
-        entryPrice,
+        entryPrice: avgEntryPrice,
+        totalCostCents: totalCost,
         side: currentPosition.side,
         strikePrice: gradeResult?.strikePrice,
         settlementPrice: gradeResult?.settlementPrice,
