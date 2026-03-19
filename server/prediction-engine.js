@@ -37,6 +37,7 @@ const stabilityState = {
     consecutiveSameDirection: 0,
     lastRawProb: null,
     periodKey: null,
+    flipCount: 0,
 };
 
 // ── Online ML feature cache (for attaching to graded records) ──
@@ -1694,15 +1695,14 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     betSize = Math.max(0, Math.min(1.0, betSize));
 
     // ── Fee-adjusted Kelly fraction ──
-    // Kalshi fees: ~7 cents per side. For a 50c contract:
-    // Win profit: 0.93 - 0.50 - 0.07 = 0.36 (net of both fees)
-    // Loss: 0.50 + 0.07 = 0.57
-    // Need p > (cost + fee) / 0.93 = 0.57/0.93 = 61.3% to have edge
+    // Kalshi fees: ~1.5 cents per contract per side (reduced from old 7c schedule)
+    // At 50c contracts: win profit = 0.97 - 0.50 = 0.47, loss = 0.515
+    // Break-even: 0.515/0.985 ≈ 52.3% (was 61.3% with old 7c fees)
     // Quarter Kelly recommended with <200 sample track record
     const contractCost = 0.50; // approximate average contract price
-    const fee = 0.07;
-    const winProfit = (1.0 - fee) - contractCost - fee; // 0.36
-    const lossAmount = contractCost + fee; // 0.57
+    const fee = 0.015; // ~1.5 cents per side (Kalshi's current reduced fee schedule)
+    const winProfit = (1.0 - fee) - contractCost - fee; // 0.47
+    const lossAmount = contractCost + fee; // 0.515
     const kellyRaw = winProfit > 0
         ? (probForBet * winProfit - (1 - probForBet) * lossAmount) / winProfit
         : 0;
@@ -1728,7 +1728,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         },
         reason: !shouldBetAdjusted ?
             (sessionMult === 0 ? 'COOLING OFF — ' + sessionRisk.consecutiveLosses + ' consecutive losses, pausing' :
-             !kellyHasEdge ? 'No edge after Kalshi fees (need >' + ((lossAmount / (1 - fee)) * 100).toFixed(0) + '% win prob)' :
+             !kellyHasEdge ? 'No edge after Kalshi fees (need >' + ((lossAmount / (lossAmount + winProfit)) * 100).toFixed(0) + '% win prob)' :
              !factors.hasMinEdge ? 'Edge too thin (' + (edge*100).toFixed(1) + '%)' :
              !factors.notChoppy ? 'Market is choppy (ADX=' + chop.adx.toFixed(0) + ')' :
              !factors.notExhausted ? 'Momentum exhaustion detected' :
@@ -2257,7 +2257,7 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const onRightSide = !onWrongSide;
     const distanceFromStrike = currentPrice - strike;
     const distancePct = (Math.abs(distanceFromStrike) / strike) * 100;
-    const probForBet = betIsUp ? updPred.probability : (1 - updPred.probability);
+    let probForBet = betIsUp ? updPred.probability : (1 - updPred.probability);
     const origProbForBet = betIsUp ? origPred.probability : (1 - origPred.probability);
     const modelFlipped = betIsUp !== (updPred.predictedPrice >= strike);
     const origDirection = betIsUp ? 'UP' : 'DOWN';
@@ -2506,6 +2506,7 @@ function handleNewPeriod(periodKey, marketData, minutesAhead, strike, periodEnd)
 
 function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
     const raw = predictPrice(marketData, minutesAhead, strike);
+    const current = marketData.currentPrice;
 
     // Reset stability state on new period
     if (periodKey && periodKey !== stabilityState.periodKey) {
@@ -2514,6 +2515,7 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
         stabilityState.lockedDirection = null;
         stabilityState.consecutiveSameDirection = 0;
         stabilityState.lastRawProb = null;
+        stabilityState.flipCount = 0;
     }
 
     // Initialize locked direction from first prediction of the period
@@ -2521,43 +2523,79 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
         stabilityState.lockedDirection = raw.predictedPrice >= strike ? 'up' : 'down';
         stabilityState.smoothedProbability = raw.probability;
         stabilityState.lastRawProb = raw.probability;
+        stabilityState.flipCount = 0;
         return raw;
     }
 
-    // EMA smooth the probability — very low alpha = very stable
-    // Key insight: the original prediction was made with the most information
-    // about the period's setup. Mid-period noise should NOT override it easily.
-    const alpha = minutesAhead <= 2 ? 0.08 : minutesAhead <= 5 ? 0.12 : 0.18;
+    // Adaptive EMA alpha — more responsive as time passes (data becomes more relevant)
+    const alpha = minutesAhead <= 1 ? 0.40
+                : minutesAhead <= 2 ? 0.30
+                : minutesAhead <= 5 ? 0.20
+                : 0.15;
     stabilityState.smoothedProbability = alpha * raw.probability + (1 - alpha) * stabilityState.smoothedProbability;
     const smoothedP = stabilityState.smoothedProbability;
 
-    // Track consecutive same-direction readings to build conviction
+    // Track consecutive same-direction readings
     const rawIsUp = raw.predictedPrice >= strike;
     const rawDir = rawIsUp ? 'up' : 'down';
     if (rawDir === stabilityState.lockedDirection) {
         stabilityState.consecutiveSameDirection = Math.min(stabilityState.consecutiveSameDirection + 1, 30);
     } else {
-        // Very slow decay — don't flip from one bad reading
         stabilityState.consecutiveSameDirection = Math.max(0, stabilityState.consecutiveSameDirection - 1);
     }
 
-    // NEVER flip the locked direction. Period.
-    // The original prediction was made at the start of the period with the best
-    // information about the period setup. Mid-period signals are noise.
-    // If the user wants to exit, the sell signal system handles that separately.
-    // Flipping the prediction direction mid-cycle is what causes double losses:
-    // user sells original position at a loss, buys the flip, price reverts back.
-    //
-    // The smoothed probability still updates to reflect current conditions,
-    // but the DIRECTION stays locked to the original prediction.
-
-    // Always keep predicted price aligned with locked direction
-    // The direction is NEVER flipped — only the magnitude changes
+    // ── Direction flip logic ──
+    // Allow flipping when current price strongly contradicts the locked direction.
+    // The key insight: the CURRENT PRICE vs STRIKE is the strongest signal,
+    // especially as settlement approaches. If price is far on the wrong side
+    // with little time left, the original prediction is simply wrong.
     const lockedIsUp = stabilityState.lockedDirection === 'up';
-    if (lockedIsUp !== rawIsUp) {
+    const priceVsStrike = (current - strike) / strike; // positive = above strike
+    const currentIsUp = current >= strike;
+    const directionConflict = lockedIsUp !== currentIsUp;
+
+    // Compute how "wrong" the locked direction is using remaining volatility
+    // A large move relative to remaining vol means a flip is very unlikely to revert
+    const remainingVol = raw._remainingVol || 0.002;
+    const distanceInVols = Math.abs(priceVsStrike) / remainingVol;
+
+    // Flip criteria: price is on the wrong side AND the distance is significant
+    // relative to remaining volatility. Harder to flip early, easier near settlement.
+    // - With 10+ min left: need ~3 vols of distance (very unlikely to revert)
+    // - With 5 min left: need ~2 vols
+    // - With 2 min left: need ~1.5 vols
+    // - With <1 min left: need ~0.8 vols (price is almost certainly settling here)
+    const flipThreshold = minutesAhead <= 1 ? 0.8
+                        : minutesAhead <= 2 ? 1.5
+                        : minutesAhead <= 5 ? 2.0
+                        : 3.0;
+
+    // Also require the raw prediction model to agree (not just price position)
+    const rawModelAgrees = rawIsUp === currentIsUp;
+
+    // Limit total flips per period to prevent flip-flopping
+    const maxFlips = 2;
+    const canFlip = (stabilityState.flipCount || 0) < maxFlips;
+
+    let didFlip = false;
+    if (directionConflict && distanceInVols >= flipThreshold && rawModelAgrees && canFlip) {
+        console.log(`[prediction-engine] Direction flip: ${stabilityState.lockedDirection} → ${rawDir} ` +
+            `(price ${current.toFixed(2)} vs strike ${strike.toFixed(2)}, ` +
+            `${distanceInVols.toFixed(1)} vols away, ${minutesAhead.toFixed(1)} min left)`);
+        stabilityState.lockedDirection = rawDir;
+        stabilityState.consecutiveSameDirection = 0;
+        stabilityState.flipCount = (stabilityState.flipCount || 0) + 1;
+        // Reset smoothed probability toward the new direction
+        stabilityState.smoothedProbability = raw.probability;
+        didFlip = true;
+    }
+
+    // If direction still conflicts with raw (no flip happened), adjust predicted price
+    const finalLockedIsUp = stabilityState.lockedDirection === 'up';
+    if (finalLockedIsUp !== rawIsUp && !didFlip) {
         const confDist = Math.abs(smoothedP - 0.5) * 2;
-        const offset = (raw._remainingVol || 0.002) * strike * confDist * 0.5;
-        raw.predictedPrice = lockedIsUp
+        const offset = remainingVol * strike * confDist * 0.5;
+        raw.predictedPrice = finalLockedIsUp
             ? strike + Math.max(offset, 0.01)
             : strike - Math.max(offset, 0.01);
         raw.changePercent = ((raw.predictedPrice - strike) / strike) * 100;
@@ -2565,10 +2603,12 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
 
     // Save true raw probability before overwriting with smoothed
     const trueRawProb = raw.probability;
-    raw.probability = smoothedP;
+    raw.probability = didFlip ? raw.probability : smoothedP;
     raw._rawProbability = trueRawProb;
     raw._lockedDirection = stabilityState.lockedDirection;
     raw._consecutiveSame = stabilityState.consecutiveSameDirection;
+    raw._didFlip = didFlip;
+    raw._distanceInVols = distanceInVols;
     stabilityState.lastRawProb = trueRawProb;
 
     return raw;

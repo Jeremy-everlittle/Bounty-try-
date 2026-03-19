@@ -8,6 +8,8 @@ const { execSync } = require('child_process');
 
 const store = require('./store');
 const engine = require('./prediction-engine');
+const tradeExecutor = require('./trade-executor');
+const kalshiAuth = require('./kalshi-auth');
 
 // Build version — updated each commit (Railway has no .git dir)
 const BUILD_VERSION = {
@@ -118,8 +120,9 @@ async function fetchBRTIApprox() {
 async function fetchKalshiData() {
     try {
         // Try status=open first
+        const kalshiBase = kalshiAuth.getBaseUrl() + '/trade-api/v2';
         let data = await fetchJSON(
-            'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&status=open&limit=100'
+            kalshiBase + '/markets?series_ticker=KXBTC15M&status=open&limit=100'
         );
         let markets = data ? (data.markets || []) : [];
 
@@ -130,7 +133,7 @@ async function fetchKalshiData() {
         // Fallback to unfiltered if needed
         if (markets.length === 0 || !hasFuture) {
             const allData = await fetchJSON(
-                'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&limit=100'
+                kalshiBase + '/markets?series_ticker=KXBTC15M&limit=100'
             );
             if (allData && allData.markets) {
                 const existingTickers = new Set(markets.map(m => m.ticker));
@@ -157,7 +160,7 @@ async function fetchKalshiData() {
         let detailedMarket = best;
         try {
             const detail = await fetchJSON(
-                'https://api.elections.kalshi.com/trade-api/v2/markets/' + best.ticker
+                kalshiBase + '/markets/' + best.ticker
             );
             if (detail && detail.market) detailedMarket = detail.market;
         } catch (e) {}
@@ -526,6 +529,31 @@ async function fetchAllData() {
                 if (currentPeriod.periodKey !== null && state.brtiPrice) {
                     engine.gradeBayesianPrediction(state.brtiPrice, periodKey);
                     engine.gradePreviousPrediction(state.brtiPrice, periodKey);
+
+                    // ── Auto-trade: settle position P&L ──
+                    // Find the most recently graded entry from the PREVIOUS period
+                    const log = store.getPredictionLog();
+                    let lastGraded = null;
+                    for (let i = log.length - 1; i >= 0; i--) {
+                        if (log[i].correct !== undefined && log[i].correct !== null && log[i].periodKey !== periodKey) {
+                            lastGraded = log[i];
+                            break;
+                        }
+                    }
+                    console.log(`[server] Period transition ${currentPeriod.periodKey} → ${periodKey} | ` +
+                        `predLog size: ${log.length} | lastGraded: ${lastGraded ? lastGraded.periodKey + ' correct=' + lastGraded.correct : 'NONE'}`);
+                    if (lastGraded) {
+                        tradeExecutor.onPeriodEnd({ correct: lastGraded.correct, periodKey: lastGraded.periodKey });
+                    } else {
+                        console.warn(`[server] No graded prediction found for period ${currentPeriod.periodKey} — forcing onPeriodEnd with price-based grading`);
+                        // Fallback: grade based on current price vs strike
+                        if (currentPeriod.periodStartPrice && state.brtiPrice) {
+                            const correct = currentPeriod.originalPrediction ?
+                                (currentPeriod.originalPrediction.predictedPrice >= currentPeriod.periodStartPrice) === (state.brtiPrice >= currentPeriod.periodStartPrice)
+                                : false;
+                            tradeExecutor.onPeriodEnd({ correct, periodKey: currentPeriod.periodKey });
+                        }
+                    }
                 }
 
                 // New period - wait for Kalshi strike
@@ -561,6 +589,9 @@ async function fetchAllData() {
                     const bq = prediction._betQuality;
                     const qualStr = bq ? (bq.shouldBet ? 'BET' : 'SKIP') + ' (Q=' + (bq.quality*100).toFixed(0) + '% E=' + (bq.edge*100).toFixed(1) + '%)' : '';
                     console.log(`Prediction: ${prediction.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(prediction.probability * 100).toFixed(1)}% | Conf=${(prediction.confidence * 100).toFixed(0)}% | ${qualStr}`);
+
+                    // ── Auto-trade: evaluate entry ──
+                    tradeExecutor.onNewPrediction(prediction, state.kalshiTicker, state.kalshiStrike, periodKey).catch(e => console.error('[trade-executor] Entry error:', e.message));
                 } else {
                     store.updateCurrentPeriod({
                         periodKey,
@@ -601,6 +632,9 @@ async function fetchAllData() {
                 const bq = prediction._betQuality;
                 const qualStr = bq ? (bq.shouldBet ? 'BET' : 'SKIP') + ' (Q=' + (bq.quality*100).toFixed(0) + '% E=' + (bq.edge*100).toFixed(1) + '%)' : '';
                 console.log(`Late prediction: ${prediction.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(prediction.probability * 100).toFixed(1)}% | ${qualStr}`);
+
+                // ── Auto-trade: evaluate late entry ──
+                tradeExecutor.onNewPrediction(prediction, state.kalshiTicker, state.kalshiStrike, periodKey).catch(e => console.error('[trade-executor] Late entry error:', e.message));
             } else if (currentPeriod.originalPrediction && state.kalshiStrike) {
                 // Same period - update prediction
                 const marketData = {
@@ -617,6 +651,9 @@ async function fetchAllData() {
                     longShortRatio: state.longShortRatio
                 };
                 const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike, periodKey);
+                // Recompute bet quality based on updated prediction
+                const updatedBetQuality = engine.assessBetQuality(updated, state.kalshiStrike, marketData, minutesAhead);
+                updated._betQuality = updatedBetQuality;
                 store.updateCurrentPeriod({ updatedPrediction: updated });
 
                 // Compute sell signal
@@ -625,6 +662,24 @@ async function fetchAllData() {
                     state.kalshiStrike, state.brtiPrice, minutesAhead
                 );
                 store.setSellSignal(sellSignal);
+
+                // ── Auto-trade: evaluate exit (with guaranteed-win protection) ──
+                if (sellSignal) {
+                    tradeExecutor.onSellSignal(sellSignal, minutesAhead, updated, state.kalshiStrike, state.brtiPrice).catch(e => console.error('[trade-executor] Sell error:', e.message));
+                }
+
+                // ── Auto-trade: mid-period strategies ──
+                // Dip buyer: add to position when price moves against us at better odds
+                tradeExecutor.onDipOpportunity(updated, sellSignal, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
+                    .catch(e => console.error('[trade-executor] Dip buyer error:', e.message));
+
+                // Late lock: max entry when outcome is nearly guaranteed
+                tradeExecutor.onLateLock(updated, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
+                    .catch(e => console.error('[trade-executor] Late lock error:', e.message));
+
+                // Re-entry: get back in after an early sell if conditions recover
+                tradeExecutor.onReentryCheck(updated, state.kalshiStrike, state.brtiPrice, minutesAhead, state.kalshiTicker, periodKey)
+                    .catch(e => console.error('[trade-executor] Re-entry error:', e.message));
 
                 // Next period preview in last 3 minutes
                 if (minutesAhead <= 3) {
@@ -662,7 +717,7 @@ async function fetchAllData() {
             totalPredictions: store.getState().totalPredictionsMade,
             errorAnalysis: engine.getErrorSummary(),
             learnedCorrections: engine.getLearnedCorrections(),
-            betQuality: store.getCurrentPeriod()?.originalPrediction?._betQuality || null,
+            betQuality: store.getCurrentPeriod()?.updatedPrediction?._betQuality || store.getCurrentPeriod()?.originalPrediction?._betQuality || null,
             sessionRisk: {
                 consecutiveLosses: engine.sessionRisk.consecutiveLosses,
                 consecutiveWins: engine.sessionRisk.consecutiveWins,
@@ -672,10 +727,12 @@ async function fetchAllData() {
                 riskMultiplier: engine.getSessionRiskMultiplier()
             },
             fearGreed: state.fearGreed,
-            macroEvent: state.macroEvent
+            macroEvent: state.macroEvent,
+            tradingStatus: tradeExecutor.getStatus(),
+            kalshiEnvironment: kalshiAuth.getEnvironment()
         });
 
-        console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | ${wss.clients.size} clients`);
+        console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | Env=${kalshiAuth.getEnvironment()} | ${wss.clients.size} clients`);
 
     } catch (e) {
         console.error('Fetch cycle error:', e);
@@ -695,6 +752,11 @@ function broadcast(data) {
         }
     }
 }
+
+// Forward trade events to all WebSocket clients for push notifications
+tradeExecutor.onTradeNotify((trade) => {
+    broadcast({ type: 'trade', trade });
+});
 
 wss.on('connection', (ws) => {
     console.log(`Client connected (total: ${wss.clients.size})`);
@@ -721,7 +783,9 @@ wss.on('connection', (ws) => {
         serverVersion: BUILD_VERSION.hash,
         totalPredictions: store.getState().totalPredictionsMade,
         errorAnalysis: engine.getErrorSummary(),
-        learnedCorrections: engine.getLearnedCorrections()
+        learnedCorrections: engine.getLearnedCorrections(),
+        tradingStatus: tradeExecutor.getStatus(),
+        kalshiEnvironment: kalshiAuth.getEnvironment()
     }));
 
     ws.on('message', (raw) => {
@@ -802,6 +866,50 @@ app.get('/api/learned-corrections', (req, res) => {
     res.json(engine.getLearnedCorrections());
 });
 
+// ── Trading endpoints ──
+
+app.get('/api/trading/status', (req, res) => {
+    res.json(tradeExecutor.getStatus());
+});
+
+app.use(express.json());
+
+app.post('/api/trading/kill-switch', (req, res) => {
+    const active = req.body?.active !== false; // default to activating
+    tradeExecutor.setKillSwitch(active);
+    res.json({ killSwitch: active, message: active ? 'Kill switch ACTIVATED — all trading halted' : 'Kill switch deactivated' });
+});
+
+app.post('/api/trading/mode', (req, res) => {
+    const paperMode = req.body?.paperMode !== false;
+    tradeExecutor.setPaperMode(paperMode);
+    res.json({ paperMode, message: `Trading mode set to ${paperMode ? 'PAPER' : 'LIVE'}` });
+});
+
+app.get('/api/trading/environment', (req, res) => {
+    res.json({ environment: kalshiAuth.getEnvironment(), configured: kalshiAuth.isConfigured() });
+});
+
+app.post('/api/trading/environment', (req, res) => {
+    const env = req.body?.environment;
+    if (env !== 'demo' && env !== 'production') {
+        return res.status(400).json({ error: "environment must be 'demo' or 'production'" });
+    }
+    try {
+        tradeExecutor.setKillSwitch(true);
+        kalshiAuth.setEnvironment(env);
+        tradeExecutor.resetState();
+        const configured = kalshiAuth.isConfigured();
+        res.json({
+            environment: env,
+            configured,
+            message: `Switched to ${env.toUpperCase()}${configured ? '' : ' (credentials not configured!)'}. Kill switch activated — re-enable trading manually.`
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // GRACEFUL SHUTDOWN — Save state on exit
 // ═══════════════════════════════════════════════════════════════
@@ -844,6 +952,9 @@ server.listen(PORT, () => {
     console.log(`Health:   http://localhost:${PORT}/api/health`);
     console.log(`Predictions: http://localhost:${PORT}/api/predictions`);
     console.log(`History: http://localhost:${PORT}/api/history`);
+    console.log(`Trading: http://localhost:${PORT}/api/trading/status`);
+    console.log(`Trading mode: ${tradeExecutor.config.paperMode ? 'PAPER (simulated)' : 'LIVE'}${kalshiAuth.isConfigured() ? '' : ' | Kalshi API not configured'}`);
+    console.log(`Kalshi environment: ${kalshiAuth.getEnvironment().toUpperCase()} → ${kalshiAuth.getBaseUrl()}`);
 
     // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
     async function fetchLoop() {

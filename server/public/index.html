@@ -59,33 +59,6 @@
             50% { opacity: 0.6; box-shadow: 0 0 0 6px rgba(63, 185, 80, 0); }
         }
 
-        /* Position Tracker */
-        .position-tracker { margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); }
-        .position-tracker-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #8b949e; margin-bottom: 8px; }
-        .position-buttons { display: flex; gap: 8px; margin-bottom: 8px; }
-        .position-btn { flex: 1; padding: 10px 0; border: 2px solid rgba(255,255,255,0.15); border-radius: 8px; background: rgba(255,255,255,0.04); color: #c9d1d9; font-size: 13px; font-weight: 700; cursor: pointer; text-align: center; transition: all 0.2s; text-transform: uppercase; letter-spacing: 0.5px; }
-        .position-btn:active { transform: scale(0.96); }
-        .position-btn.buy-up { border-color: rgba(63,185,80,0.4); }
-        .position-btn.buy-up:hover, .position-btn.buy-up.active { background: rgba(63,185,80,0.2); border-color: #3fb950; color: #3fb950; }
-        .position-btn.buy-down { border-color: rgba(248,81,73,0.4); }
-        .position-btn.buy-down:hover, .position-btn.buy-down.active { background: rgba(248,81,73,0.2); border-color: #f85149; color: #f85149; }
-        .position-btn.sold { border-color: rgba(139,148,158,0.4); }
-        .position-btn.sold:hover, .position-btn.sold.active { background: rgba(139,148,158,0.15); border-color: #8b949e; color: #8b949e; }
-        .position-btn.exit-btn { border-color: rgba(210,153,34,0.4); }
-        .position-btn.exit-btn:hover, .position-btn.exit-btn.active { background: rgba(210,153,34,0.15); border-color: #d29922; color: #d29922; }
-        .position-info { padding: 8px 10px; border-radius: 8px; margin-top: 6px; font-size: 12px; }
-        .position-info .position-direction { font-weight: 700; font-size: 14px; }
-        .position-info .position-entry { font-size: 11px; color: #8b949e; margin-top: 2px; }
-        .position-info .position-pnl { font-size: 13px; font-weight: 700; margin-top: 4px; }
-        .position-advice { margin-top: 8px; padding: 10px 12px; border-radius: 8px; font-size: 12px; font-weight: 600; }
-        .position-advice.advice-hold { background: rgba(63,185,80,0.12); color: #3fb950; border: 1px solid rgba(63,185,80,0.25); }
-        .position-advice.advice-caution { background: rgba(210,153,34,0.12); color: #d29922; border: 1px solid rgba(210,153,34,0.25); }
-        .position-advice.advice-sell { background: rgba(248,81,73,0.15); color: #f85149; border: 1px solid rgba(248,81,73,0.35); }
-        .position-advice.advice-winning { background: rgba(63,185,80,0.18); color: #56d364; border: 1px solid rgba(63,185,80,0.4); }
-        .position-advice-icon { font-size: 16px; margin-right: 6px; }
-        .position-advice-text { line-height: 1.4; }
-        .position-advice-detail { font-size: 10px; font-weight: 400; opacity: 0.7; margin-top: 3px; }
-
         .sell-signal { padding: 10px 14px; border-radius: 10px; margin-top: 10px; }
         .sell-signal-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
         .sell-signal-icon { font-size: 16px; }
@@ -617,11 +590,60 @@
             margin-top: 20px;
             line-height: 1.5;
         }
+        /* ── Auto-Trading Panel ── */
+        .trading-panel { padding: 12px 14px; border-radius: 10px; margin-top: 12px; border: 1px solid rgba(255,255,255,0.1); background: rgba(22,27,34,0.8); }
+        .trading-panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .trading-panel-title { font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #8b949e; }
+        .trading-mode-badge { font-size: 10px; font-weight: 800; letter-spacing: 1.5px; padding: 2px 8px; border-radius: 4px; }
+        .trading-mode-paper { background: rgba(210,153,34,0.25); color: #d29922; border: 1px solid rgba(210,153,34,0.4); }
+        .trading-mode-live { background: rgba(63,185,80,0.25); color: #3fb950; border: 1px solid rgba(63,185,80,0.4); }
+        .trading-mode-off { background: rgba(248,81,73,0.25); color: #f85149; border: 1px solid rgba(248,81,73,0.4); }
+        .trading-stats { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 8px; margin-top: 8px; }
+        .trading-stat { text-align: center; }
+        .trading-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: #8b949e; }
+        .trading-stat-value { font-size: 14px; font-weight: 700; margin-top: 2px; }
+        .trading-position { margin-top: 8px; padding: 8px; border-radius: 6px; background: rgba(56,139,253,0.12); border: 1px solid rgba(56,139,253,0.3); }
+        .trading-position-label { font-size: 10px; color: #58a6ff; font-weight: 600; }
+        .trading-position-detail { font-size: 12px; font-weight: 700; color: #e6edf3; margin-top: 2px; }
+        .trading-recent { margin-top: 8px; }
+        .trading-recent-title { font-size: 10px; color: #8b949e; font-weight: 600; margin-bottom: 4px; }
+        .trading-recent-entry { font-size: 10px; color: #e6edf3; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        /* ── Trade History ── */
+        .trade-history-header { display: flex; align-items: center; justify-content: space-between; cursor: pointer; padding: 4px 0; }
+        .trade-history-toggle { font-size: 10px; color: #8b949e; transition: transform 0.2s; }
+        .trade-history-toggle.collapsed { transform: rotate(-90deg); }
+        .trade-history-list { max-height: 400px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.15) transparent; }
+        .trade-history-item { padding: 8px; margin-bottom: 4px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); }
+        .trade-history-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+        .trade-history-type { font-size: 9px; font-weight: 800; letter-spacing: 0.8px; padding: 1px 6px; border-radius: 3px; }
+        .trade-history-side { font-size: 11px; font-weight: 700; color: #e6edf3; }
+        .trade-history-dir { font-size: 11px; font-weight: 700; }
+        .trade-history-time { font-size: 10px; color: #8b949e; margin-left: auto; }
+        .trade-history-details { display: flex; gap: 10px; font-size: 10px; color: #b0b8c1; margin-top: 4px; flex-wrap: wrap; }
+        .trade-history-pnl { font-size: 11px; font-weight: 700; margin-top: 3px; }
+        .trade-history-meta { display: flex; gap: 8px; font-size: 9px; color: #8b949e; margin-top: 3px; }
+        .trade-history-error { font-size: 9px; color: #f85149; margin-top: 3px; word-break: break-all; }
+        .trade-history-ticker { font-size: 9px; color: #484f58; margin-top: 2px; font-family: monospace; }
+        .trading-controls { display: flex; gap: 6px; margin-top: 8px; }
+        .trading-btn { font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: #e6edf3; cursor: pointer; }
+        .trading-btn:hover { background: rgba(255,255,255,0.1); }
+        .trading-btn-danger { color: #f85149; border-color: rgba(248,81,73,0.4); }
+        .trading-btn-danger:hover { background: rgba(248,81,73,0.15); }
+        .trading-not-configured { font-size: 11px; color: #8b949e; text-align: center; padding: 10px; }
+        /* ── Environment Toggle ── */
+        .env-toggle { display: flex; gap: 4px; margin: 8px 0; padding: 4px; background: rgba(0,0,0,0.3); border-radius: 6px; }
+        .env-btn { flex: 1; padding: 5px 8px; border: 1px solid transparent; border-radius: 4px; font-size: 10px; font-weight: 800; letter-spacing: 1.2px; text-align: center; cursor: pointer; background: transparent; color: #8b949e; transition: all 0.2s; }
+        .env-btn:hover { background: rgba(255,255,255,0.05); }
+        .env-btn.active-demo { background: rgba(63,185,80,0.2); color: #3fb950; border-color: rgba(63,185,80,0.4); }
+        .env-btn.active-prod { background: rgba(248,81,73,0.2); color: #f85149; border-color: rgba(248,81,73,0.4); }
+        .env-header-badge { display: inline-block; font-size: 9px; font-weight: 800; letter-spacing: 1.2px; padding: 1px 6px; border-radius: 3px; margin-left: 8px; vertical-align: middle; }
+        .env-header-demo { background: rgba(63,185,80,0.25); color: #3fb950; }
+        .env-header-prod { background: rgba(248,81,73,0.25); color: #f85149; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>BTC Predictor</h1>
+        <h1>BTC Predictor <span class="env-header-badge env-header-demo" id="env-header-badge">DEMO</span></h1>
         <p><span class="live-dot"></span>Kalshi BTC Up or Down &middot; 15 min</p>
     </div>
 
@@ -674,16 +696,41 @@
         <div id="prebuy-signal-badge"></div>
         <div id="sell-signal-badge"></div>
 
-        <!-- Position Tracker -->
-        <div class="position-tracker" id="position-tracker">
-            <div class="position-tracker-label">My Position</div>
-            <div class="position-buttons" id="position-buttons">
-                <button class="position-btn buy-up" id="btn-buy-up" onclick="recordPosition('up')">Bought UP</button>
-                <button class="position-btn buy-down" id="btn-buy-down" onclick="recordPosition('down')">Bought DOWN</button>
-                <button class="position-btn sold exit-btn" id="btn-sold" onclick="recordPosition('sold')" style="display:none">I Sold</button>
+        <!-- Auto-Trading Panel -->
+        <div class="trading-panel" id="trading-panel">
+            <div class="trading-panel-header">
+                <span class="trading-panel-title">Auto Trading</span>
+                <span class="trading-mode-badge" id="trading-mode-badge">--</span>
             </div>
-            <div id="position-info"></div>
-            <div id="position-advice"></div>
+            <div class="env-toggle" id="env-toggle">
+                <button class="env-btn active-demo" id="env-btn-demo" onclick="switchEnvironment('demo')">DEMO</button>
+                <button class="env-btn" id="env-btn-prod" onclick="switchEnvironment('production')">PROD</button>
+            </div>
+            <div class="trading-stats">
+                <div class="trading-stat">
+                    <div class="trading-stat-label">Balance</div>
+                    <div class="trading-stat-value" id="trading-balance">--</div>
+                </div>
+                <div class="trading-stat">
+                    <div class="trading-stat-label">Daily P&L</div>
+                    <div class="trading-stat-value" id="trading-pnl">$0.00</div>
+                </div>
+                <div class="trading-stat">
+                    <div class="trading-stat-label">Trades</div>
+                    <div class="trading-stat-value" id="trading-count">0</div>
+                </div>
+                <div class="trading-stat">
+                    <div class="trading-stat-label">W/L</div>
+                    <div class="trading-stat-value" id="trading-wl">0/0</div>
+                </div>
+            </div>
+            <div id="trading-position-area"></div>
+            <div class="trading-recent" id="trading-recent-area"></div>
+            <div class="trading-controls">
+                <button class="trading-btn" id="trading-mode-btn" onclick="toggleTradingMode()">Toggle Mode</button>
+                <button class="trading-btn trading-btn-danger" id="trading-kill-btn" onclick="toggleKillSwitch()">Kill Switch</button>
+                <button class="trading-btn" id="notif-btn" onclick="toggleNotifications()" style="font-size:12px">Notifications: OFF</button>
+            </div>
         </div>
 
         <!-- Wallet removed - will be re-added later -->
@@ -830,6 +877,8 @@
                             mergePredictionLogs(msg.predictionLog);
                             renderPredictionHistory();
                         }
+                    } else if (msg.type === 'trade') {
+                        handleTradeNotification(msg.trade);
                     }
                 } catch (e) {
                     console.error('WebSocket message parse error:', e);
@@ -1396,8 +1445,9 @@
             const el = document.getElementById(containerId);
             if (!el) return;
 
-            // Don't show pre-buy if user already has a position
-            if (myPosition) { el.innerHTML = ''; return; }
+            // Don't show pre-buy if auto-trading already has a position
+            const ts = serverData && serverData.tradingStatus;
+            if (ts && ts.currentPosition) { el.innerHTML = ''; return; }
 
             // Server-only: need betQuality and a prediction
             const bq = serverData && serverData.betQuality ? serverData.betQuality : null;
@@ -1405,12 +1455,16 @@
             const origPred = pred && pred.originalPrediction;
             if (!bq || !origPred || !kalshiStrike) { el.innerHTML = ''; return; }
 
+            // Use updated prediction if available (reflects current market conditions)
+            const updatedPred = pred && pred.updatedPrediction;
+            const activePred = updatedPred || origPred;
+
             const minutesLeft = currentTarget ? Math.max(0, getSecondsUntilTarget(currentTarget) / 60) : 15;
-            const isUp = origPred.predictedPrice >= kalshiStrike;
+            const isUp = activePred.predictedPrice >= kalshiStrike;
             const direction = isUp ? 'UP' : 'DOWN';
             const dirColor = isUp ? '#3fb950' : '#f85149';
             const dirBg = isUp ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
-            const probForBet = isUp ? origPred.probability : (1 - origPred.probability);
+            const probForBet = isUp ? activePred.probability : (1 - activePred.probability);
 
             // Determine level from bet quality
             let level, shortLabel, advice;
@@ -1469,11 +1523,279 @@
                     '</div>' +
                     '<div class="prebuy-advice">' + advice + '</div>' +
                     '<div class="prebuy-metrics">' +
-                        '<span class="prebuy-metric">Conf: ' + (origPred.confidence * 100).toFixed(0) + '%</span>' +
+                        '<span class="prebuy-metric">Conf: ' + (activePred.confidence * 100).toFixed(0) + '%</span>' +
                         '<span class="prebuy-metric">Time: ' + minutesLeft.toFixed(0) + 'm</span>' +
                     '</div>' +
                     qualityBar +
                 '</div>';
+        }
+
+        // ── Auto-Trading Panel Rendering ──
+        function renderTradingPanel() {
+            const ts = serverData && serverData.tradingStatus ? serverData.tradingStatus : null;
+            const panel = document.getElementById('trading-panel');
+            if (!panel) return;
+
+            if (!ts) {
+                panel.style.display = 'none';
+                return;
+            }
+            panel.style.display = '';
+
+            // Environment toggle
+            const currentEnv = serverData.kalshiEnvironment || 'demo';
+            const demoBtn = document.getElementById('env-btn-demo');
+            const prodBtn = document.getElementById('env-btn-prod');
+            const headerBadge = document.getElementById('env-header-badge');
+            if (demoBtn && prodBtn) {
+                demoBtn.className = 'env-btn' + (currentEnv === 'demo' ? ' active-demo' : '');
+                prodBtn.className = 'env-btn' + (currentEnv === 'production' ? ' active-prod' : '');
+            }
+            if (headerBadge) {
+                headerBadge.textContent = currentEnv === 'production' ? 'PROD' : 'DEMO';
+                headerBadge.className = 'env-header-badge ' + (currentEnv === 'production' ? 'env-header-prod' : 'env-header-demo');
+            }
+
+            // Mode badge
+            const badge = document.getElementById('trading-mode-badge');
+            if (ts.killSwitch) {
+                badge.textContent = 'KILLED';
+                badge.className = 'trading-mode-badge trading-mode-off';
+            } else if (ts.paperMode) {
+                badge.textContent = 'PAPER';
+                badge.className = 'trading-mode-badge trading-mode-paper';
+            } else if (ts.configured) {
+                badge.textContent = 'LIVE';
+                badge.className = 'trading-mode-badge trading-mode-live';
+            } else {
+                badge.textContent = 'NOT CONFIGURED';
+                badge.className = 'trading-mode-badge trading-mode-off';
+            }
+
+            // Balance
+            const balEl = document.getElementById('trading-balance');
+            if (ts.balanceCents !== null && ts.balanceCents !== undefined) {
+                const bal = ts.balanceCents / 100;
+                balEl.textContent = '$' + bal.toFixed(2);
+                balEl.style.color = '#e6edf3';
+            } else {
+                balEl.textContent = '--';
+                balEl.style.color = '#8b949e';
+            }
+
+            // Stats
+            const pnl = (ts.daily.pnlCents / 100);
+            const pnlEl = document.getElementById('trading-pnl');
+            pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+            pnlEl.style.color = pnl >= 0 ? '#3fb950' : '#f85149';
+
+            document.getElementById('trading-count').textContent = ts.daily.tradeCount;
+            document.getElementById('trading-wl').textContent = ts.daily.wins + '/' + ts.daily.losses;
+
+            // Current position
+            const posArea = document.getElementById('trading-position-area');
+            if (ts.currentPosition) {
+                const p = ts.currentPosition;
+                const costCents = p.totalCostCents || (p.contracts * p.entryPrice);
+                const maxPayoutCents = (p.totalContracts || p.contracts) * 100;
+                const maxProfitCents = maxPayoutCents - costCents;
+                const holdMin = Math.floor(p.holdingSeconds / 60);
+                const holdSec = p.holdingSeconds % 60;
+                const holdStr = holdMin > 0 ? holdMin + 'm ' + holdSec + 's' : holdSec + 's';
+                posArea.innerHTML = '<div class="trading-position">' +
+                    '<div class="trading-position-label">OPEN POSITION</div>' +
+                    '<div class="trading-position-detail">' +
+                    p.contracts + 'x ' + p.side.toUpperCase() + ' @ ' + p.entryPrice + '\u00A2' +
+                    ' &middot; ' + holdStr +
+                    '</div>' +
+                    '<div style="display:flex;gap:12px;margin-top:4px">' +
+                    '<div style="font-size:10px;color:#8b949e">Cost: <span style="color:#e6edf3;font-weight:700">$' + (costCents / 100).toFixed(2) + '</span></div>' +
+                    '<div style="font-size:10px;color:#8b949e">Max Payout: <span style="color:#3fb950;font-weight:700">$' + (maxPayoutCents / 100).toFixed(2) + '</span></div>' +
+                    '<div style="font-size:10px;color:#8b949e">Max Profit: <span style="color:#56d364;font-weight:700">+$' + (maxProfitCents / 100).toFixed(2) + '</span></div>' +
+                    '</div>' +
+                    '</div>';
+            } else {
+                posArea.innerHTML = '';
+            }
+
+            // Trade history
+            const recentArea = document.getElementById('trading-recent-area');
+            if (ts.recentTrades && ts.recentTrades.length > 0) {
+                let html = '<div class="trade-history-header" onclick="toggleTradeHistory()">' +
+                    '<span class="trading-recent-title" style="cursor:pointer">Trade History (' + ts.recentTrades.length + ')</span>' +
+                    '<span class="trade-history-toggle" id="trade-history-toggle">\u25BC</span>' +
+                    '</div>' +
+                    '<div class="trade-history-list" id="trade-history-list">';
+                for (const t of ts.recentTrades) {
+                    const time = new Date(t.time).toLocaleTimeString();
+                    const date = new Date(t.time).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                    const isSettle = t.type === 'settle';
+                    const isBuy = t.type === 'buy';
+                    const isSell = t.type === 'sell';
+                    const isDipBuy = t.type === 'dip_buy';
+                    const isLateLock = t.type === 'late_lock' || t.type === 'late_lock_add';
+                    const isReentry = t.type === 're_entry';
+                    const isError = t.type.includes('error') || t.type.includes('failed');
+
+                    // Type badge colors
+                    let typeBg, typeColor, typeLabel;
+                    if (isSettle) {
+                        typeBg = t.correct ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
+                        typeColor = t.correct ? '#3fb950' : '#f85149';
+                        typeLabel = t.correct ? 'WIN' : 'LOSS';
+                    } else if (isDipBuy) {
+                        typeBg = 'rgba(136,87,255,0.2)'; typeColor = '#a371f7'; typeLabel = 'DIP BUY';
+                    } else if (isLateLock) {
+                        typeBg = 'rgba(63,185,80,0.25)'; typeColor = '#56d364'; typeLabel = 'LOCK';
+                    } else if (isReentry) {
+                        typeBg = 'rgba(56,139,253,0.25)'; typeColor = '#79c0ff'; typeLabel = 'RE-ENTRY';
+                    } else if (isBuy) {
+                        typeBg = 'rgba(56,139,253,0.2)'; typeColor = '#58a6ff'; typeLabel = 'BUY';
+                    } else if (isSell) {
+                        typeBg = 'rgba(210,153,34,0.2)'; typeColor = '#d29922'; typeLabel = 'SELL';
+                    } else if (isError) {
+                        typeBg = 'rgba(248,81,73,0.15)'; typeColor = '#f85149'; typeLabel = 'ERROR';
+                    } else {
+                        typeBg = 'rgba(255,255,255,0.08)'; typeColor = '#8b949e'; typeLabel = t.type.toUpperCase();
+                    }
+
+                    // Cost and payout for buy/settle entries
+                    const costCents = (t.contracts && t.limitPrice) ? t.contracts * t.limitPrice : (t.contracts && t.entryPrice) ? t.contracts * t.entryPrice : 0;
+                    const maxPayoutCents = t.contracts ? t.contracts * 100 : 0;
+
+                    html += '<div class="trade-history-item">' +
+                        '<div class="trade-history-row">' +
+                            '<span class="trade-history-type" style="background:' + typeBg + ';color:' + typeColor + '">' + typeLabel + '</span>' +
+                            '<span class="trade-history-side">' + (t.side ? t.side.toUpperCase() : '') + '</span>' +
+                            '<span class="trade-history-dir" style="color:' + (t.direction === 'UP' ? '#3fb950' : t.direction === 'DOWN' ? '#f85149' : '#8b949e') + '">' +
+                                (t.direction ? (t.direction === 'UP' ? '\u25B2' : '\u25BC') + ' ' + t.direction : '') +
+                            '</span>' +
+                            '<span class="trade-history-time">' + date + ' ' + time + '</span>' +
+                        '</div>';
+
+                    // Details row
+                    if (t.contracts) {
+                        const price = t.limitPrice || t.entryPrice || 0;
+                        html += '<div class="trade-history-details">' +
+                            '<span>' + t.contracts + 'x @ ' + price + '\u00A2</span>';
+                        if (costCents > 0) {
+                            html += '<span>Cost: $' + (costCents / 100).toFixed(2) + '</span>';
+                        }
+                        if (isBuy && maxPayoutCents > 0) {
+                            html += '<span style="color:#3fb950">Max Payout: $' + (maxPayoutCents / 100).toFixed(2) + '</span>';
+                        }
+                        html += '</div>';
+                    }
+
+                    // P&L row for settled trades
+                    if (t.pnlCents !== undefined) {
+                        const pnlPositive = t.pnlCents > 0;
+                        html += '<div class="trade-history-pnl" style="color:' + (pnlPositive ? '#3fb950' : '#f85149') + '">' +
+                            'P&L: ' + (pnlPositive ? '+' : '') + '$' + (t.pnlCents / 100).toFixed(2) +
+                            (t.dailyPnlCents !== undefined ? ' &middot; Daily: ' + (t.dailyPnlCents >= 0 ? '+' : '') + '$' + (t.dailyPnlCents / 100).toFixed(2) : '') +
+                            '</div>';
+                    }
+
+                    // Edge/quality for buy entries
+                    if (t.edge || t.quality) {
+                        html += '<div class="trade-history-meta">';
+                        if (t.edge) html += '<span>Edge: ' + t.edge + '</span>';
+                        if (t.quality) html += '<span>Quality: ' + t.quality + '</span>';
+                        if (t.betSize) html += '<span>Size: ' + (parseFloat(t.betSize) * 100).toFixed(0) + '%</span>';
+                        html += '</div>';
+                    }
+
+                    // Strategy-specific details
+                    if (t.strategy) {
+                        html += '<div class="trade-history-meta" style="color:' + typeColor + '">';
+                        if (t.strategy === 'dip_buyer' && t.dipImprovement) html += '<span>Dip: ' + t.dipImprovement + ' cheaper</span>';
+                        if (t.strategy === 'dip_buyer' && t.existingContracts) html += '<span>Added to ' + t.existingContracts + ' existing</span>';
+                        if ((t.strategy === 'late_lock' || t.strategy === 'late_lock_add') && t.sigmaDistance) html += '<span>' + t.sigmaDistance + ' from strike</span>';
+                        if (t.expectedProfit) html += '<span>Expected: ' + t.expectedProfit + '</span>';
+                        if (t.strategy === 're_entry' && t.originalSellReason) html += '<span>After sell: ' + t.originalSellReason + '</span>';
+                        if (t.probForBet) html += '<span>Prob: ' + t.probForBet + '</span>';
+                        html += '</div>';
+                    }
+
+                    // Error info
+                    if (t.error) {
+                        html += '<div class="trade-history-error">' + t.error + '</div>';
+                    }
+
+                    // Ticker
+                    if (t.ticker) {
+                        html += '<div class="trade-history-ticker">' + t.ticker + '</div>';
+                    }
+
+                    html += '</div>';
+                }
+                html += '</div>';
+                recentArea.innerHTML = html;
+            } else {
+                recentArea.innerHTML = '';
+            }
+
+            // Kill switch button state
+            const killBtn = document.getElementById('trading-kill-btn');
+            if (ts.killSwitch) {
+                killBtn.textContent = 'Resume Trading';
+                killBtn.className = 'trading-btn';
+            } else {
+                killBtn.textContent = 'Kill Switch';
+                killBtn.className = 'trading-btn trading-btn-danger';
+            }
+        }
+
+        async function toggleTradingMode() {
+            try {
+                const ts = serverData && serverData.tradingStatus;
+                const newPaperMode = ts ? !ts.paperMode : true;
+                if (!newPaperMode && !confirm('Switch to LIVE trading? Real money will be used.')) return;
+                await fetch('/api/trading/mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paperMode: newPaperMode })
+                });
+            } catch (e) { console.error('Toggle mode failed:', e); }
+        }
+
+        async function switchEnvironment(env) {
+            try {
+                if (env === 'production' && !confirm('Switch to PRODUCTION? This uses real money on Kalshi.')) return;
+                const resp = await fetch('/api/trading/environment', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ environment: env })
+                });
+                const result = await resp.json();
+                if (!resp.ok) { alert('Failed: ' + (result.error || 'unknown error')); return; }
+                if (!result.configured) alert('Warning: ' + env.toUpperCase() + ' credentials are not configured. Trading will not work.');
+            } catch (e) { console.error('Environment switch failed:', e); }
+        }
+
+        function toggleTradeHistory() {
+            const list = document.getElementById('trade-history-list');
+            const toggle = document.getElementById('trade-history-toggle');
+            if (!list || !toggle) return;
+            if (list.style.display === 'none') {
+                list.style.display = '';
+                toggle.classList.remove('collapsed');
+            } else {
+                list.style.display = 'none';
+                toggle.classList.add('collapsed');
+            }
+        }
+
+        async function toggleKillSwitch() {
+            try {
+                const ts = serverData && serverData.tradingStatus;
+                const activate = ts ? !ts.killSwitch : true;
+                await fetch('/api/trading/kill-switch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ active: activate })
+                });
+            } catch (e) { console.error('Kill switch failed:', e); }
         }
 
         function renderSellSignal(containerId) {
@@ -1484,8 +1806,9 @@
                 return;
             }
 
-            // Only show sell signal if user has a position
-            if (!myPosition) { el.innerHTML = ''; return; }
+            // Only show sell signal if auto-trading has a position
+            const ts = serverData && serverData.tradingStatus;
+            if (!ts || !ts.currentPosition) { el.innerHTML = ''; return; }
 
             // Server-only sell signal
             const signal = serverData && serverData.sellSignal ? serverData.sellSignal : null;
@@ -1560,104 +1883,6 @@
                           (signal.reasons.length > 1 ? '<div class="sell-signal-details">' + signal.reasons.slice(1).join(' &middot; ') + '</div>' : '')
                         : '') +
                 '</div>';
-        }
-
-        // ── Position Tracker ──────────────────────────────────────────
-        let myPosition = null;
-
-        function recordPosition(action) {
-            if (action === 'sold') {
-                myPosition = null;
-                localStorage.removeItem('myPosition');
-                resetAdvisorHistory();
-                renderPositionUI();
-                renderPreBuySignal('prebuy-signal-badge');
-                renderSellSignal('sell-signal-badge');
-                return;
-            }
-
-            const price = latestData ? latestData.currentPrice : null;
-            if (!price) return;
-
-            myPosition = {
-                direction: action,
-                entryPrice: price,
-                entryTime: Date.now(),
-                periodKey: currentPeriodKey,
-                strike: kalshiStrike || periodStartPrice
-            };
-            localStorage.setItem('myPosition', JSON.stringify(myPosition));
-            resetAdvisorHistory();
-            renderPositionUI();
-            renderPreBuySignal('prebuy-signal-badge');
-            renderSellSignal('sell-signal-badge');
-        }
-
-        function loadPosition() {
-            try {
-                const saved = localStorage.getItem('myPosition');
-                if (saved) {
-                    myPosition = JSON.parse(saved);
-                    if (myPosition.periodKey && currentPeriodKey && myPosition.periodKey !== currentPeriodKey) {
-                        myPosition = null;
-                        localStorage.removeItem('myPosition');
-                    }
-                }
-            } catch(e) { myPosition = null; }
-        }
-
-        function renderPositionUI() {
-            const infoEl = document.getElementById('position-info');
-            const adviceEl = document.getElementById('position-advice');
-            const btnUp = document.getElementById('btn-buy-up');
-            const btnDown = document.getElementById('btn-buy-down');
-            const btnSold = document.getElementById('btn-sold');
-
-            btnUp.classList.remove('active');
-            btnDown.classList.remove('active');
-
-            if (!myPosition) {
-                btnUp.style.display = '';
-                btnDown.style.display = '';
-                btnSold.style.display = 'none';
-                infoEl.innerHTML = '';
-                adviceEl.innerHTML = '';
-                return;
-            }
-
-            btnUp.style.display = myPosition.direction === 'up' ? '' : 'none';
-            btnDown.style.display = myPosition.direction === 'down' ? '' : 'none';
-            if (myPosition.direction === 'up') btnUp.classList.add('active');
-            else btnDown.classList.add('active');
-            btnSold.style.display = '';
-
-            const currentPrice = latestData ? latestData.currentPrice : myPosition.entryPrice;
-            const strike = myPosition.strike || kalshiStrike || periodStartPrice;
-            const dirLabel = myPosition.direction === 'up' ? 'UP' : 'DOWN';
-            const dirColor = myPosition.direction === 'up' ? '#3fb950' : '#f85149';
-
-            const priceVsStrike = currentPrice - strike;
-            const onRightSide = (myPosition.direction === 'up' && priceVsStrike >= 0) ||
-                                (myPosition.direction === 'down' && priceVsStrike < 0);
-            const distFromStrike = Math.abs(priceVsStrike);
-            const distPct = strike > 0 ? (distFromStrike / strike) * 100 : 0;
-
-            const elapsed = Math.round((Date.now() - myPosition.entryTime) / 1000);
-            const elapsedStr = elapsed < 60 ? elapsed + 's' : Math.floor(elapsed / 60) + 'm ' + (elapsed % 60) + 's';
-
-            infoEl.innerHTML =
-                '<div class="position-info" style="background:' + (onRightSide ? 'rgba(63,185,80,0.08)' : 'rgba(248,81,73,0.08)') + ';border:1px solid ' + (onRightSide ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)') + '">' +
-                    '<div class="position-direction" style="color:' + dirColor + '">Bet ' + dirLabel + ' @ ' + formatPrice(myPosition.entryPrice) + '</div>' +
-                    '<div class="position-entry">Held for ' + elapsedStr + ' | Strike: ' + formatPrice(strike) + '</div>' +
-                    '<div class="position-pnl" style="color:' + (onRightSide ? '#3fb950' : '#f85149') + '">' +
-                        (onRightSide ? 'WINNING' : 'LOSING') + ' — Price ' +
-                        (priceVsStrike >= 0 ? '+' : '-') + '$' + distFromStrike.toFixed(2) +
-                        ' (' + distPct.toFixed(3) + '%) vs strike' +
-                    '</div>' +
-                '</div>';
-
-            // Position-aware advice now comes from the sell signal system
-            adviceEl.innerHTML = '';
         }
 
         // Wallet simulator removed — will be re-added later
@@ -1981,8 +2206,8 @@
             renderPreBuySignal('prebuy-signal-badge');
             renderSellSignal('sell-signal-badge');
 
-            // Update position tracker
-            renderPositionUI();
+            // Auto-trading panel
+            renderTradingPanel();
 
             // Wallet rendering removed
 
@@ -2078,11 +2303,6 @@
             kalshiCloseTime = null;
             kalshiMarketTicker = null;
             strikeIsPending = false;
-
-            // Clear position on period transition
-            myPosition = null;
-            localStorage.removeItem('myPosition');
-            renderPositionUI();
 
             clearNextPeriodPreview();
             saveSessionState();
@@ -2219,9 +2439,7 @@
                     if (serverPred.updatedPrediction) {
                         updatedPrediction = serverPred.updatedPrediction;
                     }
-                    if (serverPred.kalshiStrike) {
-                        kalshiStrike = serverPred.kalshiStrike;
-                    }
+                    kalshiStrike = serverData.kalshiStrike || serverPred.kalshiStrike || kalshiStrike;
                 }
 
                 // Detect new period for UI state
@@ -2341,8 +2559,6 @@
                     document.getElementById('updated-confidence-value').textContent = updConf + '%';
                 }
 
-                // Update position tracker in real-time
-                if (myPosition) renderPositionUI();
             }, 100);
         }
 
@@ -2354,8 +2570,106 @@
             }
         });
 
+        // ── Notifications ────────────────────────────────────────────
+        let notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true';
+
+        function updateNotifButton() {
+            const btn = document.getElementById('notif-btn');
+            if (!btn) return;
+            if (notificationsEnabled && Notification.permission === 'granted') {
+                btn.textContent = 'Notifications: ON';
+                btn.style.color = '#3fb950';
+                btn.style.borderColor = 'rgba(63,185,80,0.4)';
+            } else {
+                btn.textContent = 'Notifications: OFF';
+                btn.style.color = '';
+                btn.style.borderColor = '';
+            }
+        }
+
+        async function toggleNotifications() {
+            if (!('Notification' in window)) {
+                alert('Your browser does not support notifications.');
+                return;
+            }
+            if (!notificationsEnabled) {
+                const perm = await Notification.requestPermission();
+                if (perm === 'granted') {
+                    notificationsEnabled = true;
+                    localStorage.setItem('notificationsEnabled', 'true');
+                } else {
+                    alert('Notification permission denied. Please enable it in your browser settings.');
+                }
+            } else {
+                notificationsEnabled = false;
+                localStorage.setItem('notificationsEnabled', 'false');
+            }
+            updateNotifButton();
+        }
+
+        function handleTradeNotification(trade) {
+            if (!notificationsEnabled || Notification.permission !== 'granted') return;
+            // Only notify on actionable trade events
+            const notifyTypes = ['buy', 'sell', 'settle', 'dip_buy', 'late_lock', 're_entry'];
+            if (!notifyTypes.includes(trade.type)) return;
+
+            let title, body, icon;
+            const dir = (trade.direction || trade.side || '').toUpperCase();
+
+            switch (trade.type) {
+                case 'buy':
+                    title = 'Bought ' + dir;
+                    body = trade.contracts + 'x ' + dir + ' @ ' + trade.limitPrice + '\u00A2 | Edge: ' + (trade.edge || '?');
+                    icon = '📈';
+                    break;
+                case 'sell':
+                    title = 'Sold Position';
+                    body = trade.contracts + 'x ' + (trade.side || '').toUpperCase() + ' | Reason: ' + (trade.reason || 'unknown');
+                    icon = '📉';
+                    break;
+                case 'settle':
+                    const won = trade.correct;
+                    const pnl = (trade.pnlCents / 100).toFixed(2);
+                    title = won ? 'Won Settlement!' : 'Lost Settlement';
+                    body = trade.contracts + 'x ' + (trade.side || '').toUpperCase() + ' | P&L: ' + (won ? '+' : '') + '$' + pnl;
+                    icon = won ? '✅' : '❌';
+                    break;
+                case 'dip_buy':
+                    title = 'Dip Buy ' + dir;
+                    body = '+' + trade.contracts + 'x @ ' + trade.limitPrice + '\u00A2 (' + (trade.dipImprovement || '') + ' cheaper)';
+                    icon = '🔻';
+                    break;
+                case 'late_lock':
+                    title = 'Late Lock ' + dir;
+                    body = trade.contracts + 'x @ ' + trade.limitPrice + '\u00A2 | ' + (trade.sigmaDistance || '') + ' from strike';
+                    icon = '🔒';
+                    break;
+                case 're_entry':
+                    title = 'Re-Entry ' + dir;
+                    body = trade.contracts + 'x @ ' + trade.limitPrice + '\u00A2 | Edge: ' + (trade.edge || '?');
+                    icon = '🔄';
+                    break;
+            }
+
+            if (title) {
+                const n = new Notification(icon + ' ' + title, {
+                    body: body,
+                    tag: 'trade-' + trade.time,
+                    renotify: true,
+                    requireInteraction: false,
+                });
+                // Auto-close after 10s
+                setTimeout(() => n.close(), 10000);
+            }
+        }
+
+        // Register service worker for notification click handling
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => {});
+        }
+
         // ── Boot ──────────────────────────────────────────────────────
-        loadPosition();
+        updateNotifButton();
         connectWebSocket(); // Connect to always-on server
         renderPredictionHistory();
         fetchAndPredict();
