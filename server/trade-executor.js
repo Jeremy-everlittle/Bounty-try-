@@ -28,6 +28,7 @@ let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
 let cachedBalance = null;     // { balanceCents, lastFetched }
 const BALANCE_CACHE_MS = 30000; // refresh balance every 30s
 let orderInFlight = false;    // mutex: prevent concurrent order placement
+let fillFailedPeriods = {};   // { periodKey: timestamp } — cooldown after phantom/unfilled
 
 const dailyStats = {
     date: new Date().toISOString().slice(0, 10),
@@ -55,46 +56,30 @@ function parseOrderFills(order) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 /**
- * Wait for an order to fill, polling up to maxWaitMs.
- * Returns the final order state. Cancels if still resting after timeout.
+ * Handle a resting order: wait briefly, then cancel.
+ * The demo API returns 404 for GET /portfolio/orders/{id}, so we can't poll.
+ * Instead: wait 2s for matching, then cancel and use the original create
+ * response's fill_count_fp (which reflects fills at time of placement).
  */
-async function waitForFill(orderId, maxWaitMs = 5000) {
-    const pollInterval = 1000;
-    const maxPolls = Math.ceil(maxWaitMs / pollInterval);
+async function waitForFill(orderId, createResponse, maxWaitMs = 2000) {
+    // Wait briefly for the order to match
+    await sleep(maxWaitMs);
 
-    for (let i = 0; i < maxPolls; i++) {
-        await sleep(pollInterval);
-        try {
-            const resp = await trading.getOrder(orderId);
-            const order = resp.order || resp;
-            if (order.status === 'executed' || order.status === 'canceled' || order.status === 'rejected') {
-                return order;
-            }
-            // Check if partially filled
-            const fills = parseOrderFills(order);
-            if (fills.remaining === 0 && fills.filled > 0) {
-                return order; // fully filled even if status hasn't updated
-            }
-        } catch (e) {
-            console.log(`[trade-executor] Poll error for order ${orderId}: ${e.message}`);
+    // Cancel the resting order — any fills that happened are already recorded
+    // in the create response's fill_count_fp
+    try {
+        await trading.cancelOrder(orderId);
+        console.log(`[trade-executor] Cancelled resting order ${orderId}`);
+    } catch (e) {
+        // 404 = order already gone (filled or expired). That's fine.
+        if (e.status !== 404) {
+            console.log(`[trade-executor] Cancel attempt for ${orderId}: ${e.message}`);
         }
     }
 
-    // Timed out — cancel the resting order and return whatever filled
-    console.log(`[trade-executor] Order ${orderId} still resting after ${maxWaitMs}ms — cancelling`);
-    try {
-        await trading.cancelOrder(orderId);
-    } catch (e) {
-        // May fail if it filled between our check and cancel — that's fine
-        console.log(`[trade-executor] Cancel attempt for ${orderId}: ${e.message}`);
-    }
-    // Fetch final state after cancel
-    try {
-        const resp = await trading.getOrder(orderId);
-        return resp.order || resp;
-    } catch (e) {
-        return { status: 'canceled', fill_count_fp: '0' };
-    }
+    // The create response already told us how many filled at placement time.
+    // Return it as-is — the caller will verify via balance + portfolio.
+    return createResponse;
 }
 
 /**
@@ -184,7 +169,7 @@ function checkDayRollover() {
 // Safety checks
 // ═══════════════════════════════════════════════════════════════
 
-function canTrade() {
+function canTrade(periodKey) {
     checkDayRollover();
 
     if (killSwitch) return { ok: false, reason: 'Kill switch active' };
@@ -198,7 +183,59 @@ function canTrade() {
     if (dailyStats.tradeCount >= config.maxDailyTrades) {
         return { ok: false, reason: `Daily trade limit reached (${dailyStats.tradeCount})` };
     }
+    // Cooldown: don't retry after phantom/unfilled for this period (60s cooldown)
+    if (periodKey && fillFailedPeriods[periodKey]) {
+        const elapsed = Date.now() - fillFailedPeriods[periodKey];
+        if (elapsed < 60000) {
+            return { ok: false, reason: `Fill failed for this period — cooldown ${Math.round((60000 - elapsed) / 1000)}s` };
+        }
+        delete fillFailedPeriods[periodKey]; // cooldown expired
+    }
     return { ok: true };
+}
+
+function markFillFailed(periodKey) {
+    fillFailedPeriods[periodKey] = Date.now();
+    console.log(`[trade-executor] Marking period ${periodKey} as fill-failed — 60s cooldown`);
+}
+
+/**
+ * Get an aggressive limit price that's likely to fill.
+ * Checks the orderbook for the best available ask, and pays up to
+ * (theoretical price + slippage) to ensure fills.
+ * Returns a price in cents (5-99).
+ */
+async function getAggressivePrice(ticker, side, theoreticalPrice) {
+    const MAX_SLIPPAGE = 5; // willing to pay up to 5c above theoretical
+    const maxPrice = Math.min(97, theoreticalPrice + MAX_SLIPPAGE);
+
+    if (config.paperMode) return Math.max(5, Math.min(95, theoreticalPrice));
+
+    try {
+        const book = await trading.getOrderbook(ticker);
+        // Orderbook has { yes: [[price, quantity], ...], no: [[price, quantity], ...] }
+        // We want the best ASK for our side (lowest price someone is willing to sell at)
+        // On Kalshi, buying YES at price X = selling NO at (100-X)
+        // The orderbook 'yes' array has bids/asks for YES side
+        const asks = side === 'yes' ? (book.yes || []) : (book.no || []);
+
+        if (asks.length > 0) {
+            // Find the best (lowest) ask price
+            const bestAsk = Math.min(...asks.map(a => a[0] || a.price || 99));
+            if (bestAsk <= maxPrice) {
+                console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c (theory=${theoreticalPrice}c) — using ask price`);
+                return bestAsk;
+            }
+            console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c > max ${maxPrice}c — using max`);
+            return maxPrice;
+        }
+    } catch (e) {
+        // Orderbook fetch failed — use aggressive fallback
+        console.log(`[trade-executor] Orderbook fetch failed: ${e.message} — using theory+3c`);
+    }
+
+    // Fallback: bid above theoretical to increase fill probability
+    return Math.max(5, Math.min(97, theoreticalPrice + 3));
 }
 
 /**
@@ -276,7 +313,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         currentPosition = null;
     }
 
-    const check = canTrade();
+    const check = canTrade(periodKey);
     if (!check.ok) {
         console.log(`[trade-executor] Skipping entry: ${check.reason}`);
         decisionLog.logSkip({ periodKey, reason: 'canTrade failed: ' + check.reason, currentPrice: prediction?.predictedPrice, strike });
@@ -290,11 +327,11 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         Math.round(betQuality.betSize * config.baseContracts)
     ));
 
-    // Determine limit price from probability
-    // If we predict UP (buy YES), we're willing to pay up to our probability in cents
-    // e.g. probability=0.65 → willing to pay 65c for YES contract
+    // Determine limit price — must be aggressive enough to fill
+    // Use probability as our max willingness-to-pay, but try the orderbook first
     const probForBet = isUp ? prediction.probability : (1 - prediction.probability);
-    const limitPrice = Math.max(5, Math.min(95, Math.round(probForBet * 100)));
+    const theoreticalPrice = Math.round(probForBet * 100);
+    const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice);
 
     const tradeInfo = {
         ticker: kalshiTicker,
@@ -357,7 +394,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         // Wait up to 5s for fill, then cancel any unfilled remainder.
         if (order.status === 'resting' || order.status === 'open') {
             console.log(`[trade-executor] Order ${order.order_id} is ${order.status} — waiting for fill...`);
-            order = await waitForFill(order.order_id, 5000);
+            order = await waitForFill(order.order_id, order);
         }
 
         const fills = parseOrderFills(order);
@@ -366,6 +403,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         if (filledContracts === 0) {
             console.log(`[trade-executor] Order ${order.order_id} got 0 fills — no position taken`);
             logTrade('buy_unfilled', { ...tradeInfo, orderId: order.order_id, finalStatus: order.status });
+            markFillFailed(periodKey);
             return;
         }
 
@@ -374,6 +412,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         filledContracts = await verifyFillIsReal(order.order_id, kalshiTicker, side, filledContracts, balanceBefore);
         if (filledContracts === 0) {
             logTrade('buy_phantom', { ...tradeInfo, orderId: order.order_id, claimedFills: fills.filled, orderStatus: order.status });
+            markFillFailed(periodKey);
             return;
         }
 
@@ -497,7 +536,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         // ── FILL VERIFICATION ──
         if (order.status === 'resting' || order.status === 'open') {
             console.log(`[trade-executor] Sell order ${order.order_id} is ${order.status} — waiting for fill...`);
-            order = await waitForFill(order.order_id, 5000);
+            order = await waitForFill(order.order_id, order);
         }
 
         const fills = parseOrderFills(order);
@@ -643,7 +682,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
     const dipScale = Math.min(1.0, entryImprovement / 20); // 20¢ dip = full scale
     const addContracts = Math.max(1, Math.min(maxAdd, Math.round(dipScale * bq.betSize * config.baseContracts)));
 
-    const check = canTrade();
+    const check = canTrade(periodKey);
     if (!check.ok) return;
 
     const tradeInfo = {
@@ -700,7 +739,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
         }
         // ── FILL VERIFICATION ──
         if (order.status === 'resting' || order.status === 'open') {
-            order = await waitForFill(order.order_id, 5000);
+            order = await waitForFill(order.order_id, order);
         }
         const fills = parseOrderFills(order);
         if (fills.filled === 0) {
@@ -783,7 +822,7 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     // No position — enter fresh with max contracts
     if (currentPosition) return; // different period position (shouldn't happen)
 
-    const check = canTrade();
+    const check = canTrade(periodKey);
     if (!check.ok) return;
 
     const contracts = config.maxPositionContracts;
@@ -858,7 +897,7 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
         }
         // ── FILL VERIFICATION ──
         if (order.status === 'resting' || order.status === 'open') {
-            order = await waitForFill(order.order_id, 5000);
+            order = await waitForFill(order.order_id, order);
         }
         const fills = parseOrderFills(order);
         if (fills.filled === 0) {
@@ -941,7 +980,7 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
     const priceOnOurSide = (origIsUp && currentPrice >= strike) || (!origIsUp && currentPrice < strike);
     if (!priceOnOurSide) return;
 
-    const check = canTrade();
+    const check = canTrade(periodKey);
     if (!check.ok) return;
 
     // Re-enter at near-full size (was 60%, now 85%)
@@ -1009,7 +1048,7 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
         }
         // ── FILL VERIFICATION ──
         if (order.status === 'resting' || order.status === 'open') {
-            order = await waitForFill(order.order_id, 5000);
+            order = await waitForFill(order.order_id, order);
         }
         const fills = parseOrderFills(order);
         if (fills.filled === 0) {
