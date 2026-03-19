@@ -624,6 +624,39 @@
         .trade-history-meta { display: flex; gap: 8px; font-size: 9px; color: #8b949e; margin-top: 3px; }
         .trade-history-error { font-size: 9px; color: #f85149; margin-top: 3px; word-break: break-all; }
         .trade-history-ticker { font-size: 9px; color: #484f58; margin-top: 2px; font-family: monospace; }
+        /* ── Combined Period History ── */
+        .period-item { padding: 12px; border-radius: 8px; margin-bottom: 8px; font-size: 14px; font-variant-numeric: tabular-nums; border: 1px solid rgba(255,255,255,0.06); background: rgba(255,255,255,0.02); }
+        .period-item.period-win { border-left: 3px solid #3fb950; }
+        .period-item.period-loss { border-left: 3px solid #f85149; }
+        .period-item.period-no-bet { border-left: 3px solid #484f58; }
+        .period-item.period-pending { border-left: 3px solid #d29922; }
+        .period-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .period-time { color: #c9d1d9; font-size: 14px; font-weight: 600; }
+        .period-outcome { font-size: 11px; font-weight: 800; letter-spacing: 0.8px; padding: 2px 8px; border-radius: 4px; }
+        .period-outcome-win { background: rgba(63,185,80,0.2); color: #3fb950; }
+        .period-outcome-loss { background: rgba(248,81,73,0.2); color: #f85149; }
+        .period-outcome-nobet { background: rgba(255,255,255,0.08); color: #8b949e; }
+        .period-outcome-pending { background: rgba(210,153,34,0.2); color: #d29922; }
+        .period-prediction { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .period-dir-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+        .period-dir-up { background: rgba(63,185,80,0.15); color: #3fb950; }
+        .period-dir-down { background: rgba(248,81,73,0.15); color: #f85149; }
+        .period-prices { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px 8px; margin-bottom: 6px; }
+        .period-price-cell { display: flex; flex-direction: column; }
+        .period-price-label { color: #9ca3af; font-size: 10px; }
+        .period-price-value { color: #c9d1d9; font-size: 13px; font-weight: 500; }
+        .period-price-value.pred { color: #58a6ff; }
+        .period-trades { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.06); }
+        .period-trades-title { font-size: 10px; color: #8b949e; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+        .period-trade-entry { display: flex; align-items: center; gap: 6px; padding: 4px 6px; margin-bottom: 3px; border-radius: 4px; background: rgba(255,255,255,0.03); flex-wrap: wrap; }
+        .period-trade-type { font-size: 9px; font-weight: 800; letter-spacing: 0.6px; padding: 1px 5px; border-radius: 3px; }
+        .period-trade-info { font-size: 10px; color: #b0b8c1; }
+        .period-trade-pnl { font-size: 11px; font-weight: 700; margin-left: auto; }
+        .period-pnl-summary { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.04); }
+        .period-pnl-label { font-size: 10px; color: #8b949e; }
+        .period-pnl-value { font-size: 14px; font-weight: 700; }
+        .period-accuracy { font-size: 10px; color: #8b949e; margin-top: 4px; }
+        .period-no-trades { font-size: 10px; color: #484f58; font-style: italic; margin-top: 4px; }
         .trading-controls { display: flex; gap: 6px; margin-top: 8px; }
         .trading-btn { font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: #e6edf3; cursor: pointer; }
         .trading-btn:hover { background: rgba(255,255,255,0.1); }
@@ -725,7 +758,6 @@
                 </div>
             </div>
             <div id="trading-position-area"></div>
-            <div class="trading-recent" id="trading-recent-area"></div>
             <div class="trading-controls">
                 <button class="trading-btn" id="trading-mode-btn" onclick="toggleTradingMode()">Toggle Mode</button>
                 <button class="trading-btn trading-btn-danger" id="trading-kill-btn" onclick="toggleKillSwitch()">Kill Switch</button>
@@ -804,11 +836,11 @@
 
     <div class="card" id="history-card">
         <div class="card-label" style="display:flex;justify-content:space-between;align-items:center;">
-            Prediction History
+            Period History
             <span id="clear-history-btn" style="font-size:11px;color:#b0b8c1;cursor:pointer;padding:2px 8px;border:1px solid #3d3d3d;border-radius:4px;" onclick="clearHistory()">Clear</span>
         </div>
-        <div class="history-list" id="prediction-history">
-            <div class="history-empty">No predictions yet. History will appear after the first period ends.</div>
+        <div class="history-list" id="period-history">
+            <div class="history-empty">No periods yet. History will appear after the first period ends.</div>
         </div>
         <div class="history-stats" id="history-stats"></div>
     </div>
@@ -1167,103 +1199,257 @@
         }
         bootstrapBayesianFromHistory();
 
-        function renderPredictionHistory() {
-            const container = document.getElementById('prediction-history');
-            const statsEl = document.getElementById('history-stats');
-            const graded = predictionLog.filter(p => p.correct !== null);
+        // For backward compat — old callers still reference this
+        function renderPredictionHistory() { renderPeriodHistory(); }
 
-            if (graded.length === 0 && predictionLog.length <= 1) {
-                container.innerHTML = '<div class="history-empty">No predictions yet. History will appear after the first period ends.</div>';
-                statsEl.style.display = 'none';
+        function renderPeriodHistory() {
+            const container = document.getElementById('period-history');
+            const statsEl = document.getElementById('history-stats');
+            if (!container) return;
+
+            const graded = predictionLog.filter(p => p.correct !== null);
+            const trades = (serverData && serverData.tradingStatus && serverData.tradingStatus.recentTrades) || [];
+
+            // Group trades by periodKey
+            const tradesByPeriod = {};
+            for (const t of trades) {
+                const pk = t.periodKey || 'unknown';
+                if (!tradesByPeriod[pk]) tradesByPeriod[pk] = [];
+                tradesByPeriod[pk].push(t);
+            }
+
+            // Build combined period entries from predictions
+            const periods = [];
+            const seenKeys = new Set();
+            for (const p of predictionLog) {
+                if (p.correct === null) continue; // skip ungraded (current open period)
+                const pk = p.periodKey;
+                seenKeys.add(pk);
+                periods.push({ prediction: p, trades: tradesByPeriod[pk] || [], timestamp: p.timestamp });
+            }
+
+            // Add trade-only periods (no prediction entry)
+            for (const pk of Object.keys(tradesByPeriod)) {
+                if (!seenKeys.has(pk) && pk !== 'unknown') {
+                    periods.push({ prediction: null, trades: tradesByPeriod[pk], timestamp: new Date(tradesByPeriod[pk][0].time).getTime() });
+                }
+            }
+
+            // Sort newest first
+            periods.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+            if (periods.length === 0) {
+                container.innerHTML = '<div class="history-empty">No periods yet. History will appear after the first period ends.</div>';
+                if (statsEl) statsEl.style.display = 'none';
                 return;
             }
 
+            // Aggregate stats
+            let totalWins = 0, totalLosses = 0, totalPnlCents = 0, predCorrect = 0, predTotal = 0;
+
             let html = '';
-            // Only show completed cycles (not the current open period)
-            const toShow = [...predictionLog].filter(p => p.correct !== null).reverse();
-            for (const p of toShow) {
-                const icon = p.correct === true ? '\u2713' : p.correct === false ? '\u2717' : '\u25CF';
-                const cls = p.correct === true ? 'correct' : p.correct === false ? 'wrong' : 'pending';
-                const betLabel = p.predictedDirection === 'up' ? 'Up' : 'Down';
-                const betCls = p.predictedDirection === 'up' ? 'bet-up' : 'bet-down';
-                // Compute prediction accuracy vs actual
-                const dollarOff = p.predictedPrice - p.actualPrice;
-                const pctOff = ((dollarOff) / p.actualPrice) * 100;
-                const absDollar = Math.abs(dollarOff);
-                const absPct = Math.abs(pctOff);
-                // Color: green <0.1%, yellow <0.3%, red >=0.3%
-                const offCls = absPct < 0.1 ? 'hi-off-good' : absPct < 0.3 ? 'hi-off-ok' : 'hi-off-bad';
-                const sign = dollarOff >= 0 ? '+' : '-';
+            for (const period of periods) {
+                const p = period.prediction;
+                const periodTrades = period.trades;
 
-                // Compute final vs strike
-                const strikeDiff = p.actualPrice - p.startPrice;
-                const strikePct = ((strikeDiff) / p.startPrice) * 100;
-                const absStrikeDiff = Math.abs(strikeDiff);
-                const absStrikePct = Math.abs(strikePct);
-                const strikeSign = strikeDiff >= 0 ? '+' : '-';
-                const strikeCls = strikeDiff >= 0 ? 'hi-off-good' : 'hi-off-bad';
-
-                // Convert to local time and show as 15-min cycle range
-                let displayTime = p.time;
-                if (p.timestamp) {
-                    const d = new Date(p.timestamp);
+                // Determine period time display
+                let displayTime = '';
+                const ts = period.timestamp;
+                if (ts) {
+                    const d = new Date(ts);
                     const mins = d.getMinutes();
                     const cycleStart = mins - (mins % 15);
                     const startD = new Date(d);
                     startD.setMinutes(cycleStart, 0, 0);
                     const endD = new Date(startD.getTime() + 15 * 60 * 1000);
+                    const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
                     const fmt = (dt) => {
                         let h = dt.getHours();
                         const m = dt.getMinutes().toString().padStart(2, '0');
                         const ap = h >= 12 ? 'PM' : 'AM';
                         h = h % 12 || 12;
-                        return h + ':' + m + ' ' + ap;
+                        return h + ':' + m + ap;
                     };
-                    displayTime = fmt(startD) + ' – ' + fmt(endD);
+                    displayTime = dateStr + ' ' + fmt(startD) + '\u2013' + fmt(endD);
                 }
 
-                html += `<div class="history-item">
-                    <div class="hi-top">
-                        <span class="hi-time">${displayTime}</span>
-                        <span class="hi-bet ${betCls}">${betLabel}</span>
-                        <span class="hi-result ${cls}">${icon}</span>
-                    </div>
-                    <div class="hi-prices">
-                        <div class="hi-price-cell">
-                            <span class="hi-label">Strike</span>
-                            <span class="hi-value">${formatPrice(p.startPrice)}</span>
-                        </div>
-                        <div class="hi-price-cell">
-                            <span class="hi-label">Predicted</span>
-                            <span class="hi-value hi-pred">${formatPrice(p.predictedPrice)}</span>
-                        </div>
-                        <div class="hi-price-cell">
-                            <span class="hi-label">Final</span>
-                            <span class="hi-value">${formatPrice(p.actualPrice)}</span>
-                        </div>
-                    </div>
-                    <div class="hi-diffs">
-                        <div class="hi-diff-cell">
-                            <span class="hi-diff-label">Pred vs Final</span>
-                            <span class="hi-diff-value ${offCls}">${sign}$${absDollar.toFixed(2)} (${sign}${absPct.toFixed(3)}%)</span>
-                        </div>
-                        <div class="hi-diff-cell">
-                            <span class="hi-diff-label">Final vs Strike</span>
-                            <span class="hi-diff-value ${strikeCls}">${strikeSign}$${absStrikeDiff.toFixed(2)} (${strikeSign}${absStrikePct.toFixed(3)}%)</span>
-                        </div>
-                    </div>
-                </div>`;
+                // Determine settlement from trades
+                const settlement = periodTrades.find(t => t.type === 'settle');
+                const buys = periodTrades.filter(t => t.type === 'buy' || t.type === 'dip_buy' || t.type === 'late_lock' || t.type === 'late_lock_add' || t.type === 're_entry');
+                const sells = periodTrades.filter(t => t.type === 'sell');
+                const errors = periodTrades.filter(t => t.type && (t.type.includes('error') || t.type.includes('failed') || t.type.includes('unfilled') || t.type.includes('phantom')));
+                const hasTrades = buys.length > 0 || sells.length > 0 || settlement;
+
+                // Determine outcome
+                let outcomeLabel, outcomeCls, periodCls;
+                if (settlement) {
+                    if (settlement.correct) {
+                        outcomeLabel = 'WIN'; outcomeCls = 'period-outcome-win'; periodCls = 'period-win';
+                        totalWins++;
+                    } else {
+                        outcomeLabel = 'LOSS'; outcomeCls = 'period-outcome-loss'; periodCls = 'period-loss';
+                        totalLosses++;
+                    }
+                    totalPnlCents += settlement.pnlCents || 0;
+                } else if (!hasTrades) {
+                    outcomeLabel = 'NO BET'; outcomeCls = 'period-outcome-nobet'; periodCls = 'period-no-bet';
+                } else {
+                    outcomeLabel = 'PENDING'; outcomeCls = 'period-outcome-pending'; periodCls = 'period-pending';
+                }
+
+                if (p && p.correct !== null) {
+                    predTotal++;
+                    if (p.correct) predCorrect++;
+                }
+
+                html += '<div class="period-item ' + periodCls + '">';
+                // Header: time + outcome badge
+                html += '<div class="period-header">' +
+                    '<span class="period-time">' + displayTime + '</span>' +
+                    '<span class="period-outcome ' + outcomeCls + '">' + outcomeLabel + '</span>' +
+                    '</div>';
+
+                // Prediction details (if we have a prediction)
+                if (p) {
+                    const dirLabel = p.predictedDirection === 'up' ? '\u25B2 UP' : '\u25BC DOWN';
+                    const dirCls = p.predictedDirection === 'up' ? 'period-dir-up' : 'period-dir-down';
+                    const resultIcon = p.correct === true ? ' \u2713' : p.correct === false ? ' \u2717' : '';
+                    const resultColor = p.correct === true ? '#3fb950' : p.correct === false ? '#f85149' : '#8b949e';
+
+                    html += '<div class="period-prediction">' +
+                        '<span class="period-dir-badge ' + dirCls + '">' + dirLabel + '</span>' +
+                        '<span style="font-size:14px;font-weight:700;color:' + resultColor + '">' + resultIcon + (p.correct === true ? ' Correct' : p.correct === false ? ' Wrong' : '') + '</span>' +
+                        '</div>';
+
+                    // Prices: Strike, Predicted, Final
+                    html += '<div class="period-prices">' +
+                        '<div class="period-price-cell"><span class="period-price-label">Strike</span><span class="period-price-value">' + formatPrice(p.startPrice) + '</span></div>' +
+                        '<div class="period-price-cell"><span class="period-price-label">Predicted</span><span class="period-price-value pred">' + formatPrice(p.predictedPrice) + '</span></div>' +
+                        '<div class="period-price-cell"><span class="period-price-label">Final</span><span class="period-price-value">' + formatPrice(p.actualPrice) + '</span></div>' +
+                        '</div>';
+
+                    // Accuracy line
+                    if (p.actualPrice) {
+                        const dollarOff = Math.abs(p.predictedPrice - p.actualPrice);
+                        const pctOff = Math.abs((p.predictedPrice - p.actualPrice) / p.actualPrice * 100);
+                        const offCls = pctOff < 0.1 ? 'hi-off-good' : pctOff < 0.3 ? 'hi-off-ok' : 'hi-off-bad';
+                        html += '<div class="period-accuracy">Prediction error: <span class="' + offCls + '" style="font-weight:600">\u00B1$' + dollarOff.toFixed(2) + ' (' + pctOff.toFixed(3) + '%)</span></div>';
+                    }
+                }
+
+                // Trade activity section
+                if (hasTrades || errors.length > 0) {
+                    html += '<div class="period-trades">';
+                    html += '<div class="period-trades-title">Trade Activity</div>';
+
+                    // Render each trade in chronological order
+                    const allTrades = [...periodTrades].sort((a, b) => new Date(a.time) - new Date(b.time));
+                    for (const t of allTrades) {
+                        const time = new Date(t.time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+                        let typeBg, typeColor, typeLabel;
+
+                        if (t.type === 'settle') {
+                            typeBg = t.correct ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
+                            typeColor = t.correct ? '#3fb950' : '#f85149';
+                            typeLabel = t.correct ? 'WIN' : 'LOSS';
+                        } else if (t.type === 'buy') {
+                            typeBg = 'rgba(56,139,253,0.2)'; typeColor = '#58a6ff'; typeLabel = 'BUY';
+                        } else if (t.type === 'dip_buy') {
+                            typeBg = 'rgba(136,87,255,0.2)'; typeColor = '#a371f7'; typeLabel = 'DIP BUY';
+                        } else if (t.type === 'late_lock' || t.type === 'late_lock_add') {
+                            typeBg = 'rgba(63,185,80,0.25)'; typeColor = '#56d364'; typeLabel = 'LOCK';
+                        } else if (t.type === 're_entry') {
+                            typeBg = 'rgba(56,139,253,0.25)'; typeColor = '#79c0ff'; typeLabel = 'RE-ENTRY';
+                        } else if (t.type === 'sell') {
+                            typeBg = 'rgba(210,153,34,0.2)'; typeColor = '#d29922'; typeLabel = 'SELL';
+                        } else if (t.type.includes('error') || t.type.includes('failed')) {
+                            typeBg = 'rgba(248,81,73,0.15)'; typeColor = '#f85149'; typeLabel = 'ERROR';
+                        } else if (t.type.includes('unfilled') || t.type.includes('phantom')) {
+                            typeBg = 'rgba(210,153,34,0.15)'; typeColor = '#d29922'; typeLabel = t.type.toUpperCase().replace('BUY_', '');
+                        } else {
+                            typeBg = 'rgba(255,255,255,0.08)'; typeColor = '#8b949e'; typeLabel = t.type.toUpperCase();
+                        }
+
+                        html += '<div class="period-trade-entry">' +
+                            '<span class="period-trade-type" style="background:' + typeBg + ';color:' + typeColor + '">' + typeLabel + '</span>';
+
+                        // Trade details
+                        if (t.contracts) {
+                            const price = t.limitPrice || t.entryPrice || 0;
+                            const side = t.side ? t.side.toUpperCase() : '';
+                            html += '<span class="period-trade-info">' + time + ' \u00B7 ' + t.contracts + 'x ' + side + ' @ ' + price + '\u00A2</span>';
+                        } else {
+                            html += '<span class="period-trade-info">' + time + '</span>';
+                        }
+
+                        // Edge for buys
+                        if (t.edge) {
+                            html += '<span class="period-trade-info" style="color:#8b949e">Edge: ' + t.edge + '</span>';
+                        }
+
+                        // P&L for settlements
+                        if (t.pnlCents !== undefined) {
+                            const pnlPos = t.pnlCents > 0;
+                            html += '<span class="period-trade-pnl" style="color:' + (pnlPos ? '#3fb950' : '#f85149') + '">' +
+                                (pnlPos ? '+' : '') + '$' + (t.pnlCents / 100).toFixed(2) + '</span>';
+                        }
+
+                        // Error detail
+                        if (t.error) {
+                            html += '<span class="period-trade-info" style="color:#f85149;font-size:9px">' + t.error + '</span>';
+                        }
+
+                        html += '</div>';
+                    }
+
+                    // P&L summary for the period
+                    if (settlement) {
+                        const pnl = settlement.pnlCents || 0;
+                        const pnlPos = pnl > 0;
+                        const totalCost = buys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
+                        html += '<div class="period-pnl-summary">' +
+                            '<div>' +
+                                '<span class="period-pnl-label">Period P&L</span>' +
+                            '</div>' +
+                            '<span class="period-pnl-value" style="color:' + (pnlPos ? '#3fb950' : '#f85149') + '">' +
+                                (pnlPos ? '+' : '') + '$' + (pnl / 100).toFixed(2) +
+                            '</span>' +
+                            '</div>';
+                    }
+
+                    html += '</div>';
+                } else if (p) {
+                    html += '<div class="period-no-trades">No bets placed this period</div>';
+                }
+
+                html += '</div>';
             }
             container.innerHTML = html;
 
-            if (graded.length > 0) {
-                const correct = graded.filter(p => p.correct).length;
-                const wrong = graded.length - correct;
-                const pct = Math.round((correct / graded.length) * 100);
-                statsEl.innerHTML = `<span class="stat-correct">${correct}</span> correct &middot; <span class="stat-wrong">${wrong}</span> wrong &middot; ${pct}% accuracy (last ${graded.length})`;
-                statsEl.style.display = 'block';
-            } else {
-                statsEl.style.display = 'none';
+            // Stats summary
+            if (statsEl) {
+                if (predTotal > 0 || totalWins > 0 || totalLosses > 0) {
+                    const predPct = predTotal > 0 ? Math.round((predCorrect / predTotal) * 100) : 0;
+                    const totalPnl = totalPnlCents / 100;
+                    const pnlColor = totalPnl >= 0 ? '#3fb950' : '#f85149';
+                    let statsHtml = '';
+                    if (predTotal > 0) {
+                        statsHtml += '<span class="stat-correct">' + predCorrect + '</span> correct &middot; ' +
+                            '<span class="stat-wrong">' + (predTotal - predCorrect) + '</span> wrong &middot; ' +
+                            predPct + '% accuracy';
+                    }
+                    if (totalWins > 0 || totalLosses > 0) {
+                        if (statsHtml) statsHtml += ' &middot; ';
+                        statsHtml += 'Bets: <span style="color:#3fb950;font-weight:700">' + totalWins + 'W</span>/' +
+                            '<span style="color:#f85149;font-weight:700">' + totalLosses + 'L</span>';
+                        statsHtml += ' &middot; P&L: <span style="color:' + pnlColor + ';font-weight:700">' +
+                            (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2) + '</span>';
+                    }
+                    statsEl.innerHTML = statsHtml;
+                    statsEl.style.display = 'block';
+                } else {
+                    statsEl.style.display = 'none';
+                }
             }
         }
 
@@ -1621,122 +1807,8 @@
                 posArea.innerHTML = '';
             }
 
-            // Trade history
-            const recentArea = document.getElementById('trading-recent-area');
-            if (ts.recentTrades && ts.recentTrades.length > 0) {
-                let html = '<div class="trade-history-header" onclick="toggleTradeHistory()">' +
-                    '<span class="trading-recent-title" style="cursor:pointer">Trade History (' + ts.recentTrades.length + ')</span>' +
-                    '<span class="trade-history-toggle" id="trade-history-toggle">\u25BC</span>' +
-                    '</div>' +
-                    '<div class="trade-history-list" id="trade-history-list">';
-                for (const t of ts.recentTrades) {
-                    const time = new Date(t.time).toLocaleTimeString();
-                    const date = new Date(t.time).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-                    const isSettle = t.type === 'settle';
-                    const isBuy = t.type === 'buy';
-                    const isSell = t.type === 'sell';
-                    const isDipBuy = t.type === 'dip_buy';
-                    const isLateLock = t.type === 'late_lock' || t.type === 'late_lock_add';
-                    const isReentry = t.type === 're_entry';
-                    const isError = t.type.includes('error') || t.type.includes('failed');
-
-                    // Type badge colors
-                    let typeBg, typeColor, typeLabel;
-                    if (isSettle) {
-                        typeBg = t.correct ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
-                        typeColor = t.correct ? '#3fb950' : '#f85149';
-                        typeLabel = t.correct ? 'WIN' : 'LOSS';
-                    } else if (isDipBuy) {
-                        typeBg = 'rgba(136,87,255,0.2)'; typeColor = '#a371f7'; typeLabel = 'DIP BUY';
-                    } else if (isLateLock) {
-                        typeBg = 'rgba(63,185,80,0.25)'; typeColor = '#56d364'; typeLabel = 'LOCK';
-                    } else if (isReentry) {
-                        typeBg = 'rgba(56,139,253,0.25)'; typeColor = '#79c0ff'; typeLabel = 'RE-ENTRY';
-                    } else if (isBuy) {
-                        typeBg = 'rgba(56,139,253,0.2)'; typeColor = '#58a6ff'; typeLabel = 'BUY';
-                    } else if (isSell) {
-                        typeBg = 'rgba(210,153,34,0.2)'; typeColor = '#d29922'; typeLabel = 'SELL';
-                    } else if (isError) {
-                        typeBg = 'rgba(248,81,73,0.15)'; typeColor = '#f85149'; typeLabel = 'ERROR';
-                    } else {
-                        typeBg = 'rgba(255,255,255,0.08)'; typeColor = '#8b949e'; typeLabel = t.type.toUpperCase();
-                    }
-
-                    // Cost and payout for buy/settle entries
-                    const costCents = (t.contracts && t.limitPrice) ? t.contracts * t.limitPrice : (t.contracts && t.entryPrice) ? t.contracts * t.entryPrice : 0;
-                    const maxPayoutCents = t.contracts ? t.contracts * 100 : 0;
-
-                    html += '<div class="trade-history-item">' +
-                        '<div class="trade-history-row">' +
-                            '<span class="trade-history-type" style="background:' + typeBg + ';color:' + typeColor + '">' + typeLabel + '</span>' +
-                            '<span class="trade-history-side">' + (t.side ? t.side.toUpperCase() : '') + '</span>' +
-                            '<span class="trade-history-dir" style="color:' + (t.direction === 'UP' ? '#3fb950' : t.direction === 'DOWN' ? '#f85149' : '#8b949e') + '">' +
-                                (t.direction ? (t.direction === 'UP' ? '\u25B2' : '\u25BC') + ' ' + t.direction : '') +
-                            '</span>' +
-                            '<span class="trade-history-time">' + date + ' ' + time + '</span>' +
-                        '</div>';
-
-                    // Details row
-                    if (t.contracts) {
-                        const price = t.limitPrice || t.entryPrice || 0;
-                        html += '<div class="trade-history-details">' +
-                            '<span>' + t.contracts + 'x @ ' + price + '\u00A2</span>';
-                        if (costCents > 0) {
-                            html += '<span>Cost: $' + (costCents / 100).toFixed(2) + '</span>';
-                        }
-                        if (isBuy && maxPayoutCents > 0) {
-                            html += '<span style="color:#3fb950">Max Payout: $' + (maxPayoutCents / 100).toFixed(2) + '</span>';
-                        }
-                        html += '</div>';
-                    }
-
-                    // P&L row for settled trades
-                    if (t.pnlCents !== undefined) {
-                        const pnlPositive = t.pnlCents > 0;
-                        html += '<div class="trade-history-pnl" style="color:' + (pnlPositive ? '#3fb950' : '#f85149') + '">' +
-                            'P&L: ' + (pnlPositive ? '+' : '') + '$' + (t.pnlCents / 100).toFixed(2) +
-                            (t.dailyPnlCents !== undefined ? ' &middot; Daily: ' + (t.dailyPnlCents >= 0 ? '+' : '') + '$' + (t.dailyPnlCents / 100).toFixed(2) : '') +
-                            '</div>';
-                    }
-
-                    // Edge/quality for buy entries
-                    if (t.edge || t.quality) {
-                        html += '<div class="trade-history-meta">';
-                        if (t.edge) html += '<span>Edge: ' + t.edge + '</span>';
-                        if (t.quality) html += '<span>Quality: ' + t.quality + '</span>';
-                        if (t.betSize) html += '<span>Size: ' + (parseFloat(t.betSize) * 100).toFixed(0) + '%</span>';
-                        html += '</div>';
-                    }
-
-                    // Strategy-specific details
-                    if (t.strategy) {
-                        html += '<div class="trade-history-meta" style="color:' + typeColor + '">';
-                        if (t.strategy === 'dip_buyer' && t.dipImprovement) html += '<span>Dip: ' + t.dipImprovement + ' cheaper</span>';
-                        if (t.strategy === 'dip_buyer' && t.existingContracts) html += '<span>Added to ' + t.existingContracts + ' existing</span>';
-                        if ((t.strategy === 'late_lock' || t.strategy === 'late_lock_add') && t.sigmaDistance) html += '<span>' + t.sigmaDistance + ' from strike</span>';
-                        if (t.expectedProfit) html += '<span>Expected: ' + t.expectedProfit + '</span>';
-                        if (t.strategy === 're_entry' && t.originalSellReason) html += '<span>After sell: ' + t.originalSellReason + '</span>';
-                        if (t.probForBet) html += '<span>Prob: ' + t.probForBet + '</span>';
-                        html += '</div>';
-                    }
-
-                    // Error info
-                    if (t.error) {
-                        html += '<div class="trade-history-error">' + t.error + '</div>';
-                    }
-
-                    // Ticker
-                    if (t.ticker) {
-                        html += '<div class="trade-history-ticker">' + t.ticker + '</div>';
-                    }
-
-                    html += '</div>';
-                }
-                html += '</div>';
-                recentArea.innerHTML = html;
-            } else {
-                recentArea.innerHTML = '';
-            }
+            // Re-render combined period history when trading data updates
+            renderPeriodHistory();
 
             // Kill switch button state
             const killBtn = document.getElementById('trading-kill-btn');

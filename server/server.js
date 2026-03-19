@@ -978,6 +978,52 @@ app.get('/api/history', (req, res) => {
     });
 });
 
+// Combined period history: merges predictions + trades by periodKey
+app.get('/api/history/combined', (req, res) => {
+    const predictions = store.getPredictionLog();
+    const trades = tradeExecutor.getStatus().recentTrades || [];
+
+    // Group trades by periodKey
+    const tradesByPeriod = {};
+    for (const t of trades) {
+        const pk = t.periodKey || 'unknown';
+        if (!tradesByPeriod[pk]) tradesByPeriod[pk] = [];
+        tradesByPeriod[pk].push(t);
+    }
+
+    // Build combined entries from predictions
+    const periods = [];
+    const seenKeys = new Set();
+    for (const p of predictions) {
+        const pk = p.periodKey;
+        seenKeys.add(pk);
+        periods.push({
+            periodKey: pk,
+            timestamp: p.timestamp,
+            prediction: p,
+            trades: tradesByPeriod[pk] || [],
+        });
+    }
+
+    // Add trade-only periods (trades with no prediction entry)
+    for (const pk of Object.keys(tradesByPeriod)) {
+        if (!seenKeys.has(pk) && pk !== 'unknown') {
+            const firstTrade = tradesByPeriod[pk][0];
+            periods.push({
+                periodKey: pk,
+                timestamp: new Date(firstTrade.time).getTime(),
+                prediction: null,
+                trades: tradesByPeriod[pk],
+            });
+        }
+    }
+
+    // Sort newest first
+    periods.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+    res.json({ periods });
+});
+
 app.get('/api/error-analysis', (req, res) => {
     res.json(engine.getErrorSummary());
 });
