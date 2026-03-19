@@ -118,12 +118,16 @@ async function fetchBRTIApprox() {
 }
 
 // ── Kalshi Market Fetching ──
+// ALWAYS use the PUBLIC production API for read-only market data.
+// The demo API may require auth and return limited fields.
+// Trading endpoints still use the configured environment (demo/prod).
+const KALSHI_PUBLIC_API = 'https://trading-api.kalshi.com/trade-api/v2';
+
 async function fetchKalshiData() {
     try {
-        // Try status=open first
-        const kalshiBase = kalshiAuth.getBaseUrl() + '/trade-api/v2';
+        // Use public production API for market data (no auth required)
         let data = await fetchJSON(
-            kalshiBase + '/markets?series_ticker=KXBTC15M&status=open&limit=100'
+            KALSHI_PUBLIC_API + '/markets?series_ticker=KXBTC15M&status=open&limit=100'
         );
         let markets = data ? (data.markets || []) : [];
 
@@ -134,7 +138,7 @@ async function fetchKalshiData() {
         // Fallback to unfiltered if needed
         if (markets.length === 0 || !hasFuture) {
             const allData = await fetchJSON(
-                kalshiBase + '/markets?series_ticker=KXBTC15M&limit=100'
+                KALSHI_PUBLIC_API + '/markets?series_ticker=KXBTC15M&limit=100'
             );
             if (allData && allData.markets) {
                 const existingTickers = new Set(markets.map(m => m.ticker));
@@ -157,14 +161,21 @@ async function fetchKalshiData() {
 
         if (!best) return { market: null, strike: null, closeTime: null, ticker: null };
 
-        // Get detailed market data
+        // Get detailed market data from public API
         let detailedMarket = best;
         try {
             const detail = await fetchJSON(
-                kalshiBase + '/markets/' + best.ticker
+                KALSHI_PUBLIC_API + '/markets/' + best.ticker
             );
-            if (detail && detail.market) detailedMarket = detail.market;
-        } catch (e) {}
+            if (detail && detail.market) {
+                detailedMarket = detail.market;
+                console.log(`[kalshi] Detail fetch OK for ${best.ticker}`);
+            } else {
+                console.log(`[kalshi] Detail fetch returned null for ${best.ticker}, using list data`);
+            }
+        } catch (e) {
+            console.log(`[kalshi] Detail fetch failed for ${best.ticker}: ${e.message}`);
+        }
 
         // Extract strike
         const strike = extractStrike(detailedMarket);
@@ -183,6 +194,7 @@ async function fetchKalshiData() {
             strike_type: detailedMarket.strike_type,
             rules_primary: detailedMarket.rules_primary?.substring(0, 200),
             extractedStrike: strike,
+            usedDetailEndpoint: detailedMarket !== best,
         };
         console.log(`[kalshi-debug] Market fields: ${JSON.stringify(strikeDebug)}`);
 
