@@ -90,17 +90,17 @@ function updateSessionRisk(correct) {
         sessionRisk.consecutiveWins = 0;
     }
 
-    // Cooling off: 3+ consecutive losses → pause for 2 periods (30 min)
-    if (sessionRisk.consecutiveLosses >= 3) {
+    // Cooling off: 5+ consecutive losses → short pause (15 min, was 30)
+    if (sessionRisk.consecutiveLosses >= 5) { // was 3
         sessionRisk.coolingOff = true;
-        sessionRisk.coolingOffUntil = Date.now() + 30 * 60 * 1000;
+        sessionRisk.coolingOffUntil = Date.now() + 15 * 60 * 1000; // was 30 min
     }
 
-    // Edge decay: rolling accuracy below fee-adjusted breakeven (61.3%)
-    if (sessionRisk.results.length >= 8) {
+    // Edge decay: only alert at very poor accuracy
+    if (sessionRisk.results.length >= 12) { // was 8 — need more data
         const recentCorrect = sessionRisk.results.filter(r => r.correct).length;
         const recentAccuracy = recentCorrect / sessionRisk.results.length;
-        sessionRisk.edgeDecayAlert = recentAccuracy < 0.55; // warn at 55%, below 61.3% breakeven
+        sessionRisk.edgeDecayAlert = recentAccuracy < 0.45; // was 0.55 — more tolerant
     }
 }
 
@@ -110,25 +110,26 @@ function getSessionRiskMultiplier() {
         sessionRisk.coolingOff = false;
     }
 
-    if (sessionRisk.coolingOff) return 0; // don't trade
+    if (sessionRisk.coolingOff) return 0.30; // was 0 — still trade at reduced size during cooldown
 
     let mult = 1.0;
 
-    // Anti-martingale: reduce size after consecutive losses
-    if (sessionRisk.consecutiveLosses >= 2) mult *= 0.50;
-    else if (sessionRisk.consecutiveLosses >= 1) mult *= 0.75;
+    // Anti-martingale: mild reduction after consecutive losses (was aggressive)
+    if (sessionRisk.consecutiveLosses >= 4) mult *= 0.50;       // was >=2
+    else if (sessionRisk.consecutiveLosses >= 2) mult *= 0.75;  // was >=1
 
-    // Drawdown protection: reduce size when in significant drawdown
-    if (sessionRisk.currentDrawdown > 2.0) mult *= 0.50; // >2 contracts drawdown
-    else if (sessionRisk.currentDrawdown > 1.0) mult *= 0.75;
+    // Drawdown protection: only reduce in deep drawdowns
+    if (sessionRisk.currentDrawdown > 4.0) mult *= 0.60;   // was >2.0 at 0.50
+    else if (sessionRisk.currentDrawdown > 2.5) mult *= 0.80; // was >1.0 at 0.75
 
-    // Edge decay: reduce size when accuracy is dropping
-    if (sessionRisk.edgeDecayAlert) mult *= 0.60;
+    // Edge decay: mild reduction (was 0.60)
+    if (sessionRisk.edgeDecayAlert) mult *= 0.80;
 
-    // Winning streak: can go up to full size (but no more — no martingale)
-    // Already at 1.0, so no boost needed
+    // Winning streak: boost sizing to reward hot streaks
+    if (sessionRisk.consecutiveWins >= 3) mult *= 1.20;
+    else if (sessionRisk.consecutiveWins >= 2) mult *= 1.10;
 
-    return Math.max(0, Math.min(1.0, mult));
+    return Math.max(0.15, Math.min(1.30, mult)); // floor at 15%, allow up to 130%
 }
 
 // ── Online Logistic Regression (pure JS, no libraries) ──
@@ -1584,33 +1585,33 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     const chop = detectChoppiness(prices);
     const exhaustion = detectMomentumExhaustion(prices, marketData.history);
 
-    // Minimum edge threshold: need at least 3% edge after Kalshi fees
-    // Kalshi fees ≈ 7 cents per contract per side
-    // At 50c contracts, that's 14% round-trip. Need significant edge.
-    const minEdge = 0.035; // 3.5% minimum edge
+    // Minimum edge threshold: reduced to allow more trades
+    // Kalshi fees ≈ 1.5 cents per side. Break-even ~52.3%.
+    // Any edge above break-even is worth taking.
+    const minEdge = 0.02; // 2% minimum edge (was 3.5%)
 
-    // Quality factors
+    // Quality factors — relaxed to trigger more buys
     const factors = {
         hasMinEdge: edge >= minEdge,
-        hasConfidence: confidence >= 0.45,
-        notChoppy: !chop.choppy,
-        notExhausted: exhaustion.exhaustion < 0.4,
-        hasTime: minutesAhead >= 3, // don't enter with < 3 min left
+        hasConfidence: confidence >= 0.35,       // was 0.45
+        notChoppy: !chop.choppy || chop.adx > 15, // allow mildly choppy (was strict !choppy)
+        notExhausted: exhaustion.exhaustion < 0.6, // was 0.4
+        hasTime: minutesAhead >= 1.5,             // was 3 — allow later entries
         signalAgreement: prediction.ensembleConfidence?.level !== 'low',
     };
 
-    // Score each factor
+    // Score each factor — reduced weight on restrictive factors
     let score = 0;
     let maxScore = 0;
-    const weights = { hasMinEdge: 3, hasConfidence: 2, notChoppy: 2, notExhausted: 2, hasTime: 1, signalAgreement: 1 };
+    const weights = { hasMinEdge: 3, hasConfidence: 1, notChoppy: 1, notExhausted: 1, hasTime: 1, signalAgreement: 1 };
     for (const [key, weight] of Object.entries(weights)) {
         maxScore += weight;
         if (factors[key]) score += weight;
     }
 
     const quality = score / maxScore;
-    const shouldBet = quality >= 0.55; // need >55% of quality factors
-    const waitForBetter = !shouldBet && minutesAhead > 8; // still early, might improve
+    const shouldBet = quality >= 0.40; // was 0.55 — bet more often
+    const waitForBetter = !shouldBet && minutesAhead > 10; // was 8
 
     // Optimal entry timing: in choppy markets, wait for clearer signal
     let suggestedWait = 0;
@@ -1622,40 +1623,43 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     let betSize = 1.0;
     let betSizeReason = 'Full size';
 
-    // Choppy market = smaller bets (price will whipsaw through strike)
+    // Choppy market = slightly smaller bets (was 50%, now 75%)
     if (chop.choppy) {
-        betSize *= 0.50;
-        betSizeReason = 'Half size — choppy market (ADX=' + chop.adx.toFixed(0) + ')';
-    }
-
-    // Momentum exhaustion = the setup may be stale
-    if (exhaustion.exhaustion > 0.4) {
         betSize *= 0.75;
-        betSizeReason = betSize < 0.5 ? 'Quarter size — choppy + exhausted' : 'Reduced — momentum fading';
+        betSizeReason = 'Slightly reduced — choppy market (ADX=' + chop.adx.toFixed(0) + ')';
     }
 
-    // Low edge = smaller bet (Kelly criterion: bet proportional to edge)
-    if (edge < 0.06) {
-        betSize *= 0.60;
-        betSizeReason = betSize < 0.4 ? 'Small — thin edge + adverse conditions' : 'Reduced — thin edge (' + (edge * 100).toFixed(1) + '%)';
+    // Momentum exhaustion = mild reduction only at extreme levels
+    if (exhaustion.exhaustion > 0.6) {
+        betSize *= 0.85;
+        betSizeReason = betSize < 0.7 ? 'Reduced — choppy + exhausted' : 'Slightly reduced — momentum fading';
     }
 
-    // Vol regime-based sizing: more granular than just "high vol = smaller"
+    // Low edge = mild reduction (was 0.60, now 0.80)
+    if (edge < 0.04) {
+        betSize *= 0.80;
+        betSizeReason = betSize < 0.6 ? 'Reduced — thin edge + adverse conditions' : 'Slightly reduced — thin edge (' + (edge * 100).toFixed(1) + '%)';
+    }
+
+    // Vol regime-based sizing: less aggressive reductions
     if (prices.length > 5) {
         const vr = detectVolRegime(prices);
-        const volSizeMults = { quiet: 1.10, contracting: 1.00, normal: 1.00, expanding: 0.70, volatile: 0.45 };
+        const volSizeMults = { quiet: 1.15, contracting: 1.05, normal: 1.00, expanding: 0.85, volatile: 0.65 };
         let volMult = volSizeMults[vr.regime] || 1.0;
-        // Extreme vol ratio (>2.5) = crisis, cut to minimum
-        if (vr.ratio > 2.5) volMult = 0.25;
-        else if (vr.ratio > 1.8) volMult = 0.45 - (vr.ratio - 1.8) / (2.5 - 1.8) * 0.20;
-        betSize *= Math.max(0.25, Math.min(1.10, volMult));
-        if (volMult < 0.8) betSizeReason = betSize < 0.4 ? 'Small — ' + vr.regime + ' vol regime' : 'Reduced — ' + vr.regime + ' vol (ratio=' + vr.ratio.toFixed(1) + ')';
+        // Only extreme vol crisis gets major cut (was 0.25, now 0.45)
+        if (vr.ratio > 3.0) volMult = 0.45;
+        else if (vr.ratio > 2.0) volMult = 0.65 - (vr.ratio - 2.0) / (3.0 - 2.0) * 0.20;
+        betSize *= Math.max(0.45, Math.min(1.15, volMult));
+        if (volMult < 0.9) betSizeReason = betSize < 0.6 ? 'Reduced — ' + vr.regime + ' vol regime' : 'Slightly reduced — ' + vr.regime + ' vol (ratio=' + vr.ratio.toFixed(1) + ')';
     }
 
-    // Strong signal = can go full size (or close to it)
-    if (quality >= 0.80 && edge >= 0.08 && !chop.choppy) {
-        betSize = 1.0;
-        betSizeReason = 'Full size — strong setup';
+    // Strong signal = boost size above 1.0 (up to 1.3x)
+    if (quality >= 0.70 && edge >= 0.06 && !chop.choppy) {
+        betSize = Math.max(betSize, 1.2);
+        betSizeReason = 'Boosted size — strong setup';
+    } else if (quality >= 0.55 && edge >= 0.04) {
+        betSize = Math.max(betSize, 1.0);
+        betSizeReason = 'Full size — decent setup';
     }
 
     // Session risk adjustment: reduce size based on drawdown/streak
@@ -1674,25 +1678,21 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         }
     }
 
-    // Macro event sizing: reduce during FOMC/CPI/NFP announcements
-    if (marketData.macroEvent && marketData.macroEvent.sizingMultiplier < 1.0) {
-        const macroMult = marketData.macroEvent.sizingMultiplier;
-        betSize *= macroMult;
-        if (marketData.macroEvent.isNearAnnouncement) {
-            betSizeReason = 'Reduced — macro announcement window (FOMC/CPI/NFP)';
-        } else if (marketData.macroEvent.isMacroDay) {
-            betSizeReason = betSize < 0.5 ? 'Small — macro event day' : 'Reduced — macro event day';
-        }
+    // Macro event sizing: only reduce during actual announcement hour (was also reducing on macro days)
+    if (marketData.macroEvent && marketData.macroEvent.isNearAnnouncement) {
+        betSize *= 0.60; // was 0.40
+        betSizeReason = 'Reduced — near macro announcement (FOMC/CPI/NFP)';
     }
+    // No longer reducing on general macro days — too restrictive
 
-    // Fear & Greed extreme regime: reduce in euphoria (>80) or extreme fear (<15)
+    // Fear & Greed: only reduce at truly extreme levels
     if (marketData.fearGreed && marketData.fearGreed.value) {
         const fg = marketData.fearGreed.value;
-        if (fg > 85) { betSize *= 0.75; betSizeReason = 'Reduced — extreme greed regime'; }
-        else if (fg < 15) { betSize *= 0.75; betSizeReason = 'Reduced — extreme fear regime'; }
+        if (fg > 92) { betSize *= 0.85; betSizeReason = 'Slightly reduced — extreme greed'; }
+        else if (fg < 8) { betSize *= 0.85; betSizeReason = 'Slightly reduced — extreme fear'; }
     }
 
-    betSize = Math.max(0, Math.min(1.0, betSize));
+    betSize = Math.max(0, Math.min(1.30, betSize)); // allow up to 130% sizing for strong setups
 
     // ── Fee-adjusted Kelly fraction ──
     // Kalshi fees: ~1.5 cents per contract per side (reduced from old 7c schedule)
@@ -1706,7 +1706,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     const kellyRaw = winProfit > 0
         ? (probForBet * winProfit - (1 - probForBet) * lossAmount) / winProfit
         : 0;
-    const kellyFraction = Math.max(0, kellyRaw * 0.25); // Quarter Kelly
+    const kellyFraction = Math.max(0, kellyRaw * 0.50); // Half Kelly (was quarter)
     const kellyHasEdge = kellyRaw > 0;
 
     // If Kelly says no edge after fees, override shouldBet
@@ -2309,11 +2309,11 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const almostNoTime = minutesRemaining < 2.0;
 
     // ── CASE 1: LOST CAUSE — mathematically dead ──
-    // Only trigger when recovery is essentially impossible
+    // Tightened: only sell when truly hopeless (raised thresholds)
     if (
-        (onWrongSide && noTimeLeft && sigmaDistance > 1.5) ||
-        (probForBet < 0.05 && minutesRemaining < 2) ||
-        (onWrongSide && distancePct > 0.20 && minutesRemaining < 2 && sigmaDistance > 2.0)
+        (onWrongSide && noTimeLeft && sigmaDistance > 2.0) ||         // was 1.5
+        (probForBet < 0.03 && minutesRemaining < 1.5) ||             // was 0.05 / 2 min
+        (onWrongSide && distancePct > 0.30 && minutesRemaining < 1.5 && sigmaDistance > 2.5) // was 0.20/2/2.0
     ) {
         level = 'lost_cause'; shortLabel = 'LOST CAUSE';
         urgency = 95;
@@ -2325,12 +2325,12 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     }
 
     // ── CASE 2: SELL NOW — very unlikely to recover ──
-    // Requires BOTH being on wrong side AND poor recovery odds
+    // Tightened thresholds to hold longer
     else if (
         onWrongSide && (
-            (sigmaDistance > 1.8 && minutesRemaining < 4) ||
-            (probForBet < 0.10 && minutesRemaining < 3) ||
-            (sigmaDistance > 1.5 && minutesRemaining < 2.5 && probVel.trend === 'collapsing')
+            (sigmaDistance > 2.2 && minutesRemaining < 3) ||          // was 1.8/4
+            (probForBet < 0.07 && minutesRemaining < 2) ||           // was 0.10/3
+            (sigmaDistance > 2.0 && minutesRemaining < 2 && probVel.trend === 'collapsing') // was 1.5/2.5
         )
     ) {
         level = 'sell_now'; shortLabel = 'SELL NOW';
@@ -2342,11 +2342,11 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     }
 
     // ── CASE 3: CONSIDER SELLING — wrong side, marginal recovery ──
-    // Only when on wrong side with significant distance AND limited time
+    // Much tighter — only when really losing with no time
     else if (
         onWrongSide && (
-            (sigmaDistance > 1.2 && minutesRemaining < 3.5 && opposing >= 2 && agreeing === 0) ||
-            (probForBet < 0.15 && minutesRemaining < 4 && sigmaDistance > 1.0)
+            (sigmaDistance > 1.8 && minutesRemaining < 2.5 && opposing >= 3 && agreeing === 0) || // was 1.2/3.5/2
+            (probForBet < 0.10 && minutesRemaining < 2.5 && sigmaDistance > 1.5)                  // was 0.15/4/1.0
         )
     ) {
         level = 'consider_selling'; shortLabel = 'WATCH CLOSELY';

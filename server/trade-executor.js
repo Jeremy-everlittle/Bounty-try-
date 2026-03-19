@@ -13,10 +13,10 @@ const trading = require('./kalshi-trading');
 // ── Configuration (from env, with safe defaults) ──
 const config = {
     paperMode: (process.env.PAPER_MODE || 'true').toLowerCase() === 'true',
-    baseContracts: parseInt(process.env.BASE_CONTRACTS || '5', 10),
-    maxPositionContracts: parseInt(process.env.MAX_POSITION_CONTRACTS || '10', 10),
-    maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '1000', 10), // $10
-    maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '50', 10),
+    baseContracts: parseInt(process.env.BASE_CONTRACTS || '10', 10),           // was 5
+    maxPositionContracts: parseInt(process.env.MAX_POSITION_CONTRACTS || '20', 10), // was 10
+    maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '2500', 10),    // $25 (was $10)
+    maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '100', 10),      // was 50
 };
 
 // ── State ──
@@ -243,9 +243,9 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 
     const shouldSell = (
         sellSignal.level === 'lost_cause' ||
-        sellSignal.level === 'sell_now' ||
-        (sellSignal.level === 'take_profit' && minutesRemaining < 2) ||
-        (sellSignal.level === 'consider_selling' && minutesRemaining < 1.5)
+        (sellSignal.level === 'sell_now' && minutesRemaining < 1.5) ||            // was unconditional
+        (sellSignal.level === 'take_profit' && minutesRemaining < 1) ||           // was 2 min
+        (sellSignal.level === 'consider_selling' && minutesRemaining < 0.75)      // was 1.5 min
     );
 
     if (!shouldSell) return;
@@ -362,7 +362,7 @@ function onPeriodEnd(gradeResult) {
 async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPrice, minutesRemaining, kalshiTicker, periodKey) {
     if (!currentPosition || currentPosition.periodKey !== periodKey) return;
     if (killSwitch) return;
-    if (minutesRemaining < 1.5) return; // too close to settlement for dip buying
+    if (minutesRemaining < 0.75) return; // was 1.5 — allow dip buying closer to settlement
     if (Date.now() - lastDipCheckTime < 8000) return; // throttle
     lastDipCheckTime = Date.now();
 
@@ -382,12 +382,12 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
 
     // Check the probability is still decent (model thinks we'll recover)
     const probForBet = betIsUp ? updatedPrediction.probability : (1 - updatedPrediction.probability);
-    if (probForBet < 0.55) return; // not confident enough in recovery
+    if (probForBet < 0.50) return; // was 0.55 — allow dip buying with moderate confidence
 
     // Calculate the dip opportunity — how much cheaper can we buy?
     const currentLimitPrice = Math.max(5, Math.min(95, Math.round(probForBet * 100)));
     const entryImprovement = currentPosition.entryPrice - currentLimitPrice;
-    if (entryImprovement < 5) return; // need at least 5¢ improvement to justify adding
+    if (entryImprovement < 3) return; // was 5¢ — allow smaller dips
 
     // How many more contracts can we add?
     const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
@@ -467,8 +467,8 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
 // ═══════════════════════════════════════════════════════════════
 
 async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemaining, kalshiTicker, periodKey) {
-    // Only in final 2 minutes
-    if (minutesRemaining > 2.0) return;
+    // Allow late lock in final 3 minutes (was 2)
+    if (minutesRemaining > 3.0) return;
     if (killSwitch) return;
 
     // Must have strong prediction data
@@ -480,9 +480,9 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     const distancePct = distanceFromStrike / strike;
     const sigmaDistance = distancePct / remainingVol;
 
-    // Need at least 2.5 sigma away — this is very safe
-    // At 2.5σ, there's ~99.4% chance price stays on this side
-    if (sigmaDistance < 2.5) return;
+    // Reduced from 2.5σ to 1.8σ — more aggressive late locks
+    // At 1.8σ, there's ~96.4% chance price stays on this side
+    if (sigmaDistance < 1.8) return;
 
     const priceAboveStrike = currentPrice >= strike;
     const lockSide = priceAboveStrike ? 'yes' : 'no';
@@ -627,7 +627,7 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
     if (currentPosition) return;
     if (!soldThisPeriod || soldThisPeriod.periodKey !== periodKey) return;
     if (killSwitch) return;
-    if (minutesRemaining < 2.0) return; // too late for re-entry (late lock handles this)
+    if (minutesRemaining < 1.5) return; // was 2.0 — allow later re-entry
 
     const bq = updatedPrediction && updatedPrediction._betQuality;
     if (!bq || !bq.shouldBet) return;
@@ -638,11 +638,11 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
     const updIsUp = updatedPrediction.predictedPrice >= strike;
     if (updIsUp !== origIsUp) return; // model hasn't recovered to our side
 
-    // Require strong confidence for re-entry (higher bar than initial entry)
+    // Lowered re-entry bar — still slightly above initial entry
     const probForBet = origIsUp ? updatedPrediction.probability : (1 - updatedPrediction.probability);
-    if (probForBet < 0.62) return; // need 62%+ confidence (vs 50%+ for initial)
-    if (bq.quality < 0.65) return; // need higher quality than initial entry
-    if (bq.edge < 0.06) return;    // need 6%+ edge
+    if (probForBet < 0.55) return; // was 0.62
+    if (bq.quality < 0.45) return; // was 0.65
+    if (bq.edge < 0.03) return;    // was 0.06
 
     // Price must be back on our side
     const priceOnOurSide = (origIsUp && currentPrice >= strike) || (!origIsUp && currentPrice < strike);
@@ -651,10 +651,10 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
     const check = canTrade();
     if (!check.ok) return;
 
-    // Re-enter with reduced size (more cautious after getting stopped out)
+    // Re-enter at near-full size (was 60%, now 85%)
     const contracts = Math.max(1, Math.min(
         config.maxPositionContracts,
-        Math.round(bq.betSize * config.baseContracts * 0.6) // 60% of normal size
+        Math.round(bq.betSize * config.baseContracts * 0.85)
     ));
     const limitPrice = Math.max(5, Math.min(95, Math.round(probForBet * 100)));
 
