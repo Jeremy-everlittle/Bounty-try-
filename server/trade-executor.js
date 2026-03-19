@@ -15,11 +15,11 @@ const { getEnvironment } = require('./kalshi-auth');
 // ── Configuration (from env, with safe defaults) ──
 const config = {
     paperMode: (process.env.PAPER_MODE || 'true').toLowerCase() === 'true',
-    baseContracts: parseInt(process.env.BASE_CONTRACTS || '5', 10),            // was 10 — halved until edge proven with 300+ trades
-    maxPositionContracts: Math.min(parseInt(process.env.MAX_POSITION_CONTRACTS || '10', 10), 50), // was 20 — reduced to limit exposure
-    convictionMaxContracts: Math.min(parseInt(process.env.CONVICTION_MAX_CONTRACTS || '30', 10), 100), // higher cap for high-conviction bets
-    maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '2500', 10),    // $25 (was $10)
-    maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '100', 10),      // was 50
+    baseContracts: parseInt(process.env.BASE_CONTRACTS || '5', 10),
+    maxPositionContracts: parseInt(process.env.MAX_POSITION_CONTRACTS || '50', 10),
+    convictionMaxContracts: parseInt(process.env.CONVICTION_MAX_CONTRACTS || '150', 10), // higher cap for high-conviction bets
+    maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '10000', 10),   // $100
+    maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '200', 10),
 };
 
 // ── State ──
