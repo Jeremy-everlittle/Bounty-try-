@@ -1342,15 +1342,18 @@
 
             document.getElementById('kalshi-error-banner').style.display = 'none';
             const debugEl = document.getElementById('debug-strike');
-            if (debugEl && kStrike) debugEl.textContent = 'Strike: $' + kStrike.toFixed(2) + ' via server';
+            const strikeSource = serverData.strikeSource;
 
             let periodOpenPrice = null;
             if (kStrike && kStrike > 0) {
                 kalshiStrike = kStrike;
                 periodOpenPrice = kStrike;
                 dataSourceName = `BRTI~(${sources}) + Kalshi strike`;
+                if (debugEl) debugEl.textContent = 'Strike: $' + kStrike.toFixed(2) + ' via Kalshi API';
             } else {
+                kalshiStrike = null;
                 dataSourceName = `BRTI~(${sources})`;
+                if (debugEl) debugEl.textContent = 'Strike: API failed — no strike available';
             }
 
             return {
@@ -2109,8 +2112,8 @@
         function updateUI(data, periodEnd) {
             // Current price (always live)
             document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
-            // Use Kalshi strike as the authoritative strike price; fall back to periodStartPrice
-            const displayStrike = kalshiStrike || periodStartPrice;
+            // Use ONLY the Kalshi API strike — no fallback to periodStartPrice
+            const displayStrike = kalshiStrike;
             // Show current price vs strike (how far above/below the strike)
             const changeEl = document.getElementById('price-change-24h');
             if (displayStrike !== null) {
@@ -2119,10 +2122,11 @@
                 changeEl.textContent = `${direction} ${formatPrice(Math.abs(strikeDelta))} vs strike`;
                 changeEl.style.color = strikeDelta >= 0 ? '#3fb950' : '#f85149';
             } else {
-                changeEl.textContent = '';
+                changeEl.textContent = 'Strike unavailable (API failed)';
+                changeEl.style.color = '#f0c040';
             }
 
-            // Period open price — always show latest Kalshi strike when available
+            // Period open price — only show if we have a real API strike
             if (displayStrike !== null) {
                 document.getElementById('period-start-price').textContent = formatPrice(displayStrike);
                 const deltaDollar = data.currentPrice - displayStrike;
@@ -2132,10 +2136,11 @@
                 deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
                 document.getElementById('period-label').textContent = 'Kalshi strike';
             } else {
-                // No Kalshi strike available
-                document.getElementById('period-start-price').textContent = 'Waiting\u2026';
-                document.getElementById('period-delta').textContent = '';
-                document.getElementById('period-label').textContent = 'Strike';
+                // No Kalshi strike — show API failed clearly
+                document.getElementById('period-start-price').textContent = 'API Failed';
+                document.getElementById('period-delta').textContent = 'Strike not available from Kalshi API';
+                document.getElementById('period-delta').style.color = '#f0c040';
+                document.getElementById('period-label').textContent = 'Kalshi strike';
             }
 
             // Target time (period end)
