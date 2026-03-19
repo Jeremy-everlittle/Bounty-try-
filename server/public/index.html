@@ -68,13 +68,36 @@
         .sell-signal-details { font-size: 10px; font-weight: 400; opacity: 0.65; margin-top: 3px; }
         .sell-signal-pnl { font-size: 10px; font-weight: 600; margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.1); }
         .sell-signal-advice { font-size: 11px; font-weight: 600; margin-top: 5px; padding: 5px 8px; border-radius: 6px; background: rgba(0,0,0,0.2); }
+        /* Trading advisor states */
         .sell-hold { background: rgba(63, 185, 80, 0.12); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.3); }
         .sell-winning { background: rgba(63, 185, 80, 0.18); color: #56d364; border: 1px solid rgba(63, 185, 80, 0.4); }
+        .sell-strong_hold { background: rgba(63, 185, 80, 0.15); color: #3fb950; border: 1px solid rgba(63,185,80,0.35); }
+        .sell-take_profit { background: rgba(46,160,67,0.22); color: #56d364; border: 1px solid rgba(46,160,67,0.45); animation: profitGlow 2s ease-in-out infinite; }
+        .sell-dip_buy { background: rgba(56,139,253,0.18); color: #58a6ff; border: 1px solid rgba(56,139,253,0.4); animation: dipPulse 2s ease-in-out infinite; }
+        .sell-hold_dip { background: rgba(210, 153, 34, 0.12); color: #d29922; border: 1px solid rgba(210,153,34,0.3); }
         .sell-consider_selling { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.35); }
         .sell-sell_now { background: rgba(248, 81, 73, 0.18); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.4); animation: sellPulse 1.5s ease-in-out infinite; }
         .sell-lost_cause { background: rgba(248, 81, 73, 0.25); color: #ff6b6b; border: 1px solid rgba(248, 81, 73, 0.5); animation: sellPulseUrgent 0.8s ease-in-out infinite; }
         @keyframes sellPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.85; } }
         @keyframes sellPulseUrgent { 0%, 100% { opacity: 1; } 50% { opacity: 0.9; box-shadow: 0 0 12px 2px rgba(248, 81, 73, 0.25); } }
+        @keyframes profitGlow { 0%, 100% { box-shadow: 0 0 0 0 rgba(46,160,67,0.3); } 50% { box-shadow: 0 0 8px 2px rgba(46,160,67,0.15); } }
+        @keyframes dipPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.85; box-shadow: 0 0 8px 2px rgba(56,139,253,0.15); } }
+        /* Pre-buy advisory */
+        .prebuy-signal { padding: 10px 14px; border-radius: 10px; margin-top: 10px; }
+        .prebuy-buy_now { background: rgba(63,185,80,0.18); color: #56d364; border: 1px solid rgba(63,185,80,0.4); }
+        .prebuy-wait { background: rgba(210,153,34,0.15); color: #d29922; border: 1px solid rgba(210,153,34,0.35); }
+        .prebuy-skip { background: rgba(248,81,73,0.12); color: #f85149; border: 1px solid rgba(248,81,73,0.3); }
+        .prebuy-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+        .prebuy-label { font-size: 13px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; }
+        .prebuy-direction { margin-left: auto; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+        .prebuy-advice { font-size: 11px; font-weight: 600; margin-top: 5px; padding: 5px 8px; border-radius: 6px; background: rgba(0,0,0,0.2); }
+        .prebuy-metrics { display: flex; gap: 12px; margin-top: 6px; font-size: 10px; opacity: 0.7; }
+        .prebuy-metric { display: flex; align-items: center; gap: 3px; }
+        .advice-dip-buy { background: rgba(56,139,253,0.12); color: #58a6ff; border: 1px solid rgba(56,139,253,0.25); }
+        .advice-take-profit { background: rgba(46,160,67,0.15); color: #56d364; border: 1px solid rgba(46,160,67,0.3); }
+        .advice-hold-dip { background: rgba(210,153,34,0.12); color: #d29922; border: 1px solid rgba(210,153,34,0.25); }
+
+        /* Wallet CSS removed */
 
         /* Next Period Preview Card */
         .next-period-card { display: none; border: 1px solid rgba(138, 180, 248, 0.3); background: linear-gradient(135deg, #161b22 0%, #1a2332 100%); }
@@ -567,11 +590,60 @@
             margin-top: 20px;
             line-height: 1.5;
         }
+        /* ── Auto-Trading Panel ── */
+        .trading-panel { padding: 12px 14px; border-radius: 10px; margin-top: 12px; border: 1px solid rgba(255,255,255,0.1); background: rgba(22,27,34,0.8); }
+        .trading-panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .trading-panel-title { font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #8b949e; }
+        .trading-mode-badge { font-size: 10px; font-weight: 800; letter-spacing: 1.5px; padding: 2px 8px; border-radius: 4px; }
+        .trading-mode-paper { background: rgba(210,153,34,0.25); color: #d29922; border: 1px solid rgba(210,153,34,0.4); }
+        .trading-mode-live { background: rgba(63,185,80,0.25); color: #3fb950; border: 1px solid rgba(63,185,80,0.4); }
+        .trading-mode-off { background: rgba(248,81,73,0.25); color: #f85149; border: 1px solid rgba(248,81,73,0.4); }
+        .trading-stats { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 8px; margin-top: 8px; }
+        .trading-stat { text-align: center; }
+        .trading-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: #8b949e; }
+        .trading-stat-value { font-size: 14px; font-weight: 700; margin-top: 2px; }
+        .trading-position { margin-top: 8px; padding: 8px; border-radius: 6px; background: rgba(56,139,253,0.12); border: 1px solid rgba(56,139,253,0.3); }
+        .trading-position-label { font-size: 10px; color: #58a6ff; font-weight: 600; }
+        .trading-position-detail { font-size: 12px; font-weight: 700; color: #e6edf3; margin-top: 2px; }
+        .trading-recent { margin-top: 8px; }
+        .trading-recent-title { font-size: 10px; color: #8b949e; font-weight: 600; margin-bottom: 4px; }
+        .trading-recent-entry { font-size: 10px; color: #e6edf3; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        /* ── Trade History ── */
+        .trade-history-header { display: flex; align-items: center; justify-content: space-between; cursor: pointer; padding: 4px 0; }
+        .trade-history-toggle { font-size: 10px; color: #8b949e; transition: transform 0.2s; }
+        .trade-history-toggle.collapsed { transform: rotate(-90deg); }
+        .trade-history-list { max-height: 400px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.15) transparent; }
+        .trade-history-item { padding: 8px; margin-bottom: 4px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); }
+        .trade-history-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+        .trade-history-type { font-size: 9px; font-weight: 800; letter-spacing: 0.8px; padding: 1px 6px; border-radius: 3px; }
+        .trade-history-side { font-size: 11px; font-weight: 700; color: #e6edf3; }
+        .trade-history-dir { font-size: 11px; font-weight: 700; }
+        .trade-history-time { font-size: 10px; color: #8b949e; margin-left: auto; }
+        .trade-history-details { display: flex; gap: 10px; font-size: 10px; color: #b0b8c1; margin-top: 4px; flex-wrap: wrap; }
+        .trade-history-pnl { font-size: 11px; font-weight: 700; margin-top: 3px; }
+        .trade-history-meta { display: flex; gap: 8px; font-size: 9px; color: #8b949e; margin-top: 3px; }
+        .trade-history-error { font-size: 9px; color: #f85149; margin-top: 3px; word-break: break-all; }
+        .trade-history-ticker { font-size: 9px; color: #484f58; margin-top: 2px; font-family: monospace; }
+        .trading-controls { display: flex; gap: 6px; margin-top: 8px; }
+        .trading-btn { font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: #e6edf3; cursor: pointer; }
+        .trading-btn:hover { background: rgba(255,255,255,0.1); }
+        .trading-btn-danger { color: #f85149; border-color: rgba(248,81,73,0.4); }
+        .trading-btn-danger:hover { background: rgba(248,81,73,0.15); }
+        .trading-not-configured { font-size: 11px; color: #8b949e; text-align: center; padding: 10px; }
+        /* ── Environment Toggle ── */
+        .env-toggle { display: flex; gap: 4px; margin: 8px 0; padding: 4px; background: rgba(0,0,0,0.3); border-radius: 6px; }
+        .env-btn { flex: 1; padding: 5px 8px; border: 1px solid transparent; border-radius: 4px; font-size: 10px; font-weight: 800; letter-spacing: 1.2px; text-align: center; cursor: pointer; background: transparent; color: #8b949e; transition: all 0.2s; }
+        .env-btn:hover { background: rgba(255,255,255,0.05); }
+        .env-btn.active-demo { background: rgba(63,185,80,0.2); color: #3fb950; border-color: rgba(63,185,80,0.4); }
+        .env-btn.active-prod { background: rgba(248,81,73,0.2); color: #f85149; border-color: rgba(248,81,73,0.4); }
+        .env-header-badge { display: inline-block; font-size: 9px; font-weight: 800; letter-spacing: 1.2px; padding: 1px 6px; border-radius: 3px; margin-left: 8px; vertical-align: middle; }
+        .env-header-demo { background: rgba(63,185,80,0.25); color: #3fb950; }
+        .env-header-prod { background: rgba(248,81,73,0.25); color: #f85149; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>BTC Predictor</h1>
+        <h1>BTC Predictor <span class="env-header-badge env-header-demo" id="env-header-badge">DEMO</span></h1>
         <p><span class="live-dot"></span>Kalshi BTC Up or Down &middot; 15 min</p>
     </div>
 
@@ -621,7 +693,47 @@
             </div>
         </div>
 
+        <div id="prebuy-signal-badge"></div>
         <div id="sell-signal-badge"></div>
+
+        <!-- Auto-Trading Panel -->
+        <div class="trading-panel" id="trading-panel">
+            <div class="trading-panel-header">
+                <span class="trading-panel-title">Auto Trading</span>
+                <span class="trading-mode-badge" id="trading-mode-badge">--</span>
+            </div>
+            <div class="env-toggle" id="env-toggle">
+                <button class="env-btn active-demo" id="env-btn-demo" onclick="switchEnvironment('demo')">DEMO</button>
+                <button class="env-btn" id="env-btn-prod" onclick="switchEnvironment('production')">PROD</button>
+            </div>
+            <div class="trading-stats">
+                <div class="trading-stat">
+                    <div class="trading-stat-label">Balance</div>
+                    <div class="trading-stat-value" id="trading-balance">--</div>
+                </div>
+                <div class="trading-stat">
+                    <div class="trading-stat-label">Daily P&L</div>
+                    <div class="trading-stat-value" id="trading-pnl">$0.00</div>
+                </div>
+                <div class="trading-stat">
+                    <div class="trading-stat-label">Trades</div>
+                    <div class="trading-stat-value" id="trading-count">0</div>
+                </div>
+                <div class="trading-stat">
+                    <div class="trading-stat-label">W/L</div>
+                    <div class="trading-stat-value" id="trading-wl">0/0</div>
+                </div>
+            </div>
+            <div id="trading-position-area"></div>
+            <div class="trading-recent" id="trading-recent-area"></div>
+            <div class="trading-controls">
+                <button class="trading-btn" id="trading-mode-btn" onclick="toggleTradingMode()">Toggle Mode</button>
+                <button class="trading-btn trading-btn-danger" id="trading-kill-btn" onclick="toggleKillSwitch()">Kill Switch</button>
+                <button class="trading-btn" id="notif-btn" onclick="toggleNotifications()" style="font-size:12px">Notifications: OFF</button>
+            </div>
+        </div>
+
+        <!-- Wallet removed - will be re-added later -->
 
         <!-- Next Period Preview Card -->
         <div class="card next-period-card" id="next-period-card">
@@ -718,43 +830,67 @@
 
     <script>
         // ═══════════════════════════════════════════════════════════════
-        // DISPLAY-ONLY CLIENT — receives all state from server via WebSocket
+        // WEBSOCKET CONNECTION — Receives data from always-on server
         // ═══════════════════════════════════════════════════════════════
-
-        // ── Client state (display only) ──────────────────────────────
-        let serverState = null;      // latest state from server
-        let priceHistory = [];       // for chart resize handler
-        let predictionPoint = null;  // for chart resize handler
-        let currentTarget = null;    // for countdown timer
-
-        // ── WebSocket connection ─────────────────────────────────────
-        let ws;
-        let reconnectDelay = 1000;
+        let ws = null;
+        let serverData = null; // Latest data from server
+        let wsConnected = false;
+        let wsReconnectTimer = null;
 
         function connectWebSocket() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(protocol + '//' + location.host);
+            const wsUrl = protocol + '//' + location.host;
+            console.log('Connecting to WebSocket:', wsUrl);
+
+            ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
-                console.log('Connected to server');
-                reconnectDelay = 1000;
+                wsConnected = true;
+                console.log('WebSocket connected');
                 document.getElementById('status-bar').innerHTML =
-                    '<span class="live-dot"></span> Connected to prediction server';
+                    '<span style="color:#3fb950">&#9679;</span> Connected to server';
             };
 
             ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                if (data.type === 'state') {
-                    handleServerState(data);
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'data') {
+                        serverData = msg;
+                        // Inject server data into caches
+                        if (msg.orderBook) {
+                            orderBookCache = { timestamp: Date.now(), data: msg.orderBook };
+                        }
+                        if (msg.recentTrades) {
+                            recentTradesCache = { timestamp: Date.now(), trades: msg.recentTrades };
+                        }
+                        if (msg.fundingRate !== null && msg.fundingRate !== undefined) {
+                            fundingRateCache = { timestamp: Date.now(), rate: msg.fundingRate };
+                        }
+                        if (msg.kalshiCloseTime) {
+                            kalshiCloseTime = msg.kalshiCloseTime;
+                        }
+                        if (msg.kalshiTicker) {
+                            kalshiMarketTicker = msg.kalshiTicker;
+                        }
+                        // Merge server prediction history with local (localStorage survives deploys)
+                        if (msg.predictionLog && msg.predictionLog.length > 0) {
+                            mergePredictionLogs(msg.predictionLog);
+                            renderPredictionHistory();
+                        }
+                    } else if (msg.type === 'trade') {
+                        handleTradeNotification(msg.trade);
+                    }
+                } catch (e) {
+                    console.error('WebSocket message parse error:', e);
                 }
             };
 
             ws.onclose = () => {
-                console.log('Disconnected, reconnecting in', reconnectDelay, 'ms');
+                wsConnected = false;
+                console.log('WebSocket disconnected, reconnecting in 3s...');
                 document.getElementById('status-bar').innerHTML =
-                    '&#9888; Disconnected — reconnecting...';
-                setTimeout(connectWebSocket, reconnectDelay);
-                reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+                    '&#9888; Server disconnected — reconnecting...';
+                wsReconnectTimer = setTimeout(connectWebSocket, 3000);
             };
 
             ws.onerror = (e) => {
@@ -762,97 +898,278 @@
             };
         }
 
-        // ── Handle complete state from server ────────────────────────
-        function handleServerState(data) {
-            serverState = data;
+        let priceHistory = [];
+        let predictionPoint = null;
+        let currentPrediction = null;
+        let latestData = null;
 
-            // Update countdown target from server's kalshiCloseTime
-            if (data.kalshiCloseTime) {
-                currentTarget = new Date(data.kalshiCloseTime);
-            }
+        // ── Prediction history (persisted in localStorage) ──────────
+        let predictionLog = [];
+        try {
+            predictionLog = JSON.parse(localStorage.getItem('btcPredLog') || '[]');
+        } catch(e) { predictionLog = []; }
 
-            // Hide/show error banner based on server state
-            if (data.kalshiStrike) {
-                document.getElementById('kalshi-error-banner').style.display = 'none';
-            }
-
-            // Update all UI
-            updateUI(data);
-            renderPredictionHistory(data.predictionLog);
-            renderSellSignal('sell-signal-badge', data.sellSignal, data.originalPrediction, data.currentPrice);
-            renderNextPeriodPreview(data);
+        function savePredictionLog() {
+            localStorage.setItem('btcPredLog', JSON.stringify(predictionLog));
         }
 
-        // ── Clear History (send to server) ───────────────────────────
+        // Merge server log into local log, dedup by periodKey, keep all entries
+        function mergePredictionLogs(serverLog) {
+            const byKey = new Map();
+            // Local entries first
+            for (const p of predictionLog) {
+                if (p.periodKey) byKey.set(p.periodKey, p);
+            }
+            // Server entries overwrite (they have grading from server)
+            for (const p of serverLog) {
+                if (p.periodKey) byKey.set(p.periodKey, p);
+            }
+            predictionLog = Array.from(byKey.values())
+                .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+            savePredictionLog();
+        }
+
         function clearHistory() {
-            if (ws && ws.readyState === 1) {
+            predictionLog = [];
+            localStorage.removeItem('btcPredLog');
+            // Also clear server-side history
+            if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'clearHistory' }));
             }
+            renderPredictionHistory();
         }
 
-        // ── Manual Refresh (send to server) ──────────────────────────
-        function manualRefresh() {
-            const btn = document.querySelector('.refresh-btn');
-            if (btn) {
-                btn.textContent = 'Refreshing\u2026';
-                btn.disabled = true;
-                setTimeout(() => {
-                    btn.textContent = 'Refresh Kalshi';
-                    btn.disabled = false;
-                }, 2000);
-            }
-            if (ws && ws.readyState === 1) {
-                ws.send(JSON.stringify({ type: 'refresh' }));
-            }
-        }
-
-        // ── Time helpers ─────────────────────────────────────────────
-
-        function getSecondsUntilTarget(target) {
-            return Math.max(0, Math.floor((target - Date.now()) / 1000));
-        }
-
-        function formatCountdown(totalSeconds) {
-            const m = Math.floor(totalSeconds / 60);
-            const s = totalSeconds % 60;
-            return `${m}:${s.toString().padStart(2, '0')}`;
-        }
-
-        function formatLocalTime(date) {
-            let h = date.getHours();
-            const m = date.getMinutes().toString().padStart(2, '0');
-            const ampm = h >= 12 ? 'PM' : 'AM';
-            h = h % 12 || 12;
-            return h + ':' + m + ' ' + ampm;
-        }
-
-        function formatTargetTime(date) {
-            // Show period as start->end range for clarity
-            const start = new Date(date.getTime() - 15 * 60 * 1000);
-            return formatLocalTime(start) + '\u2013' + formatLocalTime(date);
-        }
-
-        // ── Formatting ───────────────────────────────────────────────
-
-        function formatPrice(price) {
-            return '$' + price.toLocaleString('en-US', {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2
+        function recordPrediction(periodKey, startPrice, predictedPrice, targetTimeStr) {
+            if (predictionLog.length && predictionLog[predictionLog.length - 1].periodKey === periodKey) return;
+            predictionLog.push({
+                time: targetTimeStr,
+                timestamp: Date.now(),
+                periodKey,
+                startPrice,
+                predictedPrice,
+                predictedDirection: predictedPrice >= startPrice ? 'up' : 'down',
+                actualPrice: null,
+                actualDirection: null,
+                correct: null
             });
+            savePredictionLog();
         }
 
-        // ── Prediction History Rendering ─────────────────────────────
+        function gradePreviousPrediction(currentPrice) {
+            for (let i = predictionLog.length - 1; i >= 0; i--) {
+                if (predictionLog[i].actualPrice === null && predictionLog[i].periodKey !== currentPeriodKey) {
+                    predictionLog[i].actualPrice = currentPrice;
+                    predictionLog[i].actualDirection = currentPrice >= predictionLog[i].startPrice ? 'up' : 'down';
+                    predictionLog[i].correct = predictionLog[i].predictedDirection === predictionLog[i].actualDirection;
+                }
+            }
+            savePredictionLog();
+        }
 
-        function renderPredictionHistory(predictionLog) {
+        // ════════════════════════════════════════════════════════════════
+        // BAYESIAN LEARNING SYSTEM
+        // Beta-Binomial conjugate models tracking accuracy by direction,
+        // regime, time-of-day, and calibration bucket.
+        // ════════════════════════════════════════════════════════════════
+
+        let bayesianState = {
+            records: [],
+            directionBeta: { up: { a: 1, b: 1 }, down: { a: 1, b: 1 } },
+            regimeBeta: {
+                volatile: { a: 1, b: 1 }, expanding: { a: 1, b: 1 },
+                normal: { a: 1, b: 1 }, quiet: { a: 1, b: 1 }, contracting: { a: 1, b: 1 }
+            },
+            trendBeta: {
+                trending: { a: 1, b: 1 }, meanReverting: { a: 1, b: 1 }, neutral: { a: 1, b: 1 }
+            },
+            timeBeta: { 0: { a: 1, b: 1 }, 1: { a: 1, b: 1 }, 2: { a: 1, b: 1 }, 3: { a: 1, b: 1 } },
+            calibrationBins: {
+                0: { a: 1, b: 1 }, 1: { a: 1, b: 1 }, 2: { a: 1, b: 1 },
+                3: { a: 1, b: 1 }, 4: { a: 1, b: 1 }, 5: { a: 1, b: 1 }
+            }
+        };
+
+        function loadBayesianState() {
+            try {
+                const raw = localStorage.getItem('btcBayesianState');
+                if (raw) bayesianState = { ...bayesianState, ...JSON.parse(raw) };
+            } catch (e) { console.warn('Failed to load Bayesian state:', e); }
+        }
+
+        function saveBayesianState() {
+            bayesianState.records = bayesianState.records.slice(-200);
+            localStorage.setItem('btcBayesianState', JSON.stringify(bayesianState));
+        }
+
+        function getCalibrationBin(prob) {
+            if (prob < 0.20) return 0;
+            if (prob < 0.35) return 1;
+            if (prob < 0.50) return 2;
+            if (prob < 0.65) return 3;
+            if (prob < 0.80) return 4;
+            return 5;
+        }
+
+        function getTimeBucket() { return Math.floor(new Date().getHours() / 6); }
+        function betaMean(beta) { return beta.a / (beta.a + beta.b); }
+        function betaN(beta) { return beta.a + beta.b - 2; }
+        function betaUpdate(beta, success) {
+            const decay = 0.98;
+            return {
+                a: beta.a * decay + (success ? 1 : 0),
+                b: beta.b * decay + (success ? 0 : 1)
+            };
+        }
+        function getBayesTrendLabel(trendRegime) {
+            if (trendRegime.trending) return 'trending';
+            if (trendRegime.meanReverting) return 'meanReverting';
+            return 'neutral';
+        }
+
+        function computeDirectionalPrior(direction, windowSize = 5) {
+            const graded = bayesianState.records.filter(
+                r => r.predictedDirection === direction && r.correct !== null
+            );
+            if (graded.length < 2) return { adjustment: 0, confidence: 0, n: 0 };
+            const recent = graded.slice(-windowSize);
+            const successes = recent.filter(r => r.correct).length;
+            const a = 1 + successes, b = 1 + recent.length - successes;
+            const adjustment = a / (a + b) - 0.5;
+            const confidence = Math.min(0.7, 0.2 * Math.sqrt(recent.length));
+            return { adjustment, confidence, n: recent.length };
+        }
+
+        function computeRegimeAdjustment(volRegimeLabel, trendRegimeLabel) {
+            const timeBucket = getTimeBucket();
+            const volBeta = bayesianState.regimeBeta[volRegimeLabel] || { a: 1, b: 1 };
+            const trendBeta = bayesianState.trendBeta[trendRegimeLabel] || { a: 1, b: 1 };
+            const timeBeta = bayesianState.timeBeta[timeBucket] || { a: 1, b: 1 };
+            const volN = betaN(volBeta), trendN = betaN(trendBeta), timeN = betaN(timeBeta);
+            const volWeight = Math.min(0.4, volN * 0.05);
+            const trendWeight = Math.min(0.4, trendN * 0.05);
+            const timeWeight = Math.min(0.2, timeN * 0.03);
+            const totalWeight = volWeight + trendWeight + timeWeight;
+            if (totalWeight < 0.05) return { multiplier: 1.0 };
+            const weightedAccuracy = (
+                betaMean(volBeta) * volWeight + betaMean(trendBeta) * trendWeight + betaMean(timeBeta) * timeWeight
+            ) / totalWeight;
+            return { multiplier: Math.max(0.5, Math.min(1.5, 0.5 + weightedAccuracy)) };
+        }
+
+        function computeCalibrationAdjustment(rawProb) {
+            const bin = getCalibrationBin(rawProb);
+            const beta = bayesianState.calibrationBins[bin];
+            if (!beta) return { calibratedProb: rawProb, adjustment: 0 };
+            const n = betaN(beta);
+            if (n < 3) return { calibratedProb: rawProb, adjustment: 0, n };
+            const empiricalAccuracy = betaMean(beta);
+            const calibratedProb = rawProb < 0.5 ? (1 - empiricalAccuracy) : empiricalAccuracy;
+            const blendWeight = Math.min(0.7, 0.1 * Math.sqrt(n));
+            const blendedProb = rawProb * (1 - blendWeight) + calibratedProb * blendWeight;
+            return { calibratedProb: blendedProb, adjustment: blendedProb - rawProb, n };
+        }
+
+        function detectPredictionStreak() {
+            const graded = bayesianState.records.filter(r => r.actualDirection !== null);
+            if (graded.length < 2) return { streakDirection: null, streakLength: 0, adjustment: 0 };
+            let streakDir = graded[graded.length - 1].actualDirection;
+            let streakLen = 1;
+            for (let i = graded.length - 2; i >= 0; i--) {
+                if (graded[i].actualDirection === streakDir) streakLen++;
+                else break;
+            }
+            if (streakLen < 2) return { streakDirection: streakDir, streakLength: streakLen, adjustment: 0 };
+            const streakRecords = graded.slice(-streakLen);
+            const modelAccuracy = streakRecords.filter(r => r.correct).length / streakLen;
+            const missedTrendFactor = Math.max(0, 1 - modelAccuracy * 1.2);
+            const baseAdjustment = 0.04 * Math.log2(streakLen);
+            const sign = streakDir === 'up' ? 1 : -1;
+            return { streakDirection: streakDir, streakLength: streakLen,
+                     adjustment: sign * baseAdjustment * (0.3 + 0.7 * missedTrendFactor) };
+        }
+
+        function recordBayesianPrediction(periodKey, startPrice, predictedPrice, rawProb, volRegimeLabel, trendRegimeLabel) {
+            if (bayesianState.records.length > 0 &&
+                bayesianState.records[bayesianState.records.length - 1].periodKey === periodKey) return;
+            bayesianState.records.push({
+                periodKey, startPrice, predictedPrice,
+                predictedDirection: predictedPrice >= startPrice ? 'up' : 'down',
+                rawProbability: rawProb,
+                volRegime: volRegimeLabel, trendRegime: trendRegimeLabel,
+                timeBucket: getTimeBucket(), calibrationBin: getCalibrationBin(rawProb),
+                timestamp: Date.now(), actualPrice: null, actualDirection: null, correct: null
+            });
+            saveBayesianState();
+        }
+
+        function gradeBayesianPrediction(currentPrice) {
+            let updated = false;
+            for (let i = bayesianState.records.length - 1; i >= 0; i--) {
+                const rec = bayesianState.records[i];
+                if (rec.actualPrice !== null) continue;
+                if (rec.periodKey === currentPeriodKey) continue;
+                rec.actualPrice = currentPrice;
+                rec.actualDirection = currentPrice >= rec.startPrice ? 'up' : 'down';
+                rec.correct = rec.predictedDirection === rec.actualDirection;
+                updated = true;
+                const success = rec.correct;
+                bayesianState.directionBeta[rec.predictedDirection] = betaUpdate(
+                    bayesianState.directionBeta[rec.predictedDirection], success);
+                if (rec.volRegime && bayesianState.regimeBeta[rec.volRegime])
+                    bayesianState.regimeBeta[rec.volRegime] = betaUpdate(bayesianState.regimeBeta[rec.volRegime], success);
+                if (rec.trendRegime && bayesianState.trendBeta[rec.trendRegime])
+                    bayesianState.trendBeta[rec.trendRegime] = betaUpdate(bayesianState.trendBeta[rec.trendRegime], success);
+                if (rec.timeBucket !== undefined && bayesianState.timeBeta[rec.timeBucket])
+                    bayesianState.timeBeta[rec.timeBucket] = betaUpdate(bayesianState.timeBeta[rec.timeBucket], success);
+                if (rec.calibrationBin !== undefined && bayesianState.calibrationBins[rec.calibrationBin])
+                    bayesianState.calibrationBins[rec.calibrationBin] = betaUpdate(bayesianState.calibrationBins[rec.calibrationBin], success);
+            }
+            if (updated) saveBayesianState();
+        }
+
+        function bayesianAdjust(rawProb, volRegimeLabel, trendRegimeLabel) {
+            const predictedDirection = rawProb >= 0.5 ? 'up' : 'down';
+            const dirPrior = computeDirectionalPrior(predictedDirection);
+            const regimeAdj = computeRegimeAdjustment(volRegimeLabel, trendRegimeLabel);
+            const calibration = computeCalibrationAdjustment(rawProb);
+            const streak = detectPredictionStreak();
+            let adjustedProb = calibration.calibratedProb;
+            adjustedProb += dirPrior.adjustment * dirPrior.confidence * 0.15;
+            adjustedProb += streak.adjustment;
+            const deviation = adjustedProb - 0.5;
+            adjustedProb = 0.5 + deviation * regimeAdj.multiplier;
+            adjustedProb = Math.max(0.05, Math.min(0.95, adjustedProb));
+            console.log(`Bayesian: raw=${(rawProb*100).toFixed(1)}% cal=${(calibration.calibratedProb*100).toFixed(1)}% dir=${(dirPrior.adjustment*100).toFixed(1)}%(n=${dirPrior.n}) regime=${regimeAdj.multiplier.toFixed(2)} streak=${streak.streakLength}x${streak.streakDirection||'-'} => ${(adjustedProb*100).toFixed(1)}%`);
+            return { adjustedProb, rawProb };
+        }
+
+        // Bootstrap from existing predictionLog on first load
+        function bootstrapBayesianFromHistory() {
+            loadBayesianState();
+            if (bayesianState.records.length > 0) return;
+            const graded = predictionLog.filter(p => p.correct !== null);
+            if (graded.length === 0) return;
+            console.log(`Bootstrapping Bayesian state from ${graded.length} historical predictions`);
+            for (const p of graded) {
+                bayesianState.records.push({
+                    periodKey: p.periodKey, startPrice: p.startPrice,
+                    predictedPrice: p.predictedPrice,
+                    predictedDirection: p.predictedDirection,
+                    rawProbability: 0.5, volRegime: 'normal', trendRegime: 'neutral',
+                    timeBucket: getTimeBucket(), calibrationBin: 3,
+                    timestamp: Date.now(), actualPrice: p.actualPrice,
+                    actualDirection: p.actualDirection, correct: p.correct
+                });
+                bayesianState.directionBeta[p.predictedDirection] = betaUpdate(
+                    bayesianState.directionBeta[p.predictedDirection], p.correct);
+            }
+            saveBayesianState();
+        }
+        bootstrapBayesianFromHistory();
+
+        function renderPredictionHistory() {
             const container = document.getElementById('prediction-history');
             const statsEl = document.getElementById('history-stats');
-
-            if (!predictionLog) {
-                container.innerHTML = '<div class="history-empty">No predictions yet. History will appear after the first period ends.</div>';
-                statsEl.style.display = 'none';
-                return;
-            }
-
             const graded = predictionLog.filter(p => p.correct !== null);
 
             if (graded.length === 0 && predictionLog.length <= 1) {
@@ -886,9 +1203,28 @@
                 const strikeSign = strikeDiff >= 0 ? '+' : '-';
                 const strikeCls = strikeDiff >= 0 ? 'hi-off-good' : 'hi-off-bad';
 
+                // Convert to local time and show as 15-min cycle range
+                let displayTime = p.time;
+                if (p.timestamp) {
+                    const d = new Date(p.timestamp);
+                    const mins = d.getMinutes();
+                    const cycleStart = mins - (mins % 15);
+                    const startD = new Date(d);
+                    startD.setMinutes(cycleStart, 0, 0);
+                    const endD = new Date(startD.getTime() + 15 * 60 * 1000);
+                    const fmt = (dt) => {
+                        let h = dt.getHours();
+                        const m = dt.getMinutes().toString().padStart(2, '0');
+                        const ap = h >= 12 ? 'PM' : 'AM';
+                        h = h % 12 || 12;
+                        return h + ':' + m + ' ' + ap;
+                    };
+                    displayTime = fmt(startD) + ' – ' + fmt(endD);
+                }
+
                 html += `<div class="history-item">
                     <div class="hi-top">
-                        <span class="hi-time">${p.time}</span>
+                        <span class="hi-time">${displayTime}</span>
                         <span class="hi-bet ${betCls}">${betLabel}</span>
                         <span class="hi-result ${cls}">${icon}</span>
                     </div>
@@ -931,37 +1267,607 @@
             }
         }
 
-        // ── Sell Signal Rendering (from server-provided data) ────────
+        // ── Time helpers ──────────────────────────────────────────────
 
-        function renderSellSignal(containerId, signal, originalPrediction, currentPrice) {
+        // Get the START of the current 15-min Kalshi period
+        function getPeriodStartTime() {
+            const now = new Date();
+            const mins = now.getMinutes();
+            const periodStart = Math.floor(mins / 15) * 15;
+            const t = new Date(now);
+            t.setMinutes(periodStart, 0, 0);
+            return t;
+        }
+
+        // Get the END of the current 15-min Kalshi period (= next quarter)
+        function getPeriodEndTime() {
+            const start = getPeriodStartTime();
+            return new Date(start.getTime() + 15 * 60 * 1000);
+        }
+
+        function getSecondsUntilTarget(target) {
+            return Math.max(0, Math.floor((target - Date.now()) / 1000));
+        }
+
+        function formatCountdown(totalSeconds) {
+            const m = Math.floor(totalSeconds / 60);
+            const s = totalSeconds % 60;
+            return `${m}:${s.toString().padStart(2, '0')}`;
+        }
+
+        function formatLocalTime(date) {
+            let h = date.getHours();
+            const m = date.getMinutes().toString().padStart(2, '0');
+            const ampm = h >= 12 ? 'PM' : 'AM';
+            h = h % 12 || 12;
+            return h + ':' + m + ' ' + ampm;
+        }
+
+        function formatTargetTime(date) {
+            // Show period as start→end range for clarity
+            const start = new Date(date.getTime() - 15 * 60 * 1000);
+            return formatLocalTime(start) + '–' + formatLocalTime(date);
+        }
+
+        // ── Data fetching ─────────────────────────────────────────────
+        // Kalshi resolves using CF Benchmarks BRTI which is calculated
+        // from order books of: Bitstamp, Coinbase, Gemini, Kraken,
+        // itBit/Paxos, LMAX Digital, and Bullish.
+        //
+        // Strategy:
+        // 1. Get the exact Kalshi strike from their FREE public API
+        // 2. Approximate BRTI by averaging mid-prices from constituent exchanges
+        // 3. Use Binance 1m klines for prediction analysis (most granular free data)
+
+        let dataSourceName = '';
+        let kalshiStrike = null;    // exact strike from Kalshi API
+        let kalshiMarketTicker = null;
+        let kalshiCloseTime = null; // close_time of the current Kalshi market
+
+        // Cache objects for WebSocket-injected data
+        let orderBookCache = { timestamp: 0, data: null };
+        let fundingRateCache = { timestamp: 0, rate: 0 };
+        let recentTradesCache = { timestamp: 0, trades: [] };
+
+        // Server-only data fetcher
+        async function fetchPriceData() {
+            if (!serverData || !serverData.brtiPrice) {
+                return null; // No server data — caller will show error
+            }
+
+            const currentPrice = serverData.brtiPrice;
+            const kStrike = serverData.kalshiStrike;
+            const history = serverData.history || [];
+            const sources = serverData.brtiSources || 'server';
+
+            document.getElementById('kalshi-error-banner').style.display = 'none';
+            const debugEl = document.getElementById('debug-strike');
+            if (debugEl && kStrike) debugEl.textContent = 'Strike: $' + kStrike.toFixed(2) + ' via server';
+
+            let periodOpenPrice = null;
+            if (kStrike && kStrike > 0) {
+                kalshiStrike = kStrike;
+                periodOpenPrice = kStrike;
+                dataSourceName = `BRTI~(${sources}) + Kalshi strike`;
+            } else {
+                dataSourceName = `BRTI~(${sources})`;
+            }
+
+            return {
+                currentPrice,
+                periodOpenPrice,
+                history: history.length > 0 ? history : [{ time: Date.now(), price: currentPrice }],
+                source: dataSourceName
+            };
+        }
+        function formatPrice(price) {
+            return '$' + price.toLocaleString('en-US', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
+        }
+
+        // ── Risk Assessment ──────────────────────────────────────────
+        function assessRisk(prediction, strike, currentPrice) {
+            if (!prediction || strike === null) return null;
+            const reasons = [];
+            let riskScore = 0;
+            const margin = Math.abs(prediction.predictedPrice - strike);
+            const marginPct = (margin / strike) * 100;
+            if (marginPct < 0.01) { riskScore += 45; reasons.push('Razor-thin margin to strike'); }
+            else if (marginPct < 0.03) { riskScore += 30; reasons.push('Very close to strike'); }
+            else if (marginPct < 0.06) { riskScore += 15; reasons.push('Near strike'); }
+            const conf = prediction.confidence || 0.5;
+            if (conf < 0.55) { riskScore += 25; reasons.push('Low confidence'); }
+            else if (conf < 0.65) { riskScore += 12; reasons.push('Moderate confidence'); }
+            if (prediction.signals) {
+                const isUp = prediction.predictedPrice >= strike;
+                const sigs = prediction.signals;
+                let agree = 0, disagree = 0;
+                if (sigs.trend === 'Bullish') isUp ? agree++ : disagree++;
+                else if (sigs.trend === 'Bearish') isUp ? disagree++ : agree++;
+                if (sigs.momentum === 'Bullish') isUp ? agree++ : disagree++;
+                else if (sigs.momentum === 'Bearish') isUp ? disagree++ : agree++;
+                if (sigs.rsi === 'Overbought') isUp ? disagree++ : agree++;
+                else if (sigs.rsi === 'Oversold') isUp ? agree++ : disagree++;
+                if (disagree >= 2) { riskScore += 20; reasons.push('Conflicting signals'); }
+                else if (disagree >= 1 && agree <= 1) { riskScore += 10; reasons.push('Mixed signals'); }
+                if (sigs.volatility === 'High') { riskScore += 15; reasons.push('High volatility'); }
+            }
+            const predictedUp = prediction.predictedPrice >= strike;
+            const currentUp = currentPrice >= strike;
+            if (predictedUp !== currentUp) { riskScore += 10; reasons.push('Price moving against prediction'); }
+            riskScore = Math.min(100, riskScore);
+            let level;
+            if (riskScore >= 50) level = 'risky';
+            else if (riskScore >= 25) level = 'moderate';
+            else level = 'safe';
+            if (reasons.length === 0) reasons.push('Strong margin from strike');
+            return { level, score: riskScore, reasons };
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // TRADING ADVISOR — Probability/Price History Tracker
+        // Tracks recent probability and price snapshots to detect
+        // trends, recoveries, dips, and momentum shifts.
+        // ══════════════════════════════════════════════════════════════
+
+        const advisorHistory = {
+            snapshots: [],        // { time, prob, price, distPct, onRight }
+            maxSnapshots: 120,    // ~60 seconds at 500ms intervals
+            peakProb: 0,
+            troughProb: 1,
+            peakDistPct: 0,       // max % on right side
+            troughDistPct: 0,     // max % on wrong side
+            lastFlipTime: null,   // when price last crossed strike
+            flipCount: 0,         // how many times price crossed strike this period
+            consecutiveWrong: 0,  // ticks on wrong side in a row
+            consecutiveRight: 0,  // ticks on right side in a row
+        };
+
+        function resetAdvisorHistory() {
+            advisorHistory.snapshots = [];
+            advisorHistory.peakProb = 0;
+            advisorHistory.troughProb = 1;
+            advisorHistory.peakDistPct = 0;
+            advisorHistory.troughDistPct = 0;
+            advisorHistory.lastFlipTime = null;
+            advisorHistory.flipCount = 0;
+            advisorHistory.consecutiveWrong = 0;
+            advisorHistory.consecutiveRight = 0;
+        }
+
+        // ── Position rendering ───────────────────────────────────────
+        // States: winning, strong_hold, hold, hold_dip, dip_buy,
+        //         take_profit, consider_selling, sell_now, lost_cause
+
+        function renderPreBuySignal(containerId) {
             const el = document.getElementById(containerId);
             if (!el) return;
+
+            // Don't show pre-buy if auto-trading already has a position
+            const ts = serverData && serverData.tradingStatus;
+            if (ts && ts.currentPosition) { el.innerHTML = ''; return; }
+
+            // Server-only: need betQuality and a prediction
+            const bq = serverData && serverData.betQuality ? serverData.betQuality : null;
+            const pred = serverData && serverData.prediction;
+            const origPred = pred && pred.originalPrediction;
+            if (!bq || !origPred || !kalshiStrike) { el.innerHTML = ''; return; }
+
+            // Use updated prediction if available (reflects current market conditions)
+            const updatedPred = pred && pred.updatedPrediction;
+            const activePred = updatedPred || origPred;
+
+            const minutesLeft = currentTarget ? Math.max(0, getSecondsUntilTarget(currentTarget) / 60) : 15;
+            const isUp = activePred.predictedPrice >= kalshiStrike;
+            const direction = isUp ? 'UP' : 'DOWN';
+            const dirColor = isUp ? '#3fb950' : '#f85149';
+            const dirBg = isUp ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
+            const probForBet = isUp ? activePred.probability : (1 - activePred.probability);
+
+            // Determine level from bet quality
+            let level, shortLabel, advice;
+            if (!bq.shouldBet) {
+                level = bq.waitForBetter ? 'wait' : 'skip';
+                shortLabel = bq.waitForBetter ? 'WAIT' : 'SKIP';
+                advice = bq.reason || 'Conditions not favorable';
+            } else {
+                level = 'buy_now';
+                shortLabel = 'BUY ' + direction;
+                advice = 'Edge: ' + (bq.edge * 100).toFixed(1) + '% | Quality: ' + (bq.quality * 100).toFixed(0) + '%';
+            }
+
+            const icons = { buy_now: '&#9650;', wait: '&#9679;', skip: '&#10006;' };
+
+            // Quality bar
+            const edgePct = (bq.edge * 100).toFixed(1);
+            const qPct = (bq.quality * 100).toFixed(0);
+            const qColor = bq.quality >= 0.7 ? '#3fb950' : bq.quality >= 0.55 ? '#d29922' : '#f85149';
+            const betSize = bq.betSize || 1.0;
+            const betSizeLabel = betSize >= 0.9 ? 'FULL' : betSize >= 0.6 ? 'REDUCED' : betSize >= 0.4 ? 'HALF' : 'SMALL';
+            const betSizeColor = betSize >= 0.9 ? '#3fb950' : betSize >= 0.6 ? '#d29922' : '#f85149';
+
+            let qualityBar =
+                '<div class="prebuy-metrics" style="margin-top:4px">' +
+                    '<span class="prebuy-metric" style="color:' + qColor + '">Quality: ' + qPct + '%</span>' +
+                    '<span class="prebuy-metric">Edge: ' + edgePct + '%</span>' +
+                    '<span class="prebuy-metric" style="color:' + betSizeColor + ';font-weight:700">Size: ' + betSizeLabel + ' (' + (betSize * 100).toFixed(0) + '%)</span>' +
+                    (bq.choppiness && bq.choppiness.choppy ? '<span class="prebuy-metric" style="color:#d29922">Choppy</span>' : '') +
+                    (bq.exhaustion && bq.exhaustion.exhaustion > 0.3 ? '<span class="prebuy-metric" style="color:#d29922">Exhausted</span>' : '') +
+                '</div>' +
+                (bq.betSizeReason && betSize < 0.9 ? '<div class="sell-signal-details" style="margin-top:2px;color:#b0b8c1">' + bq.betSizeReason + '</div>' : '');
+
+            // Session risk banner
+            const sr = serverData.sessionRisk || bq.sessionRisk;
+            if (sr) {
+                if (sr.coolingOff) {
+                    qualityBar += '<div style="margin-top:4px;padding:4px 8px;background:#f8514933;border-radius:4px;color:#f85149;font-weight:700">COOLING OFF — ' + sr.consecutiveLosses + ' consecutive losses. Waiting for reset.</div>';
+                } else if (sr.edgeDecayAlert) {
+                    qualityBar += '<div style="margin-top:4px;padding:4px 8px;background:#d2992233;border-radius:4px;color:#d29922">Edge decay detected — recent accuracy below breakeven. Reducing size.</div>';
+                } else if (sr.consecutiveLosses >= 2) {
+                    qualityBar += '<div style="margin-top:4px;padding:2px 8px;color:#d29922;font-size:11px">After ' + sr.consecutiveLosses + ' losses — reducing position size</div>';
+                }
+                if (sr.consecutiveWins >= 3) {
+                    qualityBar += '<div style="margin-top:2px;padding:2px 8px;color:#3fb950;font-size:11px">Streak: ' + sr.consecutiveWins + ' wins</div>';
+                }
+            }
+
+            el.innerHTML =
+                '<div class="prebuy-signal prebuy-' + level + '">' +
+                    '<div class="prebuy-header">' +
+                        '<span style="font-size:16px">' + (icons[level] || '') + '</span>' +
+                        '<span class="prebuy-label">' + shortLabel + '</span>' +
+                        '<span class="prebuy-direction" style="background:' + dirBg + ';color:' + dirColor + '">' +
+                            direction + ' ' + (probForBet * 100).toFixed(0) + '%</span>' +
+                    '</div>' +
+                    '<div class="prebuy-advice">' + advice + '</div>' +
+                    '<div class="prebuy-metrics">' +
+                        '<span class="prebuy-metric">Conf: ' + (activePred.confidence * 100).toFixed(0) + '%</span>' +
+                        '<span class="prebuy-metric">Time: ' + minutesLeft.toFixed(0) + 'm</span>' +
+                    '</div>' +
+                    qualityBar +
+                '</div>';
+        }
+
+        // ── Auto-Trading Panel Rendering ──
+        function renderTradingPanel() {
+            const ts = serverData && serverData.tradingStatus ? serverData.tradingStatus : null;
+            const panel = document.getElementById('trading-panel');
+            if (!panel) return;
+
+            if (!ts) {
+                panel.style.display = 'none';
+                return;
+            }
+            panel.style.display = '';
+
+            // Environment toggle
+            const currentEnv = serverData.kalshiEnvironment || 'demo';
+            const demoBtn = document.getElementById('env-btn-demo');
+            const prodBtn = document.getElementById('env-btn-prod');
+            const headerBadge = document.getElementById('env-header-badge');
+            if (demoBtn && prodBtn) {
+                demoBtn.className = 'env-btn' + (currentEnv === 'demo' ? ' active-demo' : '');
+                prodBtn.className = 'env-btn' + (currentEnv === 'production' ? ' active-prod' : '');
+            }
+            if (headerBadge) {
+                headerBadge.textContent = currentEnv === 'production' ? 'PROD' : 'DEMO';
+                headerBadge.className = 'env-header-badge ' + (currentEnv === 'production' ? 'env-header-prod' : 'env-header-demo');
+            }
+
+            // Mode badge
+            const badge = document.getElementById('trading-mode-badge');
+            if (ts.killSwitch) {
+                badge.textContent = 'KILLED';
+                badge.className = 'trading-mode-badge trading-mode-off';
+            } else if (ts.paperMode) {
+                badge.textContent = 'PAPER';
+                badge.className = 'trading-mode-badge trading-mode-paper';
+            } else if (ts.configured) {
+                badge.textContent = 'LIVE';
+                badge.className = 'trading-mode-badge trading-mode-live';
+            } else {
+                badge.textContent = 'NOT CONFIGURED';
+                badge.className = 'trading-mode-badge trading-mode-off';
+            }
+
+            // Balance
+            const balEl = document.getElementById('trading-balance');
+            if (ts.balanceCents !== null && ts.balanceCents !== undefined) {
+                const bal = ts.balanceCents / 100;
+                balEl.textContent = '$' + bal.toFixed(2);
+                balEl.style.color = '#e6edf3';
+            } else {
+                balEl.textContent = '--';
+                balEl.style.color = '#8b949e';
+            }
+
+            // Stats
+            const pnl = (ts.daily.pnlCents / 100);
+            const pnlEl = document.getElementById('trading-pnl');
+            pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+            pnlEl.style.color = pnl >= 0 ? '#3fb950' : '#f85149';
+
+            document.getElementById('trading-count').textContent = ts.daily.tradeCount;
+            document.getElementById('trading-wl').textContent = ts.daily.wins + '/' + ts.daily.losses;
+
+            // Current position
+            const posArea = document.getElementById('trading-position-area');
+            if (ts.currentPosition) {
+                const p = ts.currentPosition;
+                const costCents = p.totalCostCents || (p.contracts * p.entryPrice);
+                const maxPayoutCents = (p.totalContracts || p.contracts) * 100;
+                const maxProfitCents = maxPayoutCents - costCents;
+                const holdMin = Math.floor(p.holdingSeconds / 60);
+                const holdSec = p.holdingSeconds % 60;
+                const holdStr = holdMin > 0 ? holdMin + 'm ' + holdSec + 's' : holdSec + 's';
+                posArea.innerHTML = '<div class="trading-position">' +
+                    '<div class="trading-position-label">OPEN POSITION</div>' +
+                    '<div class="trading-position-detail">' +
+                    p.contracts + 'x ' + p.side.toUpperCase() + ' @ ' + p.entryPrice + '\u00A2' +
+                    ' &middot; ' + holdStr +
+                    '</div>' +
+                    '<div style="display:flex;gap:12px;margin-top:4px">' +
+                    '<div style="font-size:10px;color:#8b949e">Cost: <span style="color:#e6edf3;font-weight:700">$' + (costCents / 100).toFixed(2) + '</span></div>' +
+                    '<div style="font-size:10px;color:#8b949e">Max Payout: <span style="color:#3fb950;font-weight:700">$' + (maxPayoutCents / 100).toFixed(2) + '</span></div>' +
+                    '<div style="font-size:10px;color:#8b949e">Max Profit: <span style="color:#56d364;font-weight:700">+$' + (maxProfitCents / 100).toFixed(2) + '</span></div>' +
+                    '</div>' +
+                    '</div>';
+            } else {
+                posArea.innerHTML = '';
+            }
+
+            // Trade history
+            const recentArea = document.getElementById('trading-recent-area');
+            if (ts.recentTrades && ts.recentTrades.length > 0) {
+                let html = '<div class="trade-history-header" onclick="toggleTradeHistory()">' +
+                    '<span class="trading-recent-title" style="cursor:pointer">Trade History (' + ts.recentTrades.length + ')</span>' +
+                    '<span class="trade-history-toggle" id="trade-history-toggle">\u25BC</span>' +
+                    '</div>' +
+                    '<div class="trade-history-list" id="trade-history-list">';
+                for (const t of ts.recentTrades) {
+                    const time = new Date(t.time).toLocaleTimeString();
+                    const date = new Date(t.time).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                    const isSettle = t.type === 'settle';
+                    const isBuy = t.type === 'buy';
+                    const isSell = t.type === 'sell';
+                    const isDipBuy = t.type === 'dip_buy';
+                    const isLateLock = t.type === 'late_lock' || t.type === 'late_lock_add';
+                    const isReentry = t.type === 're_entry';
+                    const isError = t.type.includes('error') || t.type.includes('failed');
+
+                    // Type badge colors
+                    let typeBg, typeColor, typeLabel;
+                    if (isSettle) {
+                        typeBg = t.correct ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
+                        typeColor = t.correct ? '#3fb950' : '#f85149';
+                        typeLabel = t.correct ? 'WIN' : 'LOSS';
+                    } else if (isDipBuy) {
+                        typeBg = 'rgba(136,87,255,0.2)'; typeColor = '#a371f7'; typeLabel = 'DIP BUY';
+                    } else if (isLateLock) {
+                        typeBg = 'rgba(63,185,80,0.25)'; typeColor = '#56d364'; typeLabel = 'LOCK';
+                    } else if (isReentry) {
+                        typeBg = 'rgba(56,139,253,0.25)'; typeColor = '#79c0ff'; typeLabel = 'RE-ENTRY';
+                    } else if (isBuy) {
+                        typeBg = 'rgba(56,139,253,0.2)'; typeColor = '#58a6ff'; typeLabel = 'BUY';
+                    } else if (isSell) {
+                        typeBg = 'rgba(210,153,34,0.2)'; typeColor = '#d29922'; typeLabel = 'SELL';
+                    } else if (isError) {
+                        typeBg = 'rgba(248,81,73,0.15)'; typeColor = '#f85149'; typeLabel = 'ERROR';
+                    } else {
+                        typeBg = 'rgba(255,255,255,0.08)'; typeColor = '#8b949e'; typeLabel = t.type.toUpperCase();
+                    }
+
+                    // Cost and payout for buy/settle entries
+                    const costCents = (t.contracts && t.limitPrice) ? t.contracts * t.limitPrice : (t.contracts && t.entryPrice) ? t.contracts * t.entryPrice : 0;
+                    const maxPayoutCents = t.contracts ? t.contracts * 100 : 0;
+
+                    html += '<div class="trade-history-item">' +
+                        '<div class="trade-history-row">' +
+                            '<span class="trade-history-type" style="background:' + typeBg + ';color:' + typeColor + '">' + typeLabel + '</span>' +
+                            '<span class="trade-history-side">' + (t.side ? t.side.toUpperCase() : '') + '</span>' +
+                            '<span class="trade-history-dir" style="color:' + (t.direction === 'UP' ? '#3fb950' : t.direction === 'DOWN' ? '#f85149' : '#8b949e') + '">' +
+                                (t.direction ? (t.direction === 'UP' ? '\u25B2' : '\u25BC') + ' ' + t.direction : '') +
+                            '</span>' +
+                            '<span class="trade-history-time">' + date + ' ' + time + '</span>' +
+                        '</div>';
+
+                    // Details row
+                    if (t.contracts) {
+                        const price = t.limitPrice || t.entryPrice || 0;
+                        html += '<div class="trade-history-details">' +
+                            '<span>' + t.contracts + 'x @ ' + price + '\u00A2</span>';
+                        if (costCents > 0) {
+                            html += '<span>Cost: $' + (costCents / 100).toFixed(2) + '</span>';
+                        }
+                        if (isBuy && maxPayoutCents > 0) {
+                            html += '<span style="color:#3fb950">Max Payout: $' + (maxPayoutCents / 100).toFixed(2) + '</span>';
+                        }
+                        html += '</div>';
+                    }
+
+                    // P&L row for settled trades
+                    if (t.pnlCents !== undefined) {
+                        const pnlPositive = t.pnlCents > 0;
+                        html += '<div class="trade-history-pnl" style="color:' + (pnlPositive ? '#3fb950' : '#f85149') + '">' +
+                            'P&L: ' + (pnlPositive ? '+' : '') + '$' + (t.pnlCents / 100).toFixed(2) +
+                            (t.dailyPnlCents !== undefined ? ' &middot; Daily: ' + (t.dailyPnlCents >= 0 ? '+' : '') + '$' + (t.dailyPnlCents / 100).toFixed(2) : '') +
+                            '</div>';
+                    }
+
+                    // Edge/quality for buy entries
+                    if (t.edge || t.quality) {
+                        html += '<div class="trade-history-meta">';
+                        if (t.edge) html += '<span>Edge: ' + t.edge + '</span>';
+                        if (t.quality) html += '<span>Quality: ' + t.quality + '</span>';
+                        if (t.betSize) html += '<span>Size: ' + (parseFloat(t.betSize) * 100).toFixed(0) + '%</span>';
+                        html += '</div>';
+                    }
+
+                    // Strategy-specific details
+                    if (t.strategy) {
+                        html += '<div class="trade-history-meta" style="color:' + typeColor + '">';
+                        if (t.strategy === 'dip_buyer' && t.dipImprovement) html += '<span>Dip: ' + t.dipImprovement + ' cheaper</span>';
+                        if (t.strategy === 'dip_buyer' && t.existingContracts) html += '<span>Added to ' + t.existingContracts + ' existing</span>';
+                        if ((t.strategy === 'late_lock' || t.strategy === 'late_lock_add') && t.sigmaDistance) html += '<span>' + t.sigmaDistance + ' from strike</span>';
+                        if (t.expectedProfit) html += '<span>Expected: ' + t.expectedProfit + '</span>';
+                        if (t.strategy === 're_entry' && t.originalSellReason) html += '<span>After sell: ' + t.originalSellReason + '</span>';
+                        if (t.probForBet) html += '<span>Prob: ' + t.probForBet + '</span>';
+                        html += '</div>';
+                    }
+
+                    // Error info
+                    if (t.error) {
+                        html += '<div class="trade-history-error">' + t.error + '</div>';
+                    }
+
+                    // Ticker
+                    if (t.ticker) {
+                        html += '<div class="trade-history-ticker">' + t.ticker + '</div>';
+                    }
+
+                    html += '</div>';
+                }
+                html += '</div>';
+                recentArea.innerHTML = html;
+            } else {
+                recentArea.innerHTML = '';
+            }
+
+            // Kill switch button state
+            const killBtn = document.getElementById('trading-kill-btn');
+            if (ts.killSwitch) {
+                killBtn.textContent = 'Resume Trading';
+                killBtn.className = 'trading-btn';
+            } else {
+                killBtn.textContent = 'Kill Switch';
+                killBtn.className = 'trading-btn trading-btn-danger';
+            }
+        }
+
+        async function toggleTradingMode() {
+            try {
+                const ts = serverData && serverData.tradingStatus;
+                const newPaperMode = ts ? !ts.paperMode : true;
+                if (!newPaperMode && !confirm('Switch to LIVE trading? Real money will be used.')) return;
+                await fetch('/api/trading/mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paperMode: newPaperMode })
+                });
+            } catch (e) { console.error('Toggle mode failed:', e); }
+        }
+
+        async function switchEnvironment(env) {
+            try {
+                if (env === 'production' && !confirm('Switch to PRODUCTION? This uses real money on Kalshi.')) return;
+                const resp = await fetch('/api/trading/environment', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ environment: env })
+                });
+                const result = await resp.json();
+                if (!resp.ok) { alert('Failed: ' + (result.error || 'unknown error')); return; }
+                if (!result.configured) alert('Warning: ' + env.toUpperCase() + ' credentials are not configured. Trading will not work.');
+            } catch (e) { console.error('Environment switch failed:', e); }
+        }
+
+        function toggleTradeHistory() {
+            const list = document.getElementById('trade-history-list');
+            const toggle = document.getElementById('trade-history-toggle');
+            if (!list || !toggle) return;
+            if (list.style.display === 'none') {
+                list.style.display = '';
+                toggle.classList.remove('collapsed');
+            } else {
+                list.style.display = 'none';
+                toggle.classList.add('collapsed');
+            }
+        }
+
+        async function toggleKillSwitch() {
+            try {
+                const ts = serverData && serverData.tradingStatus;
+                const activate = ts ? !ts.killSwitch : true;
+                await fetch('/api/trading/kill-switch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ active: activate })
+                });
+            } catch (e) { console.error('Kill switch failed:', e); }
+        }
+
+        function renderSellSignal(containerId) {
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            if (!originalPrediction || !updatedPrediction || periodStartPrice === null) {
+                el.innerHTML = '';
+                return;
+            }
+
+            // Only show sell signal if auto-trading has a position
+            const ts = serverData && serverData.tradingStatus;
+            if (!ts || !ts.currentPosition) { el.innerHTML = ''; return; }
+
+            // Server-only sell signal
+            const signal = serverData && serverData.sellSignal ? serverData.sellSignal : null;
             if (!signal) { el.innerHTML = ''; return; }
 
             const icons = {
                 winning: '&#10003;',
+                strong_hold: '&#10003;',
+                take_profit: '&#9733;',
                 hold: '&#9679;',
+                hold_dip: '&#8635;',
+                dip_buy: '&#9650;',
                 consider_selling: '&#9888;',
                 sell_now: '&#9888;',
                 lost_cause: '&#10006;'
             };
 
-            // P&L line
-            let pnlLine = '';
-            if (originalPrediction && currentPrice) {
-                const origPrice = originalPrediction.predictedPrice;
-                const pnlVsOrig = currentPrice - origPrice;
-                const pnlPct = (pnlVsOrig / origPrice) * 100;
-                const pnlColor = pnlVsOrig >= 0 ? '#3fb950' : '#f85149';
-                const pnlSign = pnlVsOrig >= 0 ? '+' : '';
-                pnlLine = '<div class="sell-signal-pnl" style="color:' + pnlColor + '">' +
-                    'If bought at prediction: ' + pnlSign + '$' + pnlVsOrig.toFixed(2) + ' (' + pnlSign + pnlPct.toFixed(3) + '%)' +
+            // Win probability display
+            const probPct = (signal.probForBet * 100).toFixed(0);
+            const probColor = signal.probForBet >= 0.55 ? '#3fb950' : signal.probForBet >= 0.35 ? '#d29922' : '#f85149';
+
+            // Recovery info for dip states
+            let recoveryLine = '';
+            if (signal.recoveryScore !== undefined && signal.onWrongSide) {
+                const recColor = signal.recoveryScore >= 0.5 ? '#3fb950' : signal.recoveryScore >= 0.25 ? '#d29922' : '#f85149';
+                recoveryLine = '<div class="sell-signal-details" style="color:' + recColor + '">' +
+                    'Recovery: ' + (signal.recoveryScore * 100).toFixed(0) + '% likely | ' +
+                    signal.sigmaDistance.toFixed(1) + 'σ from strike' +
+                    (signal.probTrend && signal.probTrend.slope !== 0
+                        ? ' | Trend: ' + (signal.probTrend.slope > 0 ? '↑' : '↓') + ' ' + Math.abs(signal.probTrend.delta * 100).toFixed(1) + '%'
+                        : '') +
                     '</div>';
             }
 
-            // Win probability bar
-            const probPct = signal.probForBet !== undefined ? (signal.probForBet * 100).toFixed(0) : '--';
-            const probColor = signal.probForBet >= 0.55 ? '#3fb950' : signal.probForBet >= 0.35 ? '#d29922' : '#f85149';
+            // NEW: Probability velocity / exhaustion info line
+            let velocityLine = '';
+            if (signal.probVelocity) {
+                const pv = signal.probVelocity;
+                if (pv.trend === 'collapsing') {
+                    velocityLine = '<div class="sell-signal-details" style="color:#f85149">Prob velocity: COLLAPSING</div>';
+                } else if (pv.trend === 'deteriorating') {
+                    velocityLine = '<div class="sell-signal-details" style="color:#d29922">Prob velocity: declining</div>';
+                } else if (pv.trend === 'improving' && signal.level === 'hold') {
+                    velocityLine = '<div class="sell-signal-details" style="color:#3fb950">Prob velocity: improving</div>';
+                }
+            }
+
+            let exhaustionLine = '';
+            if (signal.exhaustion && signal.exhaustion.score > 0.3) {
+                const exColor = signal.exhaustion.score > 0.6 ? '#f85149' : '#d29922';
+                exhaustionLine = '<div class="sell-signal-details" style="color:' + exColor + '">' +
+                    'Momentum exhaustion: ' + (signal.exhaustion.score * 100).toFixed(0) + '% (' + signal.exhaustion.type + ')</div>';
+            }
+
+            let peakLine = '';
+            if (signal.peakProb && signal.peakProb > 0.65 && signal.probForBet < signal.peakProb - 0.1) {
+                peakLine = '<div class="sell-signal-details" style="color:#d29922">' +
+                    'Peak: ' + (signal.peakProb * 100).toFixed(0) + '% &rarr; now ' + probPct + '%</div>';
+            }
 
             el.innerHTML =
                 '<div class="sell-signal sell-' + signal.level + '">' +
@@ -971,59 +1877,57 @@
                         '<span class="sell-signal-urgency" style="color:' + probColor + '">' + probPct + '% win</span>' +
                     '</div>' +
                     '<div class="sell-signal-advice">' + signal.advice + '</div>' +
-                    (signal.reasons && signal.reasons.length > 0 && signal.level !== 'hold' && signal.level !== 'winning'
+                    recoveryLine + velocityLine + exhaustionLine + peakLine +
+                    (signal.reasons.length > 0 && signal.level !== 'hold' && signal.level !== 'winning' && signal.level !== 'strong_hold'
                         ? '<div class="sell-signal-reason">' + signal.reasons[0] + '</div>' +
                           (signal.reasons.length > 1 ? '<div class="sell-signal-details">' + signal.reasons.slice(1).join(' &middot; ') + '</div>' : '')
                         : '') +
-                    pnlLine +
                 '</div>';
         }
 
-        // ── Risk Badge Rendering (from server-provided data) ─────────
+        // Wallet simulator removed — will be re-added later
 
-        function renderRiskBadge(riskData, containerId) {
-            const el = document.getElementById(containerId);
-            if (!el) return;
-            if (!riskData) { el.innerHTML = ''; return; }
-            const icons = { safe: '&#9679;', moderate: '&#9888;', risky: '&#9888;' };
-            const labels = { safe: 'Safe Bet', moderate: 'Moderate Risk', risky: 'Risky Bet' };
-            el.innerHTML = `<span class="risk-badge risk-${riskData.level}">${icons[riskData.level]} ${labels[riskData.level]}<span class="risk-reason"> \u2014 ${riskData.reasons[0]}</span></span>`;
-        }
 
-        // ── Change Tag Rendering ─────────────────────────────────────
+        // ── Next Period Preview ───────────────────────────────────────
+        let nextPeriodPrediction = null;
+        let nextPeriodShown = false;
 
-        function renderChangeTag(changePercent, containerId, dollarAmount) {
-            const el = document.getElementById(containerId);
-            const changeClass = changePercent > 0.01 ? 'up' : changePercent < -0.01 ? 'down' : 'neutral';
-            const arrow = changePercent > 0.01 ? '&#9650;' : changePercent < -0.01 ? '&#9660;' : '&#9654;';
-            const dollarStr = dollarAmount !== undefined ? ` ${dollarAmount >= 0 ? '+' : '-'}$${Math.abs(dollarAmount).toFixed(2)}` : '';
-            el.innerHTML = `<span class="change ${changeClass}">${arrow}${dollarStr} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(3)}%)</span>`;
-        }
 
-        // ── Next Period Preview Rendering (from server data) ─────────
-
-        function renderNextPeriodPreview(data) {
+        function renderNextPeriodPreview() {
             const card = document.getElementById('next-period-card');
             if (!card) return;
 
-            const pred = data.nextPeriodPreview;
+            const secs = currentTarget ? getSecondsUntilTarget(currentTarget) : 999;
+            const shouldShow = secs <= 180 && secs > 0 && !isTransitioning;
 
-            if (!pred) {
-                card.classList.remove('visible');
+            if (!shouldShow) {
+                if (nextPeriodShown) {
+                    card.classList.remove('visible');
+                    nextPeriodShown = false;
+                    nextPeriodPrediction = null;
+                }
                 return;
             }
 
-            card.classList.add('visible');
-
-            // Time window for next period
-            if (pred.timeLabel) {
-                document.getElementById('next-period-time').textContent = pred.timeLabel;
-            } else if (data.kalshiCloseTime) {
-                const nextStart = new Date(data.kalshiCloseTime);
-                const nextEnd = new Date(nextStart.getTime() + 15 * 60 * 1000);
-                document.getElementById('next-period-time').textContent =
-                    formatLocalTime(nextStart) + ' \u2013 ' + formatLocalTime(nextEnd);
+            // Server-only: use server preview data
+            if (serverData && serverData.nextPeriodPreview) {
+                nextPeriodPrediction = serverData.nextPeriodPreview;
             }
+            if (!nextPeriodPrediction) return;
+
+            const pred = nextPeriodPrediction;
+
+            // Show the card
+            if (!nextPeriodShown) {
+                card.classList.add('visible');
+                nextPeriodShown = true;
+            }
+
+            // Time window for next period (just start–end, not nested ranges)
+            const nextStart = currentTarget;
+            const nextEnd = new Date(nextStart.getTime() + 15 * 60 * 1000);
+            document.getElementById('next-period-time').textContent =
+                formatLocalTime(nextStart) + ' \u2013 ' + formatLocalTime(nextEnd);
 
             // Direction badge
             const badge = document.getElementById('next-period-badge');
@@ -1038,11 +1942,10 @@
             document.getElementById('next-period-confidence').style.color =
                 pred.confidence >= 0.65 ? '#3fb950' : pred.confidence >= 0.45 ? '#d29922' : '#f85149';
 
-            const probForDir = pred.probForDirection || (pred.direction === 'UP' ? pred.probability : (1 - pred.probability));
-            const probPct = (probForDir * 100).toFixed(0);
+            const probPct = (pred.probForDirection * 100).toFixed(0);
             document.getElementById('next-period-prob').textContent = probPct + '%';
             document.getElementById('next-period-prob').style.color =
-                probForDir >= 0.55 ? '#3fb950' : probForDir >= 0.40 ? '#d29922' : '#f85149';
+                pred.probForDirection >= 0.55 ? '#3fb950' : pred.probForDirection >= 0.40 ? '#d29922' : '#f85149';
 
             const moveSign = pred.move >= 0 ? '+' : '';
             document.getElementById('next-period-move').textContent =
@@ -1067,12 +1970,20 @@
                 sigEl.innerHTML = '';
             }
 
-            // Note
+            // Note with freshness indicator
+            const freshness = secs <= 30 ? 'Finalizing...' : 'Updates every 30s';
             document.getElementById('next-period-note').textContent =
-                'Preview based on current trends \u2014 will update when next period opens';
+                'Preview based on current trends \u2014 ' + freshness + ' \u2014 strike may differ at open';
         }
 
-        // ── Chart ────────────────────────────────────────────────────
+        function clearNextPeriodPreview() {
+            nextPeriodPrediction = null;
+            nextPeriodShown = false;
+            const card = document.getElementById('next-period-card');
+            if (card) card.classList.remove('visible');
+        }
+
+        // ── Chart ─────────────────────────────────────────────────────
 
         function drawChart(history, currentPrice, predictedPrice, targetLabel) {
             const canvas = document.getElementById('chart');
@@ -1175,43 +2086,35 @@
             ctx.fillText(targetLabel, toX(predIdx), h - 6);
         }
 
-        // ── UI update (from server state) ────────────────────────────
+        // ── UI update ─────────────────────────────────────────────────
 
-        function updateUI(data) {
-            const currentPrice = data.currentPrice;
-            const displayStrike = data.kalshiStrike || data.periodStartPrice;
-            const originalPrediction = data.originalPrediction;
-            const updatedPrediction = data.updatedPrediction;
-            const periodStartPrice = data.periodStartPrice;
-            const dataSourceName = data.dataSourceName || 'server';
+        function renderRiskBadge(prediction, strike, currentPrice, containerId) {
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            const risk = assessRisk(prediction, strike, currentPrice);
+            if (!risk) { el.innerHTML = ''; return; }
+            const icons = { safe: '&#9679;', moderate: '&#9888;', risky: '&#9888;' };
+            const labels = { safe: 'Safe Bet', moderate: 'Moderate Risk', risky: 'Risky Bet' };
+            el.innerHTML = `<span class="risk-badge risk-${risk.level}">${icons[risk.level]} ${labels[risk.level]}<span class="risk-reason"> \u2014 ${risk.reasons[0]}</span></span>`;
+        }
 
-            // Handle transitioning state
-            if (data.isTransitioning) {
-                document.getElementById('current-price').textContent = currentPrice ? formatPrice(currentPrice) : '---';
-                document.getElementById('period-start-price').textContent = '---';
-                document.getElementById('period-delta').textContent = '';
-                document.getElementById('original-predicted-price').textContent = '---';
-                document.getElementById('original-predicted-change').innerHTML = '';
-                document.getElementById('original-risk-badge').innerHTML = '';
-                document.getElementById('original-confidence-fill').style.width = '0%';
-                document.getElementById('original-confidence-value').textContent = '--%';
-                document.getElementById('updated-row').style.display = 'none';
-                document.getElementById('bet-badge').textContent = '';
-                document.getElementById('bet-badge').className = 'bet-badge';
-                document.getElementById('countdown-time').textContent = '0:00';
-                document.getElementById('sell-signal-badge').innerHTML = '';
-                document.getElementById('status-bar').innerHTML =
-                    '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026';
-                return;
-            }
+        function renderChangeTag(changePercent, containerId, dollarAmount) {
+            const el = document.getElementById(containerId);
+            const changeClass = changePercent > 0.01 ? 'up' : changePercent < -0.01 ? 'down' : 'neutral';
+            const arrow = changePercent > 0.01 ? '&#9650;' : changePercent < -0.01 ? '&#9660;' : '&#9654;';
+            const dollarStr = dollarAmount !== undefined ? ` ${dollarAmount >= 0 ? '+' : '-'}$${Math.abs(dollarAmount).toFixed(2)}` : '';
+            el.innerHTML = `<span class="change ${changeClass}">${arrow}${dollarStr} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(3)}%)</span>`;
+        }
 
-            // Current price
-            document.getElementById('current-price').textContent = currentPrice ? formatPrice(currentPrice) : '--';
-
-            // Show current price vs strike
+        function updateUI(data, periodEnd) {
+            // Current price (always live)
+            document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
+            // Use Kalshi strike as the authoritative strike price; fall back to periodStartPrice
+            const displayStrike = kalshiStrike || periodStartPrice;
+            // Show current price vs strike (how far above/below the strike)
             const changeEl = document.getElementById('price-change-24h');
-            if (displayStrike !== null && displayStrike !== undefined && currentPrice) {
-                const strikeDelta = currentPrice - displayStrike;
+            if (displayStrike !== null) {
+                const strikeDelta = data.currentPrice - displayStrike;
                 const direction = strikeDelta >= 0 ? 'Up' : 'Down';
                 changeEl.textContent = `${direction} ${formatPrice(Math.abs(strikeDelta))} vs strike`;
                 changeEl.style.color = strikeDelta >= 0 ? '#3fb950' : '#f85149';
@@ -1219,56 +2122,48 @@
                 changeEl.textContent = '';
             }
 
-            // Period strike price
-            if (displayStrike !== null && displayStrike !== undefined) {
+            // Period open price — always show latest Kalshi strike when available
+            if (displayStrike !== null) {
                 document.getElementById('period-start-price').textContent = formatPrice(displayStrike);
-                const deltaDollar = currentPrice - displayStrike;
+                const deltaDollar = data.currentPrice - displayStrike;
                 const delta = (deltaDollar / displayStrike) * 100;
                 const deltaEl = document.getElementById('period-delta');
                 deltaEl.textContent = `${deltaDollar >= 0 ? '+' : '-'}$${Math.abs(deltaDollar).toFixed(2)} (${delta >= 0 ? '+' : ''}${delta.toFixed(4)}%)`;
                 deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
                 document.getElementById('period-label').textContent = 'Kalshi strike';
             } else {
+                // No Kalshi strike available
                 document.getElementById('period-start-price').textContent = 'Waiting\u2026';
                 document.getElementById('period-delta').textContent = '';
                 document.getElementById('period-label').textContent = 'Strike';
             }
 
             // Target time (period end)
-            if (data.kalshiCloseTime) {
-                const periodEnd = new Date(data.kalshiCloseTime);
-                document.getElementById('target-time').textContent = formatTargetTime(periodEnd);
-            }
+            document.getElementById('target-time').textContent = formatTargetTime(periodEnd);
 
-            // Bet badge
-            if (originalPrediction && periodStartPrice !== null && periodStartPrice !== undefined) {
+            // Bet badge — based on original prediction vs period open (Kalshi strike)
+            if (originalPrediction && periodStartPrice !== null) {
                 const betEl = document.getElementById('bet-badge');
                 const isUp = originalPrediction.predictedPrice >= periodStartPrice;
                 betEl.textContent = isUp ? '\u25B2 Bet Up' : '\u25BC Bet Down';
                 betEl.className = 'bet-badge ' + (isUp ? 'bet-up' : 'bet-down');
             }
 
-            // Original prediction
+            // Original prediction (locked for the period)
             if (originalPrediction) {
                 document.getElementById('original-predicted-price').textContent = formatPrice(originalPrediction.predictedPrice);
                 const origChangeDollar = originalPrediction.predictedPrice - periodStartPrice;
                 const origChangePct = (origChangeDollar / periodStartPrice) * 100;
                 renderChangeTag(origChangePct, 'original-predicted-change', origChangeDollar);
+                renderRiskBadge(originalPrediction, displayStrike, data.currentPrice, 'original-risk-badge');
 
-                // Risk badge from server
-                if (data.riskAssessment && data.riskAssessment.original) {
-                    renderRiskBadge(data.riskAssessment.original, 'original-risk-badge');
-                } else {
-                    document.getElementById('original-risk-badge').innerHTML = '';
-                }
-
-                // Original confidence
+                // Original confidence (locked)
                 const origConf = Math.round(originalPrediction.confidence * 100);
                 document.getElementById('original-confidence-fill').style.width = origConf + '%';
                 document.getElementById('original-confidence-value').textContent = origConf + '%';
             }
 
-            // Updated prediction
+            // Updated prediction (recalculated, shown only after first refresh)
             if (updatedPrediction && originalPrediction &&
                 updatedPrediction.predictedPrice !== originalPrediction.predictedPrice) {
                 document.getElementById('updated-row').style.display = 'block';
@@ -1276,13 +2171,7 @@
                 const updChangeDollar = updatedPrediction.predictedPrice - periodStartPrice;
                 const updChangePct = (updChangeDollar / periodStartPrice) * 100;
                 renderChangeTag(updChangePct, 'updated-predicted-change', updChangeDollar);
-
-                // Risk badge from server
-                if (data.riskAssessment && data.riskAssessment.updated) {
-                    renderRiskBadge(data.riskAssessment.updated, 'updated-risk-badge');
-                } else {
-                    document.getElementById('updated-risk-badge').innerHTML = '';
-                }
+                renderRiskBadge(updatedPrediction, displayStrike, data.currentPrice, 'updated-risk-badge');
 
                 // Updated bet badge
                 const updBetEl = document.getElementById('updated-bet-badge');
@@ -1290,7 +2179,7 @@
                 updBetEl.textContent = updIsUp ? '\u25B2 Bet Up' : '\u25BC Bet Down';
                 updBetEl.className = 'bet-badge updated-bet-badge ' + (updIsUp ? 'bet-up' : 'bet-down');
 
-                // Updated confidence
+                // Updated confidence (live)
                 const updConf = Math.round(updatedPrediction.confidence * 100);
                 document.getElementById('updated-confidence-fill').style.width = updConf + '%';
                 document.getElementById('updated-confidence-value').textContent = updConf + '%';
@@ -1298,9 +2187,9 @@
                 document.getElementById('updated-row').style.display = 'none';
             }
 
-            // Technical signals
+            // Technical signals (use latest prediction)
             const activePred = updatedPrediction || originalPrediction;
-            if (activePred && activePred.signals) {
+            if (activePred) {
                 const sigClasses = {
                     Bullish: 'bullish', Bearish: 'bearish', Neutral: 'neutral',
                     Overbought: 'bearish', Oversold: 'bullish',
@@ -1308,41 +2197,372 @@
                 };
                 for (const [key, val] of Object.entries(activePred.signals)) {
                     const el = document.getElementById('sig-' + key);
-                    if (el) {
-                        el.textContent = val;
-                        el.className = 'signal-value ' + (sigClasses[val] || 'neutral');
-                    }
+                    el.textContent = val;
+                    el.className = 'signal-value ' + (sigClasses[val] || 'neutral');
                 }
             }
 
-            // Chart
-            if (data.history && data.history.length > 0) {
-                const chartPred = originalPrediction ? originalPrediction.predictedPrice : currentPrice;
-                const targetLabel = data.kalshiCloseTime ? formatTargetTime(new Date(data.kalshiCloseTime)) : '--:--';
-                drawChart(data.history, currentPrice, chartPred, targetLabel);
-                priceHistory = data.history;
-                predictionPoint = chartPred;
-            }
+            // Trading advisor signals
+            renderPreBuySignal('prebuy-signal-badge');
+            renderSellSignal('sell-signal-badge');
 
-            // Status bar
-            const updateTime = data.lastUpdate ? formatLocalTime(new Date(data.lastUpdate)) : formatLocalTime(new Date());
+            // Auto-trading panel
+            renderTradingPanel();
+
+            // Wallet rendering removed
+
+            // Chart
+            const chartPred = originalPrediction ? originalPrediction.predictedPrice : data.currentPrice;
+            const targetLabel = formatTargetTime(periodEnd);
+            drawChart(data.history, data.currentPrice, chartPred, targetLabel);
+
+            // Status — show data source
             document.getElementById('status-bar').innerHTML =
-                '<span class="live-dot"></span> Live via ' + dataSourceName +
-                ' &middot; Updated ' + updateTime;
+                '<span class="spinner-inline"></span>Live via ' + dataSourceName +
+                ' &middot; Updated ' + formatLocalTime(new Date());
+
+            priceHistory = data.history;
+            predictionPoint = chartPred;
         }
 
-        // ── Countdown timer (client-side for smooth ticking) ─────────
+        // ── Main loop ─────────────────────────────────────────────────
 
+        let currentTarget = null;
+        let periodStartPrice = null;      // 15m kline open price (= Kalshi strike)
+        let originalPrediction = null;     // locked prediction for the period
+        let updatedPrediction = null;      // recalculated on each refresh
+        // Note: displayedUpdPred (smooth interpolation state) is declared near startFastUITicker
+        let smoothedProbability = null;     // EMA-smoothed probability for anti-flip
+        let lockedDirection = null;         // 'up' or 'down' — committed direction
+        let currentPeriodKey = null;       // e.g. "14:30" to detect period change
+        let isTransitioning = false;       // true while waiting for new ticker
+        let transitionRetries = 0;
+        let lastKalshiTicker = null;       // track Kalshi market ticker to detect new period
+        let strikeIsPending = false;       // true when using kline open as fallback strike
+
+        // ── Persist original prediction across page reloads ──────────
+        function saveSessionState() {
+            const state = {
+                currentPeriodKey,
+                periodStartPrice,
+                originalPrediction,
+                kalshiMarketTicker,
+                kalshiCloseTime
+            };
+            localStorage.setItem('btcPredSession', JSON.stringify(state));
+        }
+
+        function loadSessionState() {
+            try {
+                const raw = localStorage.getItem('btcPredSession');
+                if (!raw) return;
+                const state = JSON.parse(raw);
+                // Only restore if we're still in the same period
+                const nowPeriodKey = getPeriodKey();
+                if (state.currentPeriodKey === nowPeriodKey) {
+                    currentPeriodKey = state.currentPeriodKey;
+                    periodStartPrice = state.periodStartPrice;
+                    originalPrediction = state.originalPrediction;
+                    kalshiMarketTicker = state.kalshiMarketTicker;
+                    kalshiCloseTime = state.kalshiCloseTime;
+                    console.log('Restored session state for period', currentPeriodKey);
+                } else {
+                    // Period has changed since last visit — grade old prediction
+                    currentPeriodKey = state.currentPeriodKey;
+                    console.log('Period changed since last visit, will grade old prediction');
+                }
+            } catch(e) {
+                console.warn('Failed to restore session state:', e);
+            }
+        }
+
+        loadSessionState();
+
+        function getPeriodKey() {
+            const start = getPeriodStartTime();
+            return start.getHours() + ':' + start.getMinutes();
+        }
+
+        // Clear stale data from UI and show transition message
+        function enterTransitionState() {
+            isTransitioning = true;
+            transitionRetries = 0;
+            lastKalshiTicker = kalshiMarketTicker;
+            currentPeriodKey = getPeriodKey();
+
+            // Clear prediction data so stale values never linger
+            originalPrediction = null;
+            updatedPrediction = null;
+            displayedUpdPred = null;
+            currentPrediction = null;
+            smoothedProbability = null;
+            lockedDirection = null;
+            resetAdvisorHistory();
+            periodStartPrice = null;
+            kalshiStrike = null;
+            kalshiCloseTime = null;
+            kalshiMarketTicker = null;
+            strikeIsPending = false;
+
+            clearNextPeriodPreview();
+            saveSessionState();
+
+            // Update UI to show transition
+            document.getElementById('current-price').textContent = '---';
+            document.getElementById('period-start-price').textContent = '---';
+            document.getElementById('period-delta').textContent = '';
+            document.getElementById('original-predicted-price').textContent = '---';
+            document.getElementById('original-predicted-change').innerHTML = '';
+            document.getElementById('original-risk-badge').innerHTML = '';
+            document.getElementById('original-confidence-fill').style.width = '0%';
+            document.getElementById('original-confidence-value').textContent = '--%';
+            document.getElementById('updated-row').style.display = 'none';
+            document.getElementById('bet-badge').textContent = '';
+            document.getElementById('bet-badge').className = 'bet-badge';
+            document.getElementById('countdown-time').textContent = '0:00';
+            document.getElementById('sell-signal-badge').innerHTML = '';
+            document.getElementById('prebuy-signal-badge').innerHTML = '';
+            document.getElementById('status-bar').innerHTML =
+                '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026';
+        }
+
+        // Keep retrying until server provides fresh data for the new period
+        async function retryForNewTicker() {
+            transitionRetries++;
+            const newPeriodKey = getPeriodKey();
+            const currentPeriodEnd = getPeriodEndTime();
+
+            try {
+                const data = await fetchPriceData();
+                if (data) latestData = data;
+
+                // Check if server has a prediction for the current period
+                const serverPred = serverData && serverData.prediction;
+                const hasNewPrediction = serverPred && serverPred.originalPrediction && serverData.kalshiStrike;
+
+                // Validate Kalshi market is for current period
+                let marketIsForCurrentPeriod = false;
+                if (kalshiCloseTime) {
+                    const closeMs = new Date(kalshiCloseTime).getTime();
+                    const periodEndMs = currentPeriodEnd.getTime();
+                    marketIsForCurrentPeriod = Math.abs(closeMs - periodEndMs) < 2 * 60 * 1000;
+                }
+
+                if (hasNewPrediction && marketIsForCurrentPeriod) {
+                    isTransitioning = false;
+                    currentPeriodKey = newPeriodKey;
+                    currentTarget = currentPeriodEnd;
+                    kalshiStrike = serverData.kalshiStrike;
+                    periodStartPrice = kalshiStrike;
+                    strikeIsPending = false;
+                    smoothedProbability = null;
+                    lockedDirection = null;
+                    originalPrediction = serverPred.originalPrediction;
+                    updatedPrediction = serverPred.updatedPrediction || null;
+                    currentPrediction = updatedPrediction || originalPrediction;
+                    document.getElementById('kalshi-error-banner').style.display = 'none';
+                    if (data) updateUI(data, currentPeriodEnd);
+                    renderPredictionHistory();
+                    return;
+                }
+
+                if (transitionRetries >= 40) {
+                    document.getElementById('kalshi-error-msg').textContent =
+                        'Kalshi strike not available — no market found for this period';
+                    document.getElementById('kalshi-error-banner').style.display = 'block';
+                    document.getElementById('status-bar').innerHTML =
+                        '&#9888; Kalshi strike unavailable &mdash; tap Refresh to retry';
+                    if (data) document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
+                    return;
+                }
+
+                document.getElementById('status-bar').innerHTML =
+                    '<span class="spinner-inline"></span> Waiting for new Kalshi market\u2026 (attempt ' + transitionRetries + '/40)';
+                if (data) document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
+
+            } catch (err) {
+                document.getElementById('status-bar').innerHTML =
+                    '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026 (attempt ' + transitionRetries + ')';
+            }
+
+            setTimeout(retryForNewTicker, 3000);
+        }
+
+        // Manual refresh — triggered by the refresh button when Kalshi is unavailable
+        async function manualRefresh() {
+            const btn = document.querySelector('.refresh-btn');
+            btn.textContent = 'Refreshing\u2026';
+            btn.disabled = true;
+
+            if (isTransitioning) {
+                // Still in transition — restart retry loop
+                transitionRetries = 0;
+                retryForNewTicker();
+            } else {
+                // Not transitioning but missing Kalshi — just re-fetch
+                await fetchAndPredict();
+            }
+
+            setTimeout(() => {
+                btn.textContent = 'Refresh Kalshi';
+                btn.disabled = false;
+            }, 2000);
+        }
+
+        async function fetchAndPredict() {
+            if (isTransitioning) return;
+
+            try {
+                const data = await fetchPriceData();
+
+                // No server data — show error
+                if (!data) {
+                    if (!wsConnected) {
+                        document.getElementById('status-bar').innerHTML =
+                            '<span style="color:#f85149">&#9888;</span> Server disconnected — waiting for reconnect\u2026';
+                    }
+                    return;
+                }
+
+                latestData = data;
+
+                const periodEnd = getPeriodEndTime();
+                currentTarget = periodEnd;
+                const periodKey = getPeriodKey();
+
+                // Use server-provided predictions (single source of truth)
+                const serverPred = serverData && serverData.prediction;
+                if (serverPred) {
+                    if (serverPred.originalPrediction) {
+                        originalPrediction = serverPred.originalPrediction;
+                    }
+                    if (serverPred.updatedPrediction) {
+                        updatedPrediction = serverPred.updatedPrediction;
+                    }
+                    kalshiStrike = serverData.kalshiStrike || serverPred.kalshiStrike || kalshiStrike;
+                }
+
+                // Detect new period for UI state
+                if (periodKey !== currentPeriodKey) {
+                    currentPeriodKey = periodKey;
+                    lockedDirection = null;
+                    smoothedProbability = null;
+                    updatedPrediction = null;
+                }
+
+                if (kalshiStrike) {
+                    periodStartPrice = kalshiStrike;
+                    strikeIsPending = false;
+                    document.getElementById('kalshi-error-banner').style.display = 'none';
+                } else {
+                    strikeIsPending = true;
+                    document.getElementById('kalshi-error-msg').textContent =
+                        'Waiting for Kalshi strike price\u2026';
+                    document.getElementById('kalshi-error-banner').style.display = 'block';
+                }
+
+                currentPrediction = updatedPrediction || originalPrediction;
+                updateUI(data, periodEnd);
+                renderPredictionHistory();
+            } catch (err) {
+                console.error('Fetch error:', err);
+                document.getElementById('status-bar').innerHTML =
+                    '<span style="color:#f85149">&#9888;</span> Error: ' + err.message + ' &middot; Retrying\u2026';
+            }
+        }
+
+        // Countdown ticker — runs every second
         function startCountdown() {
             setInterval(() => {
+                if (isTransitioning) return; // don't tick during transition
                 if (!currentTarget) return;
+
                 const secs = getSecondsUntilTarget(currentTarget);
                 document.getElementById('countdown-time').textContent = formatCountdown(secs);
+
+                // Show/update next period preview in last 3 minutes
+                renderNextPeriodPreview();
+
+                // When we cross into a new quarter, enter transition state
+                if (secs <= 0) {
+                    clearNextPeriodPreview();
+                    enterTransitionState();
+                    retryForNewTicker();
+                }
             }, 1000);
         }
 
-        // ── Handle resize ────────────────────────────────────────────
+        // Price refresh — fetches new data every 500ms
+        function startLiveRefresh() {
+            setInterval(fetchAndPredict, 500);
+        }
 
+        // ── Smooth price interpolation ──────────────────────────────
+        // Displayed values lerp toward targets each tick for a Kalshi-like smooth feel
+        let displayedPrice = null;       // currently rendered price (smoothed)
+        let displayedUpdPred = null;     // currently rendered updated prediction (smoothed)
+        const LERP_SPEED = 0.25;         // fraction of gap closed per 100ms tick (0-1)
+
+        function lerp(current, target, alpha) {
+            const diff = target - current;
+            // Snap if close enough (< 1 cent)
+            if (Math.abs(diff) < 0.005) return target;
+            return current + diff * alpha;
+        }
+
+        // Fast UI ticker — smoothly interpolates prices every 100ms
+        function startFastUITicker() {
+            setInterval(() => {
+                if (!latestData || isTransitioning) return;
+                const targetPrice = latestData.currentPrice;
+                const displayStrike = kalshiStrike || periodStartPrice;
+
+                // Initialize displayed price on first tick
+                if (displayedPrice === null) displayedPrice = targetPrice;
+
+                // Smoothly interpolate toward target price
+                displayedPrice = lerp(displayedPrice, targetPrice, LERP_SPEED);
+
+                // Update current price display
+                document.getElementById('current-price').textContent = formatPrice(displayedPrice);
+
+                // Update price vs strike
+                const changeEl = document.getElementById('price-change-24h');
+                if (displayStrike !== null) {
+                    const strikeDelta = displayedPrice - displayStrike;
+                    const direction = strikeDelta >= 0 ? 'Up' : 'Down';
+                    changeEl.textContent = `${direction} ${formatPrice(Math.abs(strikeDelta))} vs strike`;
+                    changeEl.style.color = strikeDelta >= 0 ? '#3fb950' : '#f85149';
+
+                    // Update period delta
+                    const deltaDollar = displayedPrice - displayStrike;
+                    const delta = (deltaDollar / displayStrike) * 100;
+                    const deltaEl = document.getElementById('period-delta');
+                    deltaEl.textContent = `${deltaDollar >= 0 ? '+' : '-'}$${Math.abs(deltaDollar).toFixed(2)} (${delta >= 0 ? '+' : ''}${delta.toFixed(4)}%)`;
+                    deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
+                }
+
+                // Smoothly interpolate updated prediction
+                if (updatedPrediction && originalPrediction &&
+                    updatedPrediction.predictedPrice !== originalPrediction.predictedPrice) {
+                    const targetUpdPred = updatedPrediction.predictedPrice;
+                    if (displayedUpdPred === null) displayedUpdPred = targetUpdPred;
+                    displayedUpdPred = lerp(displayedUpdPred, targetUpdPred, LERP_SPEED);
+
+                    document.getElementById('updated-predicted-price').textContent = formatPrice(displayedUpdPred);
+                    const updChangeDollar = displayedUpdPred - periodStartPrice;
+                    const updChangePct = (updChangeDollar / periodStartPrice) * 100;
+                    renderChangeTag(updChangePct, 'updated-predicted-change', updChangeDollar);
+
+                    const updConf = Math.round(updatedPrediction.confidence * 100);
+                    document.getElementById('updated-confidence-fill').style.width = updConf + '%';
+                    document.getElementById('updated-confidence-value').textContent = updConf + '%';
+                }
+
+            }, 100);
+        }
+
+        // Handle resize
         window.addEventListener('resize', () => {
             if (priceHistory.length && predictionPoint && currentTarget) {
                 const targetLabel = formatTargetTime(currentTarget);
@@ -1350,9 +2570,112 @@
             }
         });
 
-        // ── Boot ─────────────────────────────────────────────────────
-        connectWebSocket();
+        // ── Notifications ────────────────────────────────────────────
+        let notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true';
+
+        function updateNotifButton() {
+            const btn = document.getElementById('notif-btn');
+            if (!btn) return;
+            if (notificationsEnabled && Notification.permission === 'granted') {
+                btn.textContent = 'Notifications: ON';
+                btn.style.color = '#3fb950';
+                btn.style.borderColor = 'rgba(63,185,80,0.4)';
+            } else {
+                btn.textContent = 'Notifications: OFF';
+                btn.style.color = '';
+                btn.style.borderColor = '';
+            }
+        }
+
+        async function toggleNotifications() {
+            if (!('Notification' in window)) {
+                alert('Your browser does not support notifications.');
+                return;
+            }
+            if (!notificationsEnabled) {
+                const perm = await Notification.requestPermission();
+                if (perm === 'granted') {
+                    notificationsEnabled = true;
+                    localStorage.setItem('notificationsEnabled', 'true');
+                } else {
+                    alert('Notification permission denied. Please enable it in your browser settings.');
+                }
+            } else {
+                notificationsEnabled = false;
+                localStorage.setItem('notificationsEnabled', 'false');
+            }
+            updateNotifButton();
+        }
+
+        function handleTradeNotification(trade) {
+            if (!notificationsEnabled || Notification.permission !== 'granted') return;
+            // Only notify on actionable trade events
+            const notifyTypes = ['buy', 'sell', 'settle', 'dip_buy', 'late_lock', 're_entry'];
+            if (!notifyTypes.includes(trade.type)) return;
+
+            let title, body, icon;
+            const dir = (trade.direction || trade.side || '').toUpperCase();
+
+            switch (trade.type) {
+                case 'buy':
+                    title = 'Bought ' + dir;
+                    body = trade.contracts + 'x ' + dir + ' @ ' + trade.limitPrice + '\u00A2 | Edge: ' + (trade.edge || '?');
+                    icon = '📈';
+                    break;
+                case 'sell':
+                    title = 'Sold Position';
+                    body = trade.contracts + 'x ' + (trade.side || '').toUpperCase() + ' | Reason: ' + (trade.reason || 'unknown');
+                    icon = '📉';
+                    break;
+                case 'settle':
+                    const won = trade.correct;
+                    const pnl = (trade.pnlCents / 100).toFixed(2);
+                    title = won ? 'Won Settlement!' : 'Lost Settlement';
+                    body = trade.contracts + 'x ' + (trade.side || '').toUpperCase() + ' | P&L: ' + (won ? '+' : '') + '$' + pnl;
+                    icon = won ? '✅' : '❌';
+                    break;
+                case 'dip_buy':
+                    title = 'Dip Buy ' + dir;
+                    body = '+' + trade.contracts + 'x @ ' + trade.limitPrice + '\u00A2 (' + (trade.dipImprovement || '') + ' cheaper)';
+                    icon = '🔻';
+                    break;
+                case 'late_lock':
+                    title = 'Late Lock ' + dir;
+                    body = trade.contracts + 'x @ ' + trade.limitPrice + '\u00A2 | ' + (trade.sigmaDistance || '') + ' from strike';
+                    icon = '🔒';
+                    break;
+                case 're_entry':
+                    title = 'Re-Entry ' + dir;
+                    body = trade.contracts + 'x @ ' + trade.limitPrice + '\u00A2 | Edge: ' + (trade.edge || '?');
+                    icon = '🔄';
+                    break;
+            }
+
+            if (title) {
+                const n = new Notification(icon + ' ' + title, {
+                    body: body,
+                    tag: 'trade-' + trade.time,
+                    renotify: true,
+                    requireInteraction: false,
+                });
+                // Auto-close after 10s
+                setTimeout(() => n.close(), 10000);
+            }
+        }
+
+        // Register service worker for notification click handling
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => {});
+        }
+
+        // ── Boot ──────────────────────────────────────────────────────
+        updateNotifButton();
+        connectWebSocket(); // Connect to always-on server
+        renderPredictionHistory();
+        fetchAndPredict();
         startCountdown();
+        startLiveRefresh();
+        startFastUITicker();
     </script>
 </body>
 </html>
