@@ -15,8 +15,8 @@ const { getEnvironment } = require('./kalshi-auth');
 // ── Configuration (from env, with safe defaults) ──
 const config = {
     paperMode: (process.env.PAPER_MODE || 'true').toLowerCase() === 'true',
-    baseContracts: parseInt(process.env.BASE_CONTRACTS || '10', 10),           // was 5
-    maxPositionContracts: Math.min(parseInt(process.env.MAX_POSITION_CONTRACTS || '20', 10), 50), // hard cap at 50
+    baseContracts: parseInt(process.env.BASE_CONTRACTS || '5', 10),            // was 10 — halved until edge proven with 300+ trades
+    maxPositionContracts: Math.min(parseInt(process.env.MAX_POSITION_CONTRACTS || '10', 10), 50), // was 20 — reduced to limit exposure
     maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '2500', 10),    // $25 (was $10)
     maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '100', 10),      // was 50
 };
@@ -242,19 +242,34 @@ function markFillFailed(periodKey) {
 }
 
 /**
- * Get an aggressive limit price that's likely to fill.
- * Checks the Kalshi orderbook for the best available ask, and pays
- * up to (theoretical price + slippage) to ensure fills.
+ * Get a smart limit price based on orderbook and fair value.
+ *
+ * KEY PRINCIPLE: Never pay more than theoreticalPrice + maxSlippage.
+ * The old approach ("pay whatever the ask is") destroyed all edge by
+ * giving away 5-15¢ per trade in slippage. With a 2-4% edge (~1-4¢),
+ * that made every trade negative EV.
+ *
+ * Strategy by time remaining:
+ * - >10 min: Post at fair value (be a maker, earn the spread)
+ * - 4-10 min: Fair value + 2¢ (patient taker)
+ * - <4 min: Pay the ask but cap at fair value + 5¢
  *
  * Kalshi orderbook format (post-March-12):
  *   { orderbook_fp: { yes_dollars: [["0.58","10.00"], ...], no_dollars: [...] } }
  *   Each entry is [price_dollars, count_fp] — BIDS only.
  *   YES bid at $X = NO ask at $(1.00-X), and vice versa.
  *
- * Returns a price in cents (5-99).
+ * Returns a price in cents (5-95).
  */
-async function getAggressivePrice(ticker, side, theoreticalPrice) {
+async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaining) {
     if (config.paperMode) return Math.max(5, Math.min(95, theoreticalPrice));
+
+    // Determine max slippage based on time remaining
+    const maxSlippage = (minutesRemaining || 15) <= 4 ? 5
+                      : (minutesRemaining || 15) <= 10 ? 3
+                      : 1; // early period: post near fair value
+
+    const maxPrice = Math.min(95, theoreticalPrice + maxSlippage);
 
     // Try to get the best price from the orderbook
     try {
@@ -274,24 +289,26 @@ async function getAggressivePrice(ticker, side, theoreticalPrice) {
                 return Math.round((1.00 - bidDollars) * 100);
             });
             const bestAsk = Math.min(...askPrices);
-            // Pay the ask price to guarantee fill — this is "market buy"
-            const price = Math.min(95, bestAsk);
-            console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c — buying at ${price}c`);
+
+            // NEVER pay more than theoretical + maxSlippage
+            if (bestAsk > maxPrice) {
+                console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c > max ${maxPrice}c (theory=${theoreticalPrice}c) — posting at fair value`);
+                return Math.max(5, Math.min(95, theoreticalPrice));
+            }
+
+            const price = Math.min(maxPrice, bestAsk);
+            console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c — buying at ${price}c (theory=${theoreticalPrice}c, max=${maxPrice}c)`);
             return Math.max(5, price);
         }
-        console.log(`[trade-executor] Orderbook: no opposing bids — using aggressive market price`);
+        console.log(`[trade-executor] Orderbook: no opposing bids — posting at fair value ${theoreticalPrice}c`);
     } catch (e) {
-        console.log(`[trade-executor] Orderbook fetch failed: ${e.message} — using aggressive market price`);
+        console.log(`[trade-executor] Orderbook fetch failed: ${e.message} — posting at fair value`);
     }
 
-    // No orderbook data: use aggressive price to guarantee fill.
-    // For high-confidence bets (theory > 60c), just pay up to 95c.
-    // For lower confidence, cap at theory + 10c.
-    const aggressivePrice = theoreticalPrice >= 60
-        ? Math.min(95, theoreticalPrice + 10)
-        : Math.min(90, theoreticalPrice + 10);
-    console.log(`[trade-executor] Using aggressive price: ${aggressivePrice}c (theory=${theoreticalPrice}c)`);
-    return Math.max(5, aggressivePrice);
+    // No orderbook data: post at fair value + small slippage, NOT theory+10
+    const price = Math.min(maxPrice, theoreticalPrice + 2);
+    console.log(`[trade-executor] Using limit price: ${price}c (theory=${theoreticalPrice}c)`);
+    return Math.max(5, price);
 }
 
 /**
@@ -387,7 +404,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     // Use probability as our max willingness-to-pay, but try the orderbook first
     const probForBet = isUp ? prediction.probability : (1 - prediction.probability);
     const theoreticalPrice = Math.round(probForBet * 100);
-    const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice);
+    const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, 15); // new prediction = ~15 min remaining
 
     const tradeInfo = {
         ticker: kalshiTicker,
@@ -510,32 +527,39 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, strike, currentPrice) {
     if (!currentPosition || !sellSignal) return;
 
-    // ── GUARANTEED WIN PROTECTION ──
-    // If we're solidly winning with little time left, DON'T sell — ride it to settlement
-    // for the full payout. Selling early means we get less than 100¢ per contract.
+    // ── BINARY OPTIONS: ALMOST NEVER SELL ──
+    // Binary options settle at exactly 100¢ or 0¢. Selling early means:
+    // - If winning: you get less than the 100¢ settlement payout
+    // - If losing: you pay the spread twice (sell + potential re-entry) for minimal salvage
+    // The ONLY mathematically justified sell is when recovery is essentially impossible:
+    // wrong side, >2.5 sigma away, <1.5 min remaining (recovery prob <1.2%)
     if (strike && currentPrice) {
         const betIsUp = currentPosition.side === 'yes';
         const onRightSide = (betIsUp && currentPrice >= strike) || (!betIsUp && currentPrice < strike);
+
+        // NEVER sell a winning position. Settlement pays 100¢. Any sell price < 100¢ loses money.
+        if (onRightSide) {
+            return;
+        }
+
+        // On wrong side: only sell if mathematically dead
         const remainingVol = (updatedPrediction && updatedPrediction._remainingVol) || 0.002;
         const distancePct = Math.abs(currentPrice - strike) / strike;
         const sigmaDistance = distancePct / remainingVol;
 
-        // If we're winning AND price is 1.5+ sigma on our side, hold for settlement
-        if (onRightSide && sigmaDistance >= 1.5 && minutesRemaining < 3) {
-            // Don't sell a guaranteed winner — let it settle for full 100¢ payout
-            if (sellSignal.level === 'take_profit') {
-                console.log(`[trade-executor] Holding guaranteed winner: ${sigmaDistance.toFixed(1)}σ on right side with ${minutesRemaining.toFixed(1)}m left`);
-                return;
-            }
+        // Recovery probability at various sigma distances:
+        // 2.0σ → ~4.6% (position worth ~5¢, not worth selling after spread)
+        // 2.5σ → ~1.2% (position worth ~1¢, sell to free margin)
+        // 3.0σ → ~0.3% (dead, sell at any price)
+        const isMathematicallyDead = (sigmaDistance >= 2.5 && minutesRemaining < 1.5) || sigmaDistance >= 3.0;
+        if (!isMathematicallyDead) {
+            // Hold — recovery is still plausible or spread eats any salvage value
+            return;
         }
     }
 
-    const shouldSell = (
-        sellSignal.level === 'lost_cause' ||
-        (sellSignal.level === 'sell_now' && minutesRemaining < 1.5) ||            // was unconditional
-        (sellSignal.level === 'take_profit' && minutesRemaining < 1) ||           // was 2 min
-        (sellSignal.level === 'consider_selling' && minutesRemaining < 0.75)      // was 1.5 min
-    );
+    // Only lost_cause sells reach this point (wrong side, >2.5σ, <1.5 min)
+    const shouldSell = (sellSignal.level === 'lost_cause');
 
     if (!shouldSell) {
         decisionLog.logSellDecision({ sellSignal, minutesRemaining, acted: false, reason: 'Thresholds not met for sell', currentPrice, strike });

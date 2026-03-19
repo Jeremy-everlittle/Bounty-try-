@@ -104,10 +104,12 @@ async function fetchBRTIApprox() {
 
     if (prices.length === 0) return null;
 
-    // Filter outliers > 0.25% from median
+    // Filter outliers > 0.5% from median (~$425 at $85K BTC)
+    // BUG FIX: was 0.25 (25%!) — effectively no filter at all.
+    // 0.005 (0.5%) catches broken exchange feeds while allowing normal cross-exchange spread.
     const sorted = [...prices].sort((a, b) => a.price - b.price);
     const median = sorted[Math.floor(sorted.length / 2)].price;
-    const filtered = prices.filter(p => Math.abs(p.price - median) / median < 0.25);
+    const filtered = prices.filter(p => Math.abs(p.price - median) / median < 0.005);
     const usePrices = filtered.length >= 2 ? filtered : prices;
 
     const avg = usePrices.reduce((s, p) => s + p.price, 0) / usePrices.length;

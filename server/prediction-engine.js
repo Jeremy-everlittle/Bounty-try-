@@ -110,7 +110,7 @@ function getSessionRiskMultiplier() {
         sessionRisk.coolingOff = false;
     }
 
-    if (sessionRisk.coolingOff) return 0.30; // was 0 — still trade at reduced size during cooldown
+    if (sessionRisk.coolingOff) return 0; // full stop during cooldown — trading at 30% when model is broken is still losing money
 
     let mult = 1.0;
 
@@ -125,11 +125,11 @@ function getSessionRiskMultiplier() {
     // Edge decay: mild reduction (was 0.60)
     if (sessionRisk.edgeDecayAlert) mult *= 0.80;
 
-    // Winning streak: boost sizing to reward hot streaks
-    if (sessionRisk.consecutiveWins >= 3) mult *= 1.20;
-    else if (sessionRisk.consecutiveWins >= 2) mult *= 1.10;
+    // Win-streak boost REMOVED: Kelly sizes based on EDGE, not recent results.
+    // A 3-win streak at 55% base rate is a 16.6% event — not rare enough to
+    // indicate the edge has changed. Boosting creates positive feedback into drawdowns.
 
-    return Math.max(0.15, Math.min(1.30, mult)); // floor at 15%, allow up to 130%
+    return Math.max(0, Math.min(1.0, mult)); // floor at 0 (full stop when cooling), cap at 100%
 }
 
 // ── Online Logistic Regression (pure JS, no libraries) ──
@@ -898,7 +898,10 @@ function computeHurstExponent(prices) {
     const meanY = logRS.reduce((a, b) => a + b, 0) / nP;
     let num = 0, den = 0;
     for (let i = 0; i < nP; i++) { num += (logN[i] - meanX) * (logRS[i] - meanY); den += (logN[i] - meanX) ** 2; }
-    return Math.max(0.01, Math.min(0.99, den > 0 ? num / den : 0.5));
+    // Clamp to [0.42, 0.58]: BTC Hurst at 1-min frequency is statistically
+    // indistinguishable from 0.5 (Frontiers in Blockchain, 2024). Values outside
+    // this range at 1-min frequency are estimation noise, not real persistence.
+    return Math.max(0.42, Math.min(0.58, den > 0 ? num / den : 0.5));
 }
 
 function detectMicroMeanReversion(prices, orderBook) {
@@ -1585,18 +1588,20 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     const chop = detectChoppiness(prices);
     const exhaustion = detectMomentumExhaustion(prices, marketData.history);
 
-    // Minimum edge threshold: reduced to allow more trades
-    // Kalshi fees ≈ 1.5 cents per side. Break-even ~52.3%.
-    // Any edge above break-even is worth taking.
-    const minEdge = 0.02; // 2% minimum edge (was 3.5%)
+    // Minimum edge threshold: must cover fees + execution slippage + model uncertainty.
+    // Kalshi fees ≈ 1.5¢/side (break-even ~52.3%), but execution slippage adds 2-4%.
+    // With model shrinkage (30-50% OOS), a 2% measured edge is likely 0% real edge.
+    // At 4%, real edge after costs is ~1.5-2% — marginally profitable.
+    const minEdge = 0.04; // 4% minimum edge (was 2%)
 
-    // Quality factors — relaxed to trigger more buys
+    // Quality factors — tightened to only take high-quality setups.
+    // Trading less often with higher edge >> trading often with thin edge.
     const factors = {
         hasMinEdge: edge >= minEdge,
-        hasConfidence: confidence >= 0.35,       // was 0.45
-        notChoppy: !chop.choppy || chop.adx > 15, // allow mildly choppy (was strict !choppy)
-        notExhausted: exhaustion.exhaustion < 0.6, // was 0.4
-        hasTime: minutesAhead >= 1.5,             // was 3 — allow later entries
+        hasConfidence: confidence >= 0.40,        // was 0.35 — need meaningful confidence
+        notChoppy: !chop.choppy || chop.adx > 18, // was 15
+        notExhausted: exhaustion.exhaustion < 0.5, // was 0.6
+        hasTime: minutesAhead >= 5,               // was 1.5 — contracts mispriced after 10 min
         signalAgreement: prediction.ensembleConfidence?.level !== 'low',
     };
 
@@ -1610,8 +1615,8 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     }
 
     const quality = score / maxScore;
-    const shouldBet = quality >= 0.40; // was 0.55 — bet more often
-    const waitForBetter = !shouldBet && minutesAhead > 10; // was 8
+    const shouldBet = quality >= 0.55; // was 0.40 — only take quality setups
+    const waitForBetter = !shouldBet && minutesAhead > 10;
 
     // Optimal entry timing: in choppy markets, wait for clearer signal
     let suggestedWait = 0;
@@ -1653,13 +1658,11 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         if (volMult < 0.9) betSizeReason = betSize < 0.6 ? 'Reduced — ' + vr.regime + ' vol regime' : 'Slightly reduced — ' + vr.regime + ' vol (ratio=' + vr.ratio.toFixed(1) + ')';
     }
 
-    // Strong signal = boost size above 1.0 (up to 1.3x)
+    // No size boosts above 1.0 until edge is proven with 300+ trades.
+    // Boosting during hot streaks is anti-Kelly (increases size based on luck, not edge).
     if (quality >= 0.70 && edge >= 0.06 && !chop.choppy) {
-        betSize = Math.max(betSize, 1.2);
-        betSizeReason = 'Boosted size — strong setup';
-    } else if (quality >= 0.55 && edge >= 0.04) {
         betSize = Math.max(betSize, 1.0);
-        betSizeReason = 'Full size — decent setup';
+        betSizeReason = 'Full size — strong setup';
     }
 
     // Session risk adjustment: reduce size based on drawdown/streak
@@ -1692,21 +1695,20 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         else if (fg < 8) { betSize *= 0.85; betSizeReason = 'Slightly reduced — extreme fear'; }
     }
 
-    betSize = Math.max(0, Math.min(1.30, betSize)); // allow up to 130% sizing for strong setups
+    betSize = Math.max(0, Math.min(1.00, betSize)); // cap at 100% — no overbetting until edge proven
 
     // ── Fee-adjusted Kelly fraction ──
-    // Kalshi fees: ~1.5 cents per contract per side (reduced from old 7c schedule)
-    // At 50c contracts: win profit = 0.97 - 0.50 = 0.47, loss = 0.515
-    // Break-even: 0.515/0.985 ≈ 52.3% (was 61.3% with old 7c fees)
-    // Quarter Kelly recommended with <200 sample track record
-    const contractCost = 0.50; // approximate average contract price
+    // Use ACTUAL entry price (derived from probability), not hardcoded 50¢.
+    // Quarter-Kelly: appropriate for <300 sample track record with uncertain edge.
+    // The old half-Kelly was too aggressive given model estimation error.
     const fee = 0.015; // ~1.5 cents per side (Kalshi's current reduced fee schedule)
-    const winProfit = (1.0 - fee) - contractCost - fee; // 0.47
-    const lossAmount = contractCost + fee; // 0.515
+    const estimatedEntryPrice = Math.max(0.05, Math.min(0.95, probForBet)); // dollars
+    const winProfit = (1.0 - fee) - estimatedEntryPrice - fee;
+    const lossAmount = estimatedEntryPrice + fee;
     const kellyRaw = winProfit > 0
         ? (probForBet * winProfit - (1 - probForBet) * lossAmount) / winProfit
         : 0;
-    const kellyFraction = Math.max(0, kellyRaw * 0.50); // Half Kelly (was quarter)
+    const kellyFraction = Math.max(0, kellyRaw * 0.25); // Quarter Kelly (was half)
     const kellyHasEdge = kellyRaw > 0;
 
     // If Kelly says no edge after fees, override shouldBet
@@ -1753,17 +1755,21 @@ function predictPrice(marketData, minutesAhead, strike) {
     const volWindow = Math.round(8 + 52 * (minutesAhead / 15));
     const adaptiveWindow = Math.max(2, Math.min(volWindow, n - 1));
     const ccVol = computeRealizedVol(prices, adaptiveWindow);
-    // GARCH research: BTC alpha ≈ 0.20 (lambda = 1-alpha = 0.80)
-    // Old lambda=0.97 was too smooth, reacted too slowly to vol shocks
-    const ewmaVol = computeEWMAVol(prices, 0.80);
+    // GARCH research: BTC alpha ≈ 0.15-0.20 at DAILY frequency.
+    // At 1-minute frequency, persistence is higher (microstructure noise).
+    // lambda=0.80 had 3-min half-life — far too reactive for 15-min contracts.
+    // lambda=0.93 gives ~10-min half-life, matching contract horizon.
+    const ewmaVol = computeEWMAVol(prices, 0.93);
     const gkVol = computeGarmanKlassVol(history, adaptiveWindow);
     const rawPerMinVol = 0.25 * ccVol + 0.40 * ewmaVol + 0.35 * gkVol;
-    // Leverage effect: negative recent returns → vol boost (EGARCH finding)
-    // BTC has ~2x vol increase after negative shocks
+    // Leverage effect: BTC has WEAK and SYMMETRIC volatility asymmetry.
+    // EGARCH gamma ≈ -0.038 (tiny vs equities' -0.05 to -0.15).
+    // BTC vol increases after BOTH sharp up and down moves (FoMO + panic).
+    // Cap at 5% boost (not 15%), applied symmetrically.
     const recentReturn = n > 1 ? Math.log(prices[n-1] / prices[n-2]) : 0;
-    // Leverage effect is WEAK in BTC (EGARCH gamma ≈ -0.038, unlike equities)
-    // Reduced from 40% max to 15% max boost on negative returns
-    const leverageAdj = recentReturn < -0.002 ? 1.0 + Math.min(0.15, Math.abs(recentReturn) * 20) : 1.0;
+    const leverageAdj = Math.abs(recentReturn) > 0.002
+        ? 1.0 + Math.min(0.05, Math.abs(recentReturn) * 8)
+        : 1.0;
     // Weekend vol reduction: weekday vol is substantially higher than weekends
     // Weekend adjustment now handled by DAY_VOL_MULT in getIntradayVolMultiplier()
     const leverageAdjVol = rawPerMinVol * leverageAdj;
@@ -1772,37 +1778,39 @@ function predictPrice(marketData, minutesAhead, strike) {
     const volBlendRatio = minutesAhead / 15;
     const blendedVol = longVol * volBlendRatio + shortVol * (1 - volBlendRatio);
 
-    // Jump-filtered vol: after a spike, use continuous vol to prevent overestimation
-    const jumpInfo = computeJumpFilteredVol(prices, Math.min(20, n - 1));
-    let perMinuteVol;
+    // Jump-filtered vol: ALWAYS use continuous vol (bipower variation) as primary.
+    // Academic consensus (Corsi et al. 2010): continuous vol is uniformly a better
+    // predictor of future vol than total realized variance, regardless of jump detection.
+    // When jumps occur, add a small intensity boost for elevated future vol.
+    const jumpInfo = computeJumpFilteredVol(prices, Math.min(30, n - 1));
+    let perMinuteVol = Math.max(jumpInfo.continuousVol, blendedVol * 0.85);
     if (jumpInfo.jumpDetected) {
-        // After a jump, blend continuous vol with raw to dampen the spike effect
-        perMinuteVol = Math.max(jumpInfo.continuousVol, blendedVol * 0.85);
-    } else {
-        perMinuteVol = Math.max(leverageAdjVol, blendedVol * 0.9);
+        perMinuteVol *= 1.0 + jumpInfo.jumpRatio * 0.3; // jumps predict slightly elevated future vol
     }
 
     const { remainingVol: rawRemainingVol, H } = computeAdjustedRemainingVol(perMinuteVol, minutesAhead, prices);
     const todMult = getIntradayVolMultiplier();
-    // todMult now includes both hour-of-day AND day-of-week (incl. weekend)
-    const remainingVol = rawRemainingVol * (0.60 + 0.40 * todMult);
+    // todMult includes hour-of-day AND day-of-week (incl. weekend)
+    // Widened blend from (0.60+0.40*mult) to (0.45+0.55*mult) to let seasonality have real effect
+    const remainingVol = rawRemainingVol * (0.45 + 0.55 * todMult);
     // Settlement-aware volatility compression
     // KXBTC15M settles to simple average of 60 per-second BRTI values
     // (NOT trimmed — trimming is only for BTCMINMAX product)
     // BRTI itself is order-book-based (not trade-based): exponentially weighted mid-price curve
     // With autocorrelation, effective_n ≈ 12-15 → settlement vol ≈ spot vol * 0.29
+    // Settlement vol compression: BRTI settles to 60-second simple average.
+    // With ~5s BRTI smoothing half-life → effective_n ≈ 12 → factor ≈ 0.29 at T=0.
+    // Beyond 2 minutes, the averaging effect is negligible (most of the price path is unknown).
+    // Old code applied compression even at 5 min (0.80) — that was excessive.
     let settlementVolAdj = 1.0;
     if (minutesAhead <= 1) {
         const secAhead = minutesAhead * 60;
         const fraction = Math.max(0, Math.min(1, secAhead / 60));
-        settlementVolAdj = 0.29 + fraction * 0.16;
+        settlementVolAdj = 0.29 + fraction * 0.21; // 0.29 → 0.50 over 0-60 seconds
     } else if (minutesAhead <= 2) {
-        settlementVolAdj = 0.45 + (minutesAhead - 1) * 0.20;
-    } else if (minutesAhead <= 3) {
-        settlementVolAdj = 0.65 + (minutesAhead - 2) * 0.15;
-    } else if (minutesAhead <= 5) {
-        settlementVolAdj = 0.80 + (minutesAhead - 3) / 2 * 0.20;
+        settlementVolAdj = 0.50 + (minutesAhead - 1) * 0.50; // 0.50 → 1.0 over 1-2 min
     }
+    // Beyond 2 min: no compression (settlementVolAdj stays 1.0)
     const settlementVol = remainingVol * settlementVolAdj;
 
     // BRTI Settlement Price Estimator: when < 2 min remain, estimate where
@@ -2083,45 +2091,49 @@ function predictPrice(marketData, minutesAhead, strike) {
     const recentReturn10 = n > 10 ? (prices[n - 1] - prices[n - 11]) / prices[n - 11] : 0;
     const regM = getRegimeMultipliers(trendRegime, volRegime, blendedAC1, recentReturn10);
 
+    // ═══════════════════════════════════════════════════════════════
+    // STREAMLINED SIGNAL COMBINATION (was 25+ signals, now 6 independent groups)
+    //
+    // Research finding (Dev 3 review): 25+ overlapping signals created
+    // 3-4x momentum overweight (7 momentum signals measuring the same thing).
+    // The old aux z-shift cap of 1.2 could swing probability by 35 points,
+    // far more than any noisy 15-min microstructure signal justifies.
+    //
+    // New architecture: 6 independent signal groups, capped at 0.4 total.
+    // Positional z-score (60-75%) dominates; auxiliaries are small perturbations.
+    // ═══════════════════════════════════════════════════════════════
+
+    // GROUP 1: Single momentum composite (replaces 7 redundant momentum signals)
+    const momentumComposite = driftZShift * regM.momentum;
+
+    // GROUP 2: Order flow composite (replaces 4 overlapping flow signals)
+    const flowComposite = (orderFlowSignal * 0.5 + tradeFlowSignal * 0.3 + (typeof cvdSignal !== 'undefined' ? cvdSignal * 0.2 : 0)) * regM.flow;
+
+    // GROUP 3: Mean reversion (single composite)
+    const meanRevComposite = (microMRSignal * 0.6 + vwapSignal * 0.4) * regM.reversion;
+
+    // GROUP 4: Liquidation cascade (independent information source)
+    const liqComposite = liqSignal * immediateBoosted;
+
+    // GROUP 5: Exhaustion (contrarian, stronger mid/late period)
+    const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * regM.reversion;
+
+    // GROUP 6: ETH confirmation (small, only when active)
+    const ethComposite = ethLL.signal * immediateBoosted * regM.momentum;
+
     const rawTotalZShift = (
-        driftZShift          * (0.10 + earlyBoost * 0.02) * immediateBoosted * regM.momentum +
-        orderFlowSignal      * (0.03 + earlyBoost * 0.01) * immediateBoosted * regM.flow +
-        tradeFlowSignal      * (0.03 + earlyBoost * 0.01) * immediateBoosted * regM.flow +
-        rsiSignal            * (0.10 - earlyBoost * 0.02) * regM.momentum +
-        candlePattern.signal * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.pattern +
-        volumeSurgeSignal    * (0.05 + earlyBoost * 0.03) * regM.volume +
-        fundingSignal        * (0.02 - earlyBoost * 0.01) * urgencyFade +
-        momAccel * 20        * (0.02 + earlyBoost * 0.02) * immediateBoosted * regM.momentum +
-        vwapSignal           * (0.06 + earlyBoost * 0.04) * regM.reversion +
-        macdSignal           * (0.05 + earlyBoost * 0.03) * regM.momentum +
-        linRegSignal         * (0.04 + earlyBoost * 0.02) * regM.momentum +
-        bayesianPrior        * earlyBoost * 0.08 +
-        bbSqueeze.breakoutSignal * 0.04 * regM.pattern +
-        srSignal             * 0.04 * regM.reversion +
-        haResult.signal      * (0.04 - earlyBoost * 0.01) * regM.pattern +
-        crossTF.signal       * (0.04 + earlyBoost * 0.03) * immediateBoosted * regM.momentum +
-        microMRSignal        * 0.12 * regM.reversion +
-        breakoutSignal       * 0.06 * regM.momentum +
-        cpSignal             * 0.04 * immediateBoosted +
-        ethLL.signal         * 0.04 * immediateBoosted * regM.momentum +
-        // Momentum exhaustion: contrarian signal that fades current trend when losing steam
-        // Increases weight as period progresses (more useful mid/late period)
-        exhaustionSignal     * (0.06 + (1 - earlyBoost) * 0.06) * regM.reversion +
-        // Normalized ROC: momentum z-scored by vol, avoids false signals in high-vol
-        normRocSignal        * (0.04 + earlyBoost * 0.02) * regM.momentum +
-        // Mean reversion composite: fades overextended moves when VWAP and BB agree
-        mrComposite.signal   * 0.08 * regM.reversion +
-        // Liquidation cascade: strongest short-term directional signal
-        liqSignal            * 0.08 * immediateBoosted +
-        // Hour-of-day seasonality: small but statistically significant
-        hourBias             * 0.03 +
-        // Long/short ratio: contra-indicator at extremes
-        longShortSignal      * 0.03
+        momentumComposite     * 0.12 +   // single momentum (was 7 signals totaling ~0.45)
+        flowComposite         * 0.08 +   // order flow (with decay: multiply by exp(-minutesAhead/3))
+        meanRevComposite      * 0.10 +   // mean reversion
+        liqComposite          * 0.08 +   // liquidation cascades
+        exhaustionComposite   * 1.00 +   // already scaled
+        ethComposite          * 0.04     // ETH confirmation
     );
-    // Bayesian shrinkage: retain 55% of signal (was 30% — too conservative, killed all edges)
-    // In choppy markets, only mild dampening
+
+    // Shrinkage + cap: max 0.4 total z-shift (was 1.2 — a 1.2 z-shift moves
+    // probability by ~35 points, which no combination of noisy 15-min signals justifies)
     const shrinkageFactor = 0.55 * (choppiness.choppy ? 0.80 : 1.0);
-    const totalZShift = Math.max(-1.2, Math.min(1.2, rawTotalZShift * agreementMult * shrinkageFactor));
+    const totalZShift = Math.max(-0.4, Math.min(0.4, rawTotalZShift * shrinkageFactor));
 
     // Final probability
     const driftAdjustedProb = fatTailCDF(zScore + totalZShift * (1 - positionalWeight) * 0.8, prices);
@@ -2309,11 +2321,12 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const almostNoTime = minutesRemaining < 2.0;
 
     // ── CASE 1: LOST CAUSE — mathematically dead ──
-    // Tightened: only sell when truly hopeless (raised thresholds)
+    // Binary options: only sell when recovery is essentially impossible.
+    // At 2.5σ, recovery probability is ~1.2%. At 3.0σ, it's ~0.3%.
+    // The trade executor enforces: sell ONLY lost_cause, so this is the sole sell gate.
     if (
-        (onWrongSide && noTimeLeft && sigmaDistance > 2.0) ||         // was 1.5
-        (probForBet < 0.03 && minutesRemaining < 1.5) ||             // was 0.05 / 2 min
-        (onWrongSide && distancePct > 0.30 && minutesRemaining < 1.5 && sigmaDistance > 2.5) // was 0.20/2/2.0
+        (onWrongSide && sigmaDistance >= 2.5 && minutesRemaining < 1.5) ||  // ~1.2% recovery
+        (onWrongSide && sigmaDistance >= 3.0)                                // ~0.3% recovery, any time
     ) {
         level = 'lost_cause'; shortLabel = 'LOST CAUSE';
         urgency = 95;

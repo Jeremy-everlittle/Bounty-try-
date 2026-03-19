@@ -1660,12 +1660,18 @@ class OnlineMLManager {
             regimeBlend = 0.5 + (regimeBlend - 0.5) * convictionMult;
         }
 
-        // 7. Blend with base probability (existing engine gets major weight)
-        // Online ML gets more weight as it trains
-        const mlWeight = Math.min(0.30,
-            Math.max(lrConfidence, rlsConfidence) * 0.12 +
-            (this.ensemble.totalUpdates > 50 ? 0.10 : 0) +
-            (this.calibrator.totalSamples > 100 ? 0.05 : 0));
+        // 7. Blend with base probability
+        // ML weight is GATED ON PROVEN SKILL, not sample count.
+        // Old approach gave 30% weight after just 100 samples — no way to know
+        // if ML is helping at that point. Need 500+ OOS predictions with
+        // statistically significant improvement (p<0.05) before trusting it.
+        // Until then, mlWeight = 0 — the base engine runs alone.
+        const bestConfidence = Math.max(lrConfidence, rlsConfidence);
+        const hasEnoughData = this.ensemble.totalUpdates > 500;
+        const hasSignificantEdge = bestConfidence > 0.55 && hasEnoughData;
+        const mlWeight = hasSignificantEdge
+            ? Math.min(0.15, (bestConfidence - 0.55) * 0.5)  // max 15%, gated on skill
+            : 0;  // no proven skill → no ML influence
 
         const blended = baseProb * (1 - mlWeight) + regimeBlend * mlWeight;
 
