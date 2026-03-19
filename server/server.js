@@ -378,6 +378,7 @@ const state = {
     brtiPrice: null,
     brtiSources: '',
     kalshiStrike: null,
+    _lastStrikePeriodKey: null,  // tracks which period the strike was locked for
     kalshiCloseTime: null,
     kalshiTicker: null,
     kalshiMarket: null,
@@ -458,14 +459,28 @@ async function fetchAllData() {
 
         if (kalshi.status === 'fulfilled' && kalshi.value) {
             const k = kalshi.value;
-            state.kalshiStrike = k.strike;
             state.kalshiCloseTime = k.closeTime;
             state.kalshiTicker = k.ticker;
             state.kalshiMarket = k.market;
 
-            // Fallback: use BRTI as strike if market exists but strike missing
-            if (!k.strike && k.closeTime && state.brtiPrice) {
-                state.kalshiStrike = state.brtiPrice;
+            // Only update strike on period transitions or if not yet set.
+            // The strike must be LOCKED for the entire 15-minute period —
+            // overwriting it every tick was causing the strike to track the
+            // current price, making every prediction ~50% (zero edge).
+            const currentPeriodKey = getPeriodKey();
+            const isNewPeriod = currentPeriodKey !== state._lastStrikePeriodKey;
+
+            if (isNewPeriod || state.kalshiStrike === null) {
+                if (k.strike) {
+                    state.kalshiStrike = k.strike;
+                    state._lastStrikePeriodKey = currentPeriodKey;
+                    console.log(`[strike] Locked strike=$${k.strike.toFixed(2)} for period ${currentPeriodKey} (from Kalshi API)`);
+                } else if (k.closeTime && state.brtiPrice) {
+                    // Fallback: use BRTI as strike ONLY at period start
+                    state.kalshiStrike = state.brtiPrice;
+                    state._lastStrikePeriodKey = currentPeriodKey;
+                    console.log(`[strike] Locked strike=$${state.brtiPrice.toFixed(2)} for period ${currentPeriodKey} (BRTI fallback — Kalshi returned no strike)`);
+                }
             }
         }
 
