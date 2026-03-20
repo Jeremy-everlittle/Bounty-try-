@@ -1778,9 +1778,15 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     const marketEntryEstimate = marketData.orderBook
         ? estimateMarketEntry(probForBet, prediction.predictedPrice >= strike, marketData.orderBook)
         : null;
+    // Fallback entry estimate when no Kalshi orderbook is available.
+    // Using probForBet as entry price is WRONG: it assumes paying fair value,
+    // which means zero edge minus fees = Kelly always negative for prob < ~60%.
+    // In practice on Kalshi, contracts trade 5-15¢ cheaper than fair value due to
+    // wide spreads in 15-min BTC markets. Use a conservative 7¢ discount.
+    // The trade executor's getAggressivePrice() handles actual orderbook pricing.
     const estimatedEntryPrice = marketEntryEstimate
         ? Math.max(0.05, Math.min(0.95, marketEntryEstimate))
-        : Math.max(0.05, Math.min(0.70, probForBet)); // cap at 70¢ if no orderbook
+        : Math.max(0.05, Math.min(0.65, probForBet - 0.07)); // discount from prob to reflect typical Kalshi spread
     const winProfit = (1.0 - fee) - estimatedEntryPrice - fee;
     const lossAmount = estimatedEntryPrice + fee;
     const kellyRaw = winProfit > 0
