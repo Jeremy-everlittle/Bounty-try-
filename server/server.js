@@ -11,6 +11,7 @@ const engine = require('./prediction-engine');
 const decisionLog = require('./decision-logger');
 const tradeExecutor = require('./trade-executor');
 const kalshiAuth = require('./kalshi-auth');
+const db = require('./db');
 
 // Build version — updated each commit (Railway has no .git dir)
 const BUILD_VERSION = {
@@ -509,6 +510,236 @@ function getSecondsUntilTarget(target) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// SNAPSHOT CAPTURE — Save all data for algorithm improvement
+// ═══════════════════════════════════════════════════════════════
+
+function capturePredictionSnapshot(snapshotType, periodKey, ticker, strike, currentPrice, prediction, betQuality, minutesAhead, marketData) {
+    const bq = betQuality || prediction._betQuality;
+    db.savePredictionSnapshot({
+        periodKey,
+        snapshotType,
+        ticker,
+        strike,
+        currentPrice,
+        predictedPrice: prediction.predictedPrice,
+        probability: prediction.probability,
+        rawProbability: prediction._rawProbability || prediction.probability,
+        confidence: prediction.confidence,
+        direction: prediction.predictedPrice >= strike ? 'up' : 'down',
+        minutesAhead,
+        shouldBet: bq ? bq.shouldBet : null,
+        betQuality: bq ? bq.quality : null,
+        betEdge: bq ? bq.edge : null,
+        kellyFraction: bq ? bq.kellyFraction : null,
+        betSize: bq ? bq.betSize : null,
+        betSizeReason: bq ? bq.betSizeReason : null,
+        skipReason: bq && !bq.shouldBet ? bq.reason : null,
+        signals: prediction.signals || null,
+        regimeInfo: prediction._regimeInfo || null,
+        ensembleConfidence: prediction.ensembleConfidence || null,
+        exhaustionScore: prediction._exhaustion ? prediction._exhaustion.exhaustion : null,
+        exhaustionType: prediction._exhaustion ? prediction._exhaustion.type : null,
+        choppinessAdx: prediction._choppiness ? prediction._choppiness.adx : null,
+        isChoppy: prediction._choppiness ? prediction._choppiness.choppy : null,
+        sessionRisk: {
+            consecutiveLosses: engine.sessionRisk.consecutiveLosses,
+            consecutiveWins: engine.sessionRisk.consecutiveWins,
+            currentDrawdown: engine.sessionRisk.currentDrawdown,
+            coolingOff: engine.sessionRisk.coolingOff,
+            edgeDecayAlert: engine.sessionRisk.edgeDecayAlert,
+            riskMultiplier: engine.getSessionRiskMultiplier(),
+        },
+        marketData: {
+            fundingRate: marketData.fundingRate,
+            fearGreed: marketData.fearGreed,
+            longShortRatio: marketData.longShortRatio,
+            macroEvent: marketData.macroEvent,
+            ethPrice: marketData.ethPrice || (marketData.ethPriceHistory ? marketData.ethPriceHistory[marketData.ethPriceHistory.length - 1] : null),
+            openInterest: marketData.openInterest || (marketData.openInterestHistory ? marketData.openInterestHistory[marketData.openInterestHistory.length - 1] : null),
+            liquidations: marketData.liquidations,
+        },
+    }).catch(e => console.error('[snapshot] Prediction save error:', e.message));
+}
+
+function captureMarketDataSnapshot(periodKey, state, marketData) {
+    // Extract structured market conditions
+    const fr = marketData.fundingRate;
+    const fundingRate = typeof fr === 'number' ? fr : (fr ? fr.settledRate || 0 : null);
+    const fundingPremium = typeof fr === 'object' ? (fr.premium || 0) : null;
+
+    const history = marketData.history || state.history || [];
+    const prices = history.map(h => h.price);
+    const n = prices.length;
+
+    // Compute price stats
+    const recentPrices = prices.slice(-Math.min(30, n));
+    const high30 = recentPrices.length > 0 ? Math.max(...recentPrices) : null;
+    const low30 = recentPrices.length > 0 ? Math.min(...recentPrices) : null;
+    const rangePct = low30 > 0 ? ((high30 - low30) / low30) * 100 : null;
+
+    // Volatility: std dev of returns over last 20 ticks
+    const window = Math.min(20, n - 1);
+    let volatility = null;
+    if (window > 1) {
+        const returns = [];
+        for (let i = n - window; i < n; i++) {
+            if (prices[i - 1] > 0) returns.push((prices[i] - prices[i - 1]) / prices[i - 1]);
+        }
+        if (returns.length > 1) {
+            const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+            const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / (returns.length - 1);
+            volatility = Math.sqrt(variance);
+        }
+    }
+
+    // Binance orderbook imbalance
+    let binanceBidDepth = null, binanceAskDepth = null, binanceObImbalance = null;
+    if (marketData.orderBook) {
+        const ob = marketData.orderBook;
+        binanceBidDepth = ob.bids ? ob.bids.slice(0, 5).reduce((s, b) => s + (parseFloat(b[1]) || 0), 0) : 0;
+        binanceAskDepth = ob.asks ? ob.asks.slice(0, 5).reduce((s, a) => s + (parseFloat(a[1]) || 0), 0) : 0;
+        const total = binanceBidDepth + binanceAskDepth;
+        binanceObImbalance = total > 0 ? (binanceBidDepth - binanceAskDepth) / total : 0;
+    }
+
+    db.saveMarketDataSnapshot({
+        periodKey,
+        btcPrice: state.brtiPrice,
+        ethPrice: state.ethPrice,
+        fundingRate,
+        fundingPremium,
+        openInterest: state.openInterest,
+        longShortRatio: marketData.longShortRatio ? marketData.longShortRatio.ratio : null,
+        liquidationVolume: marketData.liquidations ? marketData.liquidations.totalLiqVol : null,
+        liquidationImbalance: marketData.liquidations ? marketData.liquidations.imbalance : null,
+        fearGreedValue: marketData.fearGreed ? marketData.fearGreed.value : null,
+        fearGreedLabel: marketData.fearGreed ? marketData.fearGreed.classification : null,
+        isMacroDay: marketData.macroEvent ? marketData.macroEvent.isMacroDay : null,
+        isNearAnnouncement: marketData.macroEvent ? marketData.macroEvent.isNearAnnouncement : null,
+        macroSizingMultiplier: marketData.macroEvent ? marketData.macroEvent.sizingMultiplier : null,
+        binanceBidDepth,
+        binanceAskDepth,
+        binanceObImbalance,
+        priceHigh30: high30,
+        priceLow30: low30,
+        priceRangePct: rangePct,
+        volatility20: volatility,
+        ethPriceHistory: state.ethPriceHistory || null,
+        oiHistory: state.openInterestHistory || null,
+    }).catch(e => console.error('[snapshot] Market data save error:', e.message));
+}
+
+let _lastPriceSnapTime = 0;
+function capturePriceSnapshot(periodKey, price, strike, minutesRemaining, history) {
+    const now = Date.now();
+    if (now - _lastPriceSnapTime < 10000) return; // max one per 10s
+    _lastPriceSnapTime = now;
+
+    const prices = history ? history.map(h => h.price) : [];
+    const n = prices.length;
+
+    // 1-min and 5-min price change
+    const chg1m = n > 6 ? prices[n - 1] - prices[n - 7] : null; // ~6 ticks = 1 min at 10s intervals
+    const chg5m = n > 30 ? prices[n - 1] - prices[n - 31] : null;
+
+    // Quick volatility
+    const window = Math.min(20, n - 1);
+    let vol = null;
+    if (window > 1) {
+        const returns = [];
+        for (let i = n - window; i < n; i++) {
+            if (prices[i - 1] > 0) returns.push((prices[i] - prices[i - 1]) / prices[i - 1]);
+        }
+        if (returns.length > 1) {
+            const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+            const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / (returns.length - 1);
+            vol = Math.sqrt(variance);
+        }
+    }
+
+    // Volume ratio
+    const volumes = history ? history.map(h => h.volume || 0).filter(v => v > 0) : [];
+    const avgVol = volumes.length > 0 ? volumes.reduce((a, b) => a + b, 0) / volumes.length : 0;
+    const recentVol = volumes.length > 2 ? (volumes[volumes.length - 1] + volumes[volumes.length - 2]) / 2 : 0;
+    const volRatio = avgVol > 0 ? recentVol / avgVol : null;
+
+    db.savePriceSnapshot({
+        periodKey,
+        price,
+        strike,
+        distanceFromStrike: price && strike ? price - strike : null,
+        minutesRemaining,
+        priceChange1m: chg1m,
+        priceChange5m: chg5m,
+        volatility: vol,
+        volumeRatio: volRatio,
+    }).catch(e => console.error('[snapshot] Price save error:', e.message));
+}
+
+let _lastPeriodicObTime = 0;
+async function capturePeriodicOrderbook(ticker, periodKey, minutesRemaining, btcPrice, strike) {
+    const now = Date.now();
+    if (now - _lastPeriodicObTime < 30000) return; // max one per 30s
+    _lastPeriodicObTime = now;
+
+    try {
+        const kalshiTrading = require('./kalshi-trading');
+        const resp = await kalshiTrading.getOrderbook(ticker);
+        const book = resp.orderbook_fp || resp.orderbook || resp;
+        const yesBids = book.yes_dollars || book.yes || [];
+        const noBids = book.no_dollars || book.no || [];
+
+        // Parse bids
+        const parseBids = (bids) => {
+            if (!bids || bids.length === 0) return { best: null, depth: 0, entries: [] };
+            let best = 0, depth = 0;
+            const entries = [];
+            for (const entry of bids) {
+                const price = parseFloat(entry[0]);
+                const size = parseFloat(entry[1]);
+                if (price > best) best = price;
+                depth += size;
+                entries.push([price, size]);
+            }
+            return { best, depth, entries };
+        };
+
+        const yes = parseBids(yesBids);
+        const no = parseBids(noBids);
+        const bestYesAsk = no.best ? Math.round((1 - no.best) * 100) : null;
+        const bestNoAsk = yes.best ? Math.round((1 - yes.best) * 100) : null;
+        const bestYesBid = yes.best ? Math.round(yes.best * 100) : null;
+        const bestNoBid = no.best ? Math.round(no.best * 100) : null;
+        const spreadCents = (bestYesBid != null && bestYesAsk != null) ? bestYesAsk - bestYesBid : null;
+
+        db.saveOrderbookSnapshot({
+            periodKey,
+            ticker,
+            reason: 'periodic',
+            minutesRemaining,
+            yesBids: yes.entries,
+            noBids: no.entries,
+            bestYesBid,
+            bestNoBid,
+            bestYesAsk,
+            bestNoAsk,
+            yesDepth: yes.depth,
+            noDepth: no.depth,
+            spreadCents,
+            btcPrice,
+            strike,
+        }).catch(e => console.error('[snapshot] Periodic orderbook save error:', e.message));
+    } catch (e) {
+        // Orderbook fetch failed — don't spam logs
+        if (!capturePeriodicOrderbook._errCount) capturePeriodicOrderbook._errCount = 0;
+        capturePeriodicOrderbook._errCount++;
+        if (capturePeriodicOrderbook._errCount % 10 === 1) {
+            console.error('[snapshot] Periodic orderbook fetch error:', e.message);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // MAIN FETCH LOOP — Runs every 10 seconds
 // ═══════════════════════════════════════════════════════════════
 
@@ -655,6 +886,14 @@ async function fetchAllData() {
                             strikePrice: lastGraded.startPrice,
                             settlementPrice: lastGraded.actualPrice,
                         });
+
+                        // ── DB: backfill prediction outcome ──
+                        db.updatePredictionOutcome(lastGraded.periodKey, {
+                            actualPrice: lastGraded.actualPrice,
+                            actualDirection: lastGraded.actualDirection,
+                            wasCorrect: lastGraded.correct,
+                            pnlCents: null, // filled by trade-executor settlement
+                        }).catch(e => console.error('[db] Failed to backfill prediction outcome:', e.message));
                     } else {
                         console.warn(`[server] No graded prediction found for period ${currentPeriod.periodKey} — forcing onPeriodEnd with price-based grading`);
                         // Fallback: grade based on current price vs strike
@@ -712,6 +951,10 @@ async function fetchAllData() {
                     decisionLog.logNewPeriod({ periodKey, strike: state.kalshiStrike, currentPrice: state.brtiPrice, minutesAhead, kalshiTicker: state.kalshiTicker });
                     decisionLog.logPrediction({ periodKey, strike: state.kalshiStrike, currentPrice: state.brtiPrice, prediction, betQuality: bq, minutesAhead, marketData });
 
+                    // ── DB: snapshot prediction + market data for algorithm improvement ──
+                    capturePredictionSnapshot('new_period', periodKey, state.kalshiTicker, state.kalshiStrike, state.brtiPrice, prediction, bq, minutesAhead, marketData);
+                    captureMarketDataSnapshot(periodKey, state, marketData);
+
                     // ── Auto-trade: evaluate entry ──
                     tradeExecutor.onNewPrediction(prediction, state.kalshiTicker, state.kalshiStrike, periodKey).catch(e => console.error('[trade-executor] Entry error:', e.message));
                 } else {
@@ -758,6 +1001,10 @@ async function fetchAllData() {
                 // ── Decision log: late prediction ──
                 decisionLog.logPrediction({ periodKey, strike: state.kalshiStrike, currentPrice: state.brtiPrice, prediction, betQuality: bq, minutesAhead, marketData });
 
+                // ── DB: snapshot late prediction + market data ──
+                capturePredictionSnapshot('new_period', periodKey, state.kalshiTicker, state.kalshiStrike, state.brtiPrice, prediction, bq, minutesAhead, marketData);
+                captureMarketDataSnapshot(periodKey, state, marketData);
+
                 // ── Auto-trade: evaluate late entry ──
                 tradeExecutor.onNewPrediction(prediction, state.kalshiTicker, state.kalshiStrike, periodKey).catch(e => console.error('[trade-executor] Late entry error:', e.message));
             } else if (currentPeriod.originalPrediction && state.kalshiStrike) {
@@ -794,6 +1041,14 @@ async function fetchAllData() {
                 }
                 // Log price ticks (sampled every 30s)
                 decisionLog.logPriceTick({ currentPrice: state.brtiPrice, strike: state.kalshiStrike, periodKey, minutesAhead, history: state.history });
+
+                // ── DB: price snapshot every tick ──
+                capturePriceSnapshot(periodKey, state.brtiPrice, state.kalshiStrike, minutesAhead, state.history);
+
+                // ── DB: periodic Kalshi orderbook snapshot (throttled to every 30s) ──
+                if (state.kalshiTicker) {
+                    capturePeriodicOrderbook(state.kalshiTicker, periodKey, minutesAhead, state.brtiPrice, state.kalshiStrike);
+                }
 
                 // ── Auto-trade: check current status to avoid redundant calls ──
                 const tradeStatus = tradeExecutor.getStatus();
@@ -1106,6 +1361,63 @@ app.get('/api/trading/analytics', async (req, res) => {
     } catch (e) {
         console.error('[api] Analytics error:', e.message);
         res.status(500).json({ error: 'Failed to load analytics' });
+    }
+});
+
+// ── Snapshot / Cycle Analysis API Endpoints ──────────────────
+
+app.get('/api/snapshots/predictions', async (req, res) => {
+    try {
+        const options = {};
+        if (req.query.periodKey) options.periodKey = req.query.periodKey;
+        if (req.query.type) options.snapshotType = req.query.type;
+        if (req.query.correct !== undefined) options.wasCorrect = req.query.correct === 'true';
+        if (req.query.since) options.since = req.query.since;
+        options.limit = parseInt(req.query.limit || '100', 10);
+        const rows = await db.getPredictionSnapshots(options);
+        res.json({ count: rows.length, snapshots: rows });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/snapshots/prices/:periodKey', async (req, res) => {
+    try {
+        const rows = await db.getPriceHistory(req.params.periodKey);
+        res.json({ count: rows.length, prices: rows });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/snapshots/orderbook/:periodKey', async (req, res) => {
+    try {
+        const rows = await db.getOrderbookHistory(req.params.periodKey);
+        res.json({ count: rows.length, orderbooks: rows });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/snapshots/market-data', async (req, res) => {
+    try {
+        const options = {};
+        if (req.query.periodKey) options.periodKey = req.query.periodKey;
+        options.limit = parseInt(req.query.limit || '100', 10);
+        const rows = await db.getMarketDataHistory(options);
+        res.json({ count: rows.length, marketData: rows });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/snapshots/cycle/:periodKey', async (req, res) => {
+    try {
+        const analysis = await db.getCycleAnalysis(req.params.periodKey);
+        if (!analysis) return res.status(404).json({ error: 'Period not found' });
+        res.json(analysis);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 });
 

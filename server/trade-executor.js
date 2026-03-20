@@ -13,6 +13,63 @@ const decisionLog = require('./decision-logger');
 const { getEnvironment } = require('./kalshi-auth');
 const db = require('./db');
 
+// ── Kalshi orderbook snapshot helper ──
+let _lastObSnapTime = 0;
+function captureKalshiOrderbook(ticker, reason, minutesRemaining, yesBids, noBids) {
+    // For 'periodic' reason, throttle to once per 30s. For trade events, always capture.
+    const now = Date.now();
+    if (reason === 'periodic' && now - _lastObSnapTime < 30000) return;
+    _lastObSnapTime = now;
+
+    // Parse bids to find best prices and depth
+    const parseBids = (bids) => {
+        if (!bids || bids.length === 0) return { best: null, depth: 0, entries: [] };
+        let best = 0;
+        let depth = 0;
+        const entries = [];
+        for (const entry of bids) {
+            const price = parseFloat(entry[0]);
+            const size = parseFloat(entry[1]);
+            if (price > best) best = price;
+            depth += size;
+            entries.push([price, size]);
+        }
+        return { best, depth, entries };
+    };
+
+    const yes = parseBids(yesBids);
+    const no = parseBids(noBids);
+
+    // Derive asks: YES ask = 1 - best NO bid, NO ask = 1 - best YES bid
+    const bestYesAsk = no.best ? Math.round((1 - no.best) * 100) : null;
+    const bestNoAsk = yes.best ? Math.round((1 - yes.best) * 100) : null;
+    const bestYesBid = yes.best ? Math.round(yes.best * 100) : null;
+    const bestNoBid = no.best ? Math.round(no.best * 100) : null;
+
+    // Spread in cents
+    const spreadCents = (bestYesBid != null && bestYesAsk != null) ? bestYesAsk - bestYesBid : null;
+
+    const periodKey = currentPosition ? currentPosition.periodKey : null;
+
+    db.saveOrderbookSnapshot({
+        periodKey: periodKey || 'unknown',
+        ticker,
+        reason,
+        minutesRemaining,
+        yesBids: yes.entries,
+        noBids: no.entries,
+        bestYesBid,
+        bestNoBid,
+        bestYesAsk,
+        bestNoAsk,
+        yesDepth: yes.depth,
+        noDepth: no.depth,
+        spreadCents,
+        btcPrice: null, // not readily available here
+        strike: null,
+    }).catch(e => console.error('[snapshot] Orderbook save error:', e.message));
+}
+
 // ── Configuration (from env, with safe defaults) ──
 const config = {
     paperMode: (process.env.PAPER_MODE || 'true').toLowerCase() === 'true',
@@ -334,9 +391,12 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
         // Kalshi only shows BIDS. To find the ask for our side:
         // - If we're buying YES: the ask comes from NO bids (ask = 100 - NO bid price)
         // - If we're buying NO: the ask comes from YES bids (ask = 100 - YES bid price)
-        const oppositeBids = side === 'yes'
-            ? (book.no_dollars || book.no || [])
-            : (book.yes_dollars || book.yes || []);
+        const yesBids = book.yes_dollars || book.yes || [];
+        const noBids = book.no_dollars || book.no || [];
+        const oppositeBids = side === 'yes' ? noBids : yesBids;
+
+        // ── DB: snapshot the full Kalshi orderbook ──
+        captureKalshiOrderbook(ticker, 'trade_entry', minutesRemaining, yesBids, noBids);
 
         if (oppositeBids.length > 0) {
             const askPrices = oppositeBids.map(entry => {
@@ -828,6 +888,14 @@ function onPeriodEnd(gradeResult) {
         predProbability: gradeResult?.probability,
         actualDirection: gradeResult?.actualDirection,
     });
+
+    // ── DB: update prediction snapshot with P&L from trade ──
+    db.updatePredictionOutcome(currentPosition.periodKey, {
+        actualPrice: gradeResult?.settlementPrice,
+        actualDirection: gradeResult?.actualDirection,
+        wasCorrect: positionWon,
+        pnlCents: pnl,
+    }).catch(e => console.error('[db] Failed to update prediction P&L:', e.message));
 
     currentPosition = null;
     soldThisPeriod = null; // reset for new period
