@@ -421,12 +421,13 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
             console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c — buying at ${price}c (theory=${theoreticalPrice}c, max=${maxPrice}c)`);
             return Math.max(5, price);
         }
-        console.log(`[trade-executor] Orderbook: no opposing bids — posting at maxPrice ${maxPrice}c`);
+        console.log(`[trade-executor] Orderbook: no opposing bids — skipping order, will retry when liquidity appears`);
+        return null; // Signal: no liquidity, don't place order
     } catch (e) {
         console.log(`[trade-executor] Orderbook fetch failed: ${e.message} — posting at maxPrice`);
     }
 
-    // No orderbook data: post at maxPrice for best fill chance
+    // Orderbook fetch failed (network error etc): post at maxPrice as fallback
     console.log(`[trade-executor] Using limit price: ${maxPrice}c (theory=${theoreticalPrice}c)`);
     return Math.max(5, maxPrice);
 }
@@ -560,6 +561,11 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const probForBet = isUp ? prediction.probability : (1 - prediction.probability);
     const theoreticalPrice = Math.round(probForBet * 100);
     const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, 15); // new prediction = ~15 min remaining
+    if (limitPrice === null) {
+        console.log(`[trade-executor] No liquidity on orderbook — skipping order, will retry next cycle`);
+        setThought('waiting', 'No liquidity on orderbook — waiting for orders to appear');
+        return; // Don't place order, don't count as fill failure — next cycle will check again
+    }
 
     const tradeInfo = {
         ticker: kalshiTicker,
@@ -1142,6 +1148,10 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     // Use orderbook to find actual best price — may be much cheaper than our max
     const limitPrice = config.paperMode ? maxLockPrice
         : await getAggressivePrice(kalshiTicker, lockSide, maxLockPrice, minutesRemaining);
+    if (limitPrice === null) {
+        console.log(`[trade-executor] Late-lock: no liquidity on orderbook — skipping, will retry next cycle`);
+        return;
+    }
     const profitPerContract = 100 - limitPrice;
 
     // Skip if profit margin is too thin (< 3¢ per contract after fees)
@@ -1703,6 +1713,11 @@ async function pressBet(addContracts) {
         const priceEscalation = (attempt - 1) * PRICE_BUMP;
         // Bump theoretical input, not the result — getAggressivePrice caps at orderbook ask
         const limitPrice = await getAggressivePrice(ticker, side, theoreticalPrice + priceEscalation, minutesRemaining);
+        if (limitPrice === null) {
+            console.log(`[trade-executor] PRESS BET attempt ${attempt}: no liquidity — will retry`);
+            await new Promise(r => setTimeout(r, 2000)); // brief wait before next attempt
+            continue;
+        }
         const cappedContracts = await capContractsByBalance(contractsToAdd, limitPrice);
         if (cappedContracts <= 0) {
             return { ok: false, reason: 'Insufficient balance to press bet' };
@@ -1842,6 +1857,11 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
         const priceEscalation = (attempt - 1) * PRICE_BUMP;
         // Bump theoretical input, not the result — getAggressivePrice caps at orderbook ask
         const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice + priceEscalation, minutesRemaining);
+        if (limitPrice === null) {
+            console.log(`[trade-executor] FORCE BET attempt ${attempt}: no liquidity — will retry`);
+            await new Promise(r => setTimeout(r, 2000)); // brief wait before next attempt
+            continue;
+        }
         const cappedContracts = await capContractsByBalance(contracts, limitPrice);
         if (cappedContracts <= 0) {
             return { ok: false, reason: 'Insufficient balance for force bet' };
