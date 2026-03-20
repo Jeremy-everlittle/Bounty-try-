@@ -1,34 +1,45 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════
-// SQLITE DATABASE — Persistent storage for trade history & stats
-// Survives redeploys when backed by a Railway volume
+// POSTGRESQL DATABASE — Persistent storage for trade history & stats
+// Uses DATABASE_URL from Railway
 // ═══════════════════════════════════════════════════════════════
 
-const Database = require('better-sqlite3');
-const path = require('path');
-const fs = require('fs');
+const { Pool } = require('pg');
 
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const DB_PATH = path.join(DATA_DIR, 'trading.db');
+let pool = null;
+let ready = false;
 
-let db = null;
+async function init() {
+    if (pool) return pool;
 
-function init() {
-    if (db) return db;
-
-    if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+        console.error('[db] DATABASE_URL not set — database disabled');
+        return null;
     }
 
-    db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('busy_timeout = 5000');
+    pool = new Pool({
+        connectionString,
+        ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
+        max: 10,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
+    });
+
+    // Test connection
+    try {
+        await pool.query('SELECT 1');
+    } catch (e) {
+        console.error('[db] Failed to connect to PostgreSQL:', e.message);
+        pool = null;
+        return null;
+    }
 
     // Create tables
-    db.exec(`
+    await pool.query(`
         CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             type TEXT NOT NULL,
             time TEXT NOT NULL,
             ticker TEXT,
@@ -44,7 +55,7 @@ function init() {
             order_id TEXT,
             filled_contracts INTEGER,
             data TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
+            created_at TIMESTAMPTZ DEFAULT NOW()
         );
 
         CREATE INDEX IF NOT EXISTS idx_trades_time ON trades(time);
@@ -57,7 +68,7 @@ function init() {
             trade_count INTEGER DEFAULT 0,
             wins INTEGER DEFAULT 0,
             losses INTEGER DEFAULT 0,
-            updated_at TEXT DEFAULT (datetime('now'))
+            updated_at TIMESTAMPTZ DEFAULT NOW()
         );
 
         CREATE TABLE IF NOT EXISTS positions (
@@ -66,31 +77,24 @@ function init() {
             side TEXT,
             contracts INTEGER,
             entry_price INTEGER,
-            entry_time INTEGER,
+            entry_time BIGINT,
             period_key TEXT,
             total_cost_cents INTEGER,
             total_contracts INTEGER,
             data TEXT,
-            updated_at TEXT DEFAULT (datetime('now'))
+            updated_at TIMESTAMPTZ DEFAULT NOW()
         );
     `);
 
-    console.log(`[db] SQLite initialized at ${DB_PATH}`);
-    return db;
+    ready = true;
+    console.log(`[db] PostgreSQL initialized`);
+    return pool;
 }
 
 // ── Trade Log ──────────────────────────────────────────────────
 
-const _insertTrade = () => db.prepare(`
-    INSERT INTO trades (type, time, ticker, side, contracts, limit_price, entry_price, period_key, direction, pnl_cents, correct, strategy, order_id, filled_contracts, data)
-    VALUES (@type, @time, @ticker, @side, @contracts, @limitPrice, @entryPrice, @periodKey, @direction, @pnlCents, @correct, @strategy, @orderId, @filledContracts, @data)
-`);
-
-let insertTradeStmt = null;
-
-function logTrade(entry) {
-    if (!db) return;
-    if (!insertTradeStmt) insertTradeStmt = _insertTrade();
+async function logTrade(entry) {
+    if (!ready) return;
 
     // Extract known columns, store the rest as JSON
     const known = ['type', 'time', 'ticker', 'side', 'contracts', 'limitPrice', 'entryPrice',
@@ -101,32 +105,35 @@ function logTrade(entry) {
     }
 
     try {
-        insertTradeStmt.run({
-            type: entry.type || null,
-            time: entry.time || new Date().toISOString(),
-            ticker: entry.ticker || null,
-            side: entry.side || null,
-            contracts: entry.contracts || null,
-            limitPrice: entry.limitPrice || entry.limitPrice === 0 ? entry.limitPrice : null,
-            entryPrice: entry.entryPrice || entry.entryPrice === 0 ? entry.entryPrice : null,
-            periodKey: entry.periodKey || null,
-            direction: entry.direction || null,
-            pnlCents: entry.pnlCents || entry.pnlCents === 0 ? entry.pnlCents : null,
-            correct: entry.correct != null ? (entry.correct ? 1 : 0) : null,
-            strategy: entry.strategy || null,
-            orderId: entry.orderId || null,
-            filledContracts: entry.filledContracts || entry.filledContracts === 0 ? entry.filledContracts : null,
-            data: Object.keys(extra).length > 0 ? JSON.stringify(extra) : null,
-        });
+        await pool.query(`
+            INSERT INTO trades (type, time, ticker, side, contracts, limit_price, entry_price, period_key, direction, pnl_cents, correct, strategy, order_id, filled_contracts, data)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        `, [
+            entry.type || null,
+            entry.time || new Date().toISOString(),
+            entry.ticker || null,
+            entry.side || null,
+            entry.contracts || null,
+            entry.limitPrice || entry.limitPrice === 0 ? entry.limitPrice : null,
+            entry.entryPrice || entry.entryPrice === 0 ? entry.entryPrice : null,
+            entry.periodKey || null,
+            entry.direction || null,
+            entry.pnlCents || entry.pnlCents === 0 ? entry.pnlCents : null,
+            entry.correct != null ? (entry.correct ? 1 : 0) : null,
+            entry.strategy || null,
+            entry.orderId || null,
+            entry.filledContracts || entry.filledContracts === 0 ? entry.filledContracts : null,
+            Object.keys(extra).length > 0 ? JSON.stringify(extra) : null,
+        ]);
     } catch (e) {
         console.error('[db] Failed to log trade:', e.message);
     }
 }
 
-function getRecentTrades(limit = 200) {
-    if (!db) return [];
+async function getRecentTrades(limit = 200) {
+    if (!ready) return [];
     try {
-        const rows = db.prepare('SELECT * FROM trades ORDER BY id DESC LIMIT ?').all(limit);
+        const { rows } = await pool.query('SELECT * FROM trades ORDER BY id DESC LIMIT $1', [limit]);
         return rows.map(row => {
             const entry = { type: row.type, time: row.time };
             if (row.ticker) entry.ticker = row.ticker;
@@ -152,44 +159,40 @@ function getRecentTrades(limit = 200) {
     }
 }
 
-function getTradeCount() {
-    if (!db) return 0;
+async function getTradeCount() {
+    if (!ready) return 0;
     try {
-        return db.prepare('SELECT COUNT(*) as count FROM trades').get().count;
+        const { rows } = await pool.query('SELECT COUNT(*) as count FROM trades');
+        return parseInt(rows[0].count, 10);
     } catch (e) { return 0; }
 }
 
 // ── Daily Stats ────────────────────────────────────────────────
 
-function saveDailyStats(stats) {
-    if (!db) return;
+async function saveDailyStats(stats) {
+    if (!ready) return;
     try {
-        db.prepare(`
+        await pool.query(`
             INSERT INTO daily_stats (date, pnl_cents, trade_count, wins, losses, updated_at)
-            VALUES (@date, @pnlCents, @tradeCount, @wins, @losses, datetime('now'))
+            VALUES ($1, $2, $3, $4, $5, NOW())
             ON CONFLICT(date) DO UPDATE SET
-                pnl_cents = @pnlCents,
-                trade_count = @tradeCount,
-                wins = @wins,
-                losses = @losses,
-                updated_at = datetime('now')
-        `).run({
-            date: stats.date,
-            pnlCents: stats.pnlCents,
-            tradeCount: stats.tradeCount,
-            wins: stats.wins,
-            losses: stats.losses,
-        });
+                pnl_cents = $2,
+                trade_count = $3,
+                wins = $4,
+                losses = $5,
+                updated_at = NOW()
+        `, [stats.date, stats.pnlCents, stats.tradeCount, stats.wins, stats.losses]);
     } catch (e) {
         console.error('[db] Failed to save daily stats:', e.message);
     }
 }
 
-function loadDailyStats(date) {
-    if (!db) return null;
+async function loadDailyStats(date) {
+    if (!ready) return null;
     try {
-        const row = db.prepare('SELECT * FROM daily_stats WHERE date = ?').get(date);
-        if (!row) return null;
+        const { rows } = await pool.query('SELECT * FROM daily_stats WHERE date = $1', [date]);
+        if (rows.length === 0) return null;
+        const row = rows[0];
         return {
             date: row.date,
             pnlCents: row.pnl_cents,
@@ -203,13 +206,14 @@ function loadDailyStats(date) {
     }
 }
 
-function getDailyStatsHistory(days = 30) {
-    if (!db) return [];
+async function getDailyStatsHistory(days = 30) {
+    if (!ready) return [];
     try {
-        return db.prepare(`
-            SELECT date, pnl_cents as pnlCents, trade_count as tradeCount, wins, losses
-            FROM daily_stats ORDER BY date DESC LIMIT ?
-        `).all(days);
+        const { rows } = await pool.query(`
+            SELECT date, pnl_cents AS "pnlCents", trade_count AS "tradeCount", wins, losses
+            FROM daily_stats ORDER BY date DESC LIMIT $1
+        `, [days]);
+        return rows;
     } catch (e) {
         console.error('[db] Failed to get daily stats history:', e.message);
         return [];
@@ -218,11 +222,11 @@ function getDailyStatsHistory(days = 30) {
 
 // ── Position Persistence ───────────────────────────────────────
 
-function savePosition(pos) {
-    if (!db) return;
+async function savePosition(pos) {
+    if (!ready) return;
     try {
         if (!pos) {
-            db.prepare('DELETE FROM positions WHERE id = 1').run();
+            await pool.query('DELETE FROM positions WHERE id = 1');
             return;
         }
         const extra = {};
@@ -230,35 +234,36 @@ function savePosition(pos) {
         for (const [k, v] of Object.entries(pos)) {
             if (!known.includes(k)) extra[k] = v;
         }
-        db.prepare(`
+        await pool.query(`
             INSERT INTO positions (id, ticker, side, contracts, entry_price, entry_time, period_key, total_cost_cents, total_contracts, data, updated_at)
-            VALUES (1, @ticker, @side, @contracts, @entryPrice, @entryTime, @periodKey, @totalCostCents, @totalContracts, @data, datetime('now'))
+            VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
             ON CONFLICT(id) DO UPDATE SET
-                ticker = @ticker, side = @side, contracts = @contracts,
-                entry_price = @entryPrice, entry_time = @entryTime, period_key = @periodKey,
-                total_cost_cents = @totalCostCents, total_contracts = @totalContracts,
-                data = @data, updated_at = datetime('now')
-        `).run({
-            ticker: pos.ticker || null,
-            side: pos.side || null,
-            contracts: pos.contracts || null,
-            entryPrice: pos.entryPrice || null,
-            entryTime: pos.entryTime || null,
-            periodKey: pos.periodKey || null,
-            totalCostCents: pos.totalCostCents || null,
-            totalContracts: pos.totalContracts || null,
-            data: Object.keys(extra).length > 0 ? JSON.stringify(extra) : null,
-        });
+                ticker = $1, side = $2, contracts = $3,
+                entry_price = $4, entry_time = $5, period_key = $6,
+                total_cost_cents = $7, total_contracts = $8,
+                data = $9, updated_at = NOW()
+        `, [
+            pos.ticker || null,
+            pos.side || null,
+            pos.contracts || null,
+            pos.entryPrice || null,
+            pos.entryTime || null,
+            pos.periodKey || null,
+            pos.totalCostCents || null,
+            pos.totalContracts || null,
+            Object.keys(extra).length > 0 ? JSON.stringify(extra) : null,
+        ]);
     } catch (e) {
         console.error('[db] Failed to save position:', e.message);
     }
 }
 
-function loadPosition() {
-    if (!db) return null;
+async function loadPosition() {
+    if (!ready) return null;
     try {
-        const row = db.prepare('SELECT * FROM positions WHERE id = 1').get();
-        if (!row) return null;
+        const { rows } = await pool.query('SELECT * FROM positions WHERE id = 1');
+        if (rows.length === 0) return null;
+        const row = rows[0];
         const pos = {
             ticker: row.ticker,
             side: row.side,
@@ -281,63 +286,67 @@ function loadPosition() {
 
 // ── Analytics Queries ──────────────────────────────────────────
 
-function getWinRateByStrategy() {
-    if (!db) return [];
+async function getWinRateByStrategy() {
+    if (!ready) return [];
     try {
-        return db.prepare(`
+        const { rows } = await pool.query(`
             SELECT strategy, COUNT(*) as total,
                    SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) as wins,
-                   SUM(CASE WHEN pnl_cents IS NOT NULL THEN pnl_cents ELSE 0 END) as totalPnlCents
+                   SUM(CASE WHEN pnl_cents IS NOT NULL THEN pnl_cents ELSE 0 END) AS "totalPnlCents"
             FROM trades WHERE type IN ('settle') AND strategy IS NOT NULL
             GROUP BY strategy
-        `).all();
+        `);
+        return rows;
     } catch (e) { return []; }
 }
 
-function getWinRateByDirection() {
-    if (!db) return [];
+async function getWinRateByDirection() {
+    if (!ready) return [];
     try {
-        return db.prepare(`
+        const { rows } = await pool.query(`
             SELECT direction, COUNT(*) as total,
                    SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) as wins,
-                   SUM(CASE WHEN pnl_cents IS NOT NULL THEN pnl_cents ELSE 0 END) as totalPnlCents
+                   SUM(CASE WHEN pnl_cents IS NOT NULL THEN pnl_cents ELSE 0 END) AS "totalPnlCents"
             FROM trades WHERE type = 'settle' AND direction IS NOT NULL
             GROUP BY direction
-        `).all();
+        `);
+        return rows;
     } catch (e) { return []; }
 }
 
-function getWinRateByHour() {
-    if (!db) return [];
+async function getWinRateByHour() {
+    if (!ready) return [];
     try {
-        return db.prepare(`
-            SELECT CAST(strftime('%H', time) AS INTEGER) as hour, COUNT(*) as total,
+        const { rows } = await pool.query(`
+            SELECT EXTRACT(HOUR FROM time::timestamptz)::integer as hour, COUNT(*) as total,
                    SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) as wins
             FROM trades WHERE type = 'settle'
             GROUP BY hour ORDER BY hour
-        `).all();
+        `);
+        return rows;
     } catch (e) { return []; }
 }
 
-function getCumulativePnl() {
-    if (!db) return [];
+async function getCumulativePnl() {
+    if (!ready) return [];
     try {
-        return db.prepare(`
-            SELECT date, pnl_cents as pnlCents,
-                   SUM(pnl_cents) OVER (ORDER BY date) as cumulativePnlCents
+        const { rows } = await pool.query(`
+            SELECT date, pnl_cents AS "pnlCents",
+                   SUM(pnl_cents) OVER (ORDER BY date) AS "cumulativePnlCents"
             FROM daily_stats ORDER BY date
-        `).all();
+        `);
+        return rows;
     } catch (e) { return []; }
 }
 
 // ── Cleanup ────────────────────────────────────────────────────
 
-function close() {
-    if (db) {
-        db.close();
-        db = null;
-        insertTradeStmt = null;
-        console.log('[db] Database closed');
+async function close() {
+    if (pool) {
+        await pool.end();
+        pool = null;
+        ready = false;
+        console.log('[db] Database connection closed');
     }
 }
 

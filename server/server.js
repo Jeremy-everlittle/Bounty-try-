@@ -1090,17 +1090,23 @@ app.get('/api/trading/status', (req, res) => {
     res.json(tradeExecutor.getStatus());
 });
 
-// Trading analytics — historical data from SQLite
-app.get('/api/trading/analytics', (req, res) => {
+// Trading analytics — historical data from PostgreSQL
+app.get('/api/trading/analytics', async (req, res) => {
     const db = require('./db');
-    res.json({
-        dailyHistory: db.getDailyStatsHistory(90),
-        cumulativePnl: db.getCumulativePnl(),
-        winRateByDirection: db.getWinRateByDirection(),
-        winRateByHour: db.getWinRateByHour(),
-        winRateByStrategy: db.getWinRateByStrategy(),
-        totalTrades: db.getTradeCount(),
-    });
+    try {
+        const [dailyHistory, cumulativePnl, winRateByDirection, winRateByHour, winRateByStrategy, totalTrades] = await Promise.all([
+            db.getDailyStatsHistory(90),
+            db.getCumulativePnl(),
+            db.getWinRateByDirection(),
+            db.getWinRateByHour(),
+            db.getWinRateByStrategy(),
+            db.getTradeCount(),
+        ]);
+        res.json({ dailyHistory, cumulativePnl, winRateByDirection, winRateByHour, winRateByStrategy, totalTrades });
+    } catch (e) {
+        console.error('[api] Analytics error:', e.message);
+        res.status(500).json({ error: 'Failed to load analytics' });
+    }
 });
 
 app.use(express.json());
@@ -1289,15 +1295,19 @@ app.get('/api/logs/today/summary', (req, res) => {
 // GRACEFUL SHUTDOWN — Save state on exit
 // ═══════════════════════════════════════════════════════════════
 
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
     console.log('SIGTERM received, saving state...');
     store.forceSave();
+    const db = require('./db');
+    await db.close().catch(() => {});
     process.exit(0);
 });
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
     console.log('SIGINT received, saving state...');
     store.forceSave();
+    const db = require('./db');
+    await db.close().catch(() => {});
     process.exit(0);
 });
 
@@ -1321,8 +1331,12 @@ const PORT = process.env.PORT || 3000;
 // Load persisted prediction state before starting
 store.load();
 
-// Initialize SQLite database and restore trade history
-tradeExecutor.initFromDB();
+// Initialize PostgreSQL database and restore trade history, then start server
+tradeExecutor.initFromDB().then(() => {
+    console.log('[db] Database initialization complete');
+}).catch(e => {
+    console.error('[db] Database initialization failed (continuing without DB):', e.message);
+});
 
 server.listen(PORT, () => {
     if (!API_KEY) {

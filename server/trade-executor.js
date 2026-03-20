@@ -32,7 +32,7 @@ function persistPosition() {
     if (positionSaveTimer) return;
     positionSaveTimer = setTimeout(() => {
         positionSaveTimer = null;
-        db.savePosition(currentPosition);
+        db.savePosition(currentPosition).catch(e => console.error('[db] Position save error:', e.message));
     }, 1000);
 }
 let killSwitch = false;
@@ -221,22 +221,22 @@ function persistDailyStats() {
     if (dailyStatsSaveTimer) return;
     dailyStatsSaveTimer = setTimeout(() => {
         dailyStatsSaveTimer = null;
-        db.saveDailyStats(dailyStats);
+        db.saveDailyStats(dailyStats).catch(e => console.error('[db] Daily stats save error:', e.message));
     }, 2000);
 }
 
-function checkDayRollover() {
+async function checkDayRollover() {
     const today = new Date().toISOString().slice(0, 10);
     if (dailyStats.date !== today) {
         // Save yesterday's final stats before resetting
-        db.saveDailyStats(dailyStats);
+        await db.saveDailyStats(dailyStats);
         dailyStats.date = today;
         dailyStats.pnlCents = 0;
         dailyStats.tradeCount = 0;
         dailyStats.wins = 0;
         dailyStats.losses = 0;
         // Load today's stats if they exist (e.g., after restart mid-day)
-        const saved = db.loadDailyStats(today);
+        const saved = await db.loadDailyStats(today);
         if (saved) {
             dailyStats.pnlCents = saved.pnlCents;
             dailyStats.tradeCount = saved.tradeCount;
@@ -250,8 +250,8 @@ function checkDayRollover() {
 // Safety checks
 // ═══════════════════════════════════════════════════════════════
 
-function canTrade(periodKey) {
-    checkDayRollover();
+async function canTrade(periodKey) {
+    await checkDayRollover();
 
     if (killSwitch) return { ok: false, reason: 'Kill switch active' };
     if (orderInFlight) return { ok: false, reason: 'Order already in flight' };
@@ -452,7 +452,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         currentPosition = null;
     }
 
-    const check = canTrade(periodKey);
+    const check = await canTrade(periodKey);
     if (!check.ok) {
         setThought('blocked', check.reason);
         console.log(`[trade-executor] Skipping entry: ${check.reason}`);
@@ -879,7 +879,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
     const dipScale = Math.min(1.0, entryImprovement / 20); // 20¢ dip = full scale
     const addContracts = Math.max(1, Math.min(maxAdd, Math.round(dipScale * bq.betSize * config.baseContracts)));
 
-    const check = canTrade(periodKey);
+    const check = await canTrade(periodKey);
     if (!check.ok) return;
 
     const tradeInfo = {
@@ -1019,7 +1019,7 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     // No position — enter fresh with max contracts
     if (currentPosition) return; // different period position (shouldn't happen)
 
-    const check = canTrade(periodKey);
+    const check = await canTrade(periodKey);
     if (!check.ok) return;
 
     const contracts = config.convictionMaxContracts; // late-lock = high conviction, go big
@@ -1177,7 +1177,7 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
     const priceOnOurSide = (origIsUp && currentPrice >= strike) || (!origIsUp && currentPrice < strike);
     if (!priceOnOurSide) return;
 
-    const check = canTrade(periodKey);
+    const check = await canTrade(periodKey);
     if (!check.ok) return;
 
     // Re-enter at near-full size (was 60%, now 85%) — use conviction cap if high conviction
@@ -1335,8 +1335,8 @@ function logTrade(type, info) {
     const entry = { type, time: new Date().toISOString(), ...info };
     tradeLog.unshift(entry);
     if (tradeLog.length > MAX_TRADE_LOG) tradeLog.length = MAX_TRADE_LOG;
-    // Persist to SQLite
-    db.logTrade(entry);
+    // Persist to PostgreSQL (fire-and-forget)
+    db.logTrade(entry).catch(e => console.error('[db] Trade log error:', e.message));
     // Persist daily stats + position (debounced) after every trade
     persistDailyStats();
     persistPosition();
@@ -1406,7 +1406,7 @@ async function syncPositionWithKalshi() {
 }
 
 function getStatus() {
-    checkDayRollover();
+    checkDayRollover().catch(e => console.error('[db] Day rollover error:', e.message));
     // Trigger async balance refresh + position sync (non-blocking)
     refreshBalance();
     syncPositionWithKalshi();
@@ -1782,15 +1782,15 @@ async function forceSell() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Database initialization — restore state from SQLite on startup
+// Database initialization — restore state from PostgreSQL on startup
 // ═══════════════════════════════════════════════════════════════
 
-function initFromDB() {
-    db.init();
+async function initFromDB() {
+    await db.init();
     const today = new Date().toISOString().slice(0, 10);
 
     // Restore today's daily stats
-    const savedStats = db.loadDailyStats(today);
+    const savedStats = await db.loadDailyStats(today);
     if (savedStats) {
         dailyStats.date = today;
         dailyStats.pnlCents = savedStats.pnlCents;
@@ -1801,15 +1801,16 @@ function initFromDB() {
     }
 
     // Restore trade history into in-memory log
-    const savedTrades = db.getRecentTrades(MAX_TRADE_LOG);
+    const savedTrades = await db.getRecentTrades(MAX_TRADE_LOG);
     if (savedTrades.length > 0) {
         tradeLog.length = 0;
         tradeLog.push(...savedTrades);
-        console.log(`[trade-executor] Restored ${savedTrades.length} trades from DB (${db.getTradeCount()} total in DB)`);
+        const totalCount = await db.getTradeCount();
+        console.log(`[trade-executor] Restored ${savedTrades.length} trades from DB (${totalCount} total in DB)`);
     }
 
     // Restore current position (if server restarted mid-position)
-    const savedPos = db.loadPosition();
+    const savedPos = await db.loadPosition();
     if (savedPos && savedPos.ticker) {
         currentPosition = savedPos;
         console.log(`[trade-executor] Restored position from DB: ${savedPos.contracts}x ${savedPos.side} @ ${savedPos.ticker}`);
