@@ -846,6 +846,20 @@ async function fetchAllData() {
         state.lastUpdate = new Date().toISOString();
         state.error = null;
 
+        // ── Fetch Kalshi orderbook for bet quality assessment ──
+        // This is the ACTUAL Kalshi contract orderbook (yes/no bids),
+        // NOT the Binance BTC/USDT orderbook stored in state.orderBook.
+        state.kalshiOrderBook = null;
+        if (state.kalshiTicker) {
+            try {
+                const kalshiTrading = require('./kalshi-trading');
+                const kalshiOb = await kalshiTrading.getOrderbook(state.kalshiTicker);
+                state.kalshiOrderBook = kalshiOb;
+            } catch (e) {
+                console.log(`[kalshi-ob] Failed to fetch Kalshi orderbook: ${e.message}`);
+            }
+        }
+
         // ═══════════════════════════════════════════════════════
         // SERVER-SIDE PREDICTION ENGINE
         // ═══════════════════════════════════════════════════════
@@ -919,6 +933,7 @@ async function fetchAllData() {
                         currentPrice: state.brtiPrice,
                         history: state.history,
                         orderBook: state.orderBook,
+                        kalshiOrderBook: state.kalshiOrderBook,
                         recentTrades: state.recentTrades,
                         fundingRate: state.fundingRate,
                         ethPrice: state.ethPrice,
@@ -973,6 +988,7 @@ async function fetchAllData() {
                     currentPrice: state.brtiPrice,
                     history: state.history,
                     orderBook: state.orderBook,
+                    kalshiOrderBook: state.kalshiOrderBook,
                     recentTrades: state.recentTrades,
                     fundingRate: state.fundingRate,
                     ethPrice: state.ethPrice,
@@ -1013,6 +1029,7 @@ async function fetchAllData() {
                     currentPrice: state.brtiPrice,
                     history: state.history,
                     orderBook: state.orderBook,
+                    kalshiOrderBook: state.kalshiOrderBook,
                     recentTrades: state.recentTrades,
                     fundingRate: state.fundingRate,
                     ethPriceHistory: state.ethPriceHistory,

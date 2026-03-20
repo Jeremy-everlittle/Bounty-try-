@@ -1581,24 +1581,30 @@ function updateProbTracker(periodKey, probForBet, currentPrice, betIsUp, strike)
 
 // ── Estimate actual market entry price from orderbook ──
 // Returns the likely fill price in dollars (0-1 scale) for our side.
-function estimateMarketEntry(probForBet, isUp, orderBook) {
-    if (!orderBook) return null;
+function estimateMarketEntry(isUp, kalshiOrderBook) {
+    // Parse the ACTUAL Kalshi orderbook (yes/no binary contract bids).
+    // Kalshi only shows BIDS. To find the ask for our side:
+    //   buying YES → ask comes from NO bids (ask = 1.00 - NO bid price)
+    //   buying NO  → ask comes from YES bids (ask = 1.00 - YES bid price)
+    if (!kalshiOrderBook) return null;
     try {
-        // Post-March-12 format: orderbook_fp with yes_dollars/no_dollars arrays
-        const ob = orderBook.orderbook_fp || orderBook.orderbook || orderBook;
+        const ob = kalshiOrderBook.orderbook_fp || kalshiOrderBook.orderbook || kalshiOrderBook;
         if (!ob) return null;
-        const asks = isUp ? ob.yes_dollars : ob.no_dollars;
-        if (!asks || asks.length === 0) return null;
-        // Find the best (lowest) ask price available.
-        // Kalshi prices are in cents stored as [price_cents, count] pairs or as arrays.
-        // The yes_dollars/no_dollars are arrays indexed by price level.
-        // Find first non-zero entry (cheapest available contracts)
-        for (let i = 0; i < asks.length; i++) {
-            if (asks[i] > 0) {
-                return i / 100; // Convert cents to dollars
-            }
-        }
-        return null;
+        const yesBids = ob.yes_dollars || ob.yes || [];
+        const noBids = ob.no_dollars || ob.no || [];
+        // Our side = YES → opposite bids = NO; side = NO → opposite bids = YES
+        const side = isUp ? 'yes' : 'no';
+        const oppositeBids = side === 'yes' ? noBids : yesBids;
+        if (!oppositeBids || oppositeBids.length === 0) return null;
+
+        // Each entry is [price_dollars_string, quantity_string]
+        const askPrices = oppositeBids.map(entry => {
+            const bidDollars = parseFloat(entry[0]);
+            return 1.00 - bidDollars; // ask = 1 - opposing bid
+        });
+        const bestAsk = Math.min(...askPrices);
+        if (!isFinite(bestAsk) || bestAsk <= 0 || bestAsk >= 1) return null;
+        return bestAsk;
     } catch (e) {
         return null;
     }
@@ -1775,35 +1781,39 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     // This acknowledges that binary options contracts rarely trade above 85¢ on Kalshi
     // for 15-min BTC contracts because market-makers discount their model too.
     const fee = 0.015; // ~1.5 cents per side (Kalshi's current reduced fee schedule)
-    const marketEntryEstimate = marketData.orderBook
-        ? estimateMarketEntry(probForBet, prediction.predictedPrice >= strike, marketData.orderBook)
-        : null;
-    // Fallback entry estimate when no Kalshi orderbook is available.
-    // Using probForBet as entry price is WRONG: it assumes paying fair value,
-    // which means zero edge minus fees = Kelly always negative for prob < ~60%.
-    // In practice on Kalshi, contracts trade 5-15¢ cheaper than fair value due to
-    // wide spreads in 15-min BTC markets. Use a conservative 7¢ discount.
-    // The trade executor's getAggressivePrice() handles actual orderbook pricing.
-    const estimatedEntryPrice = marketEntryEstimate
-        ? Math.max(0.05, Math.min(0.95, marketEntryEstimate))
-        : Math.max(0.05, Math.min(0.65, probForBet - 0.07)); // discount from prob to reflect typical Kalshi spread
-    const winProfit = (1.0 - fee) - estimatedEntryPrice - fee;
-    const lossAmount = estimatedEntryPrice + fee;
-    const kellyRaw = winProfit > 0
-        ? (probForBet * winProfit - (1 - probForBet) * lossAmount) / winProfit
-        : 0;
-    const kellyFraction = Math.max(0, kellyRaw * 0.25); // Quarter Kelly (was half)
-    const kellyHasEdge = kellyRaw > 0;
+    const isUp = prediction.predictedPrice >= strike;
+    const kalshiEntryPrice = estimateMarketEntry(isUp, marketData.kalshiOrderBook);
 
-    // If Kelly says no edge after fees, override shouldBet
+    // No fallbacks — if we can't get the actual Kalshi orderbook price, don't bet.
+    let kellyRaw = 0;
+    let kellyHasEdge = false;
+    let kellyFraction = 0;
+    let kellyError = null;
+
+    if (kalshiEntryPrice === null) {
+        kellyError = 'No Kalshi orderbook data — cannot calculate edge';
+        console.log(`[bet-quality] ${kellyError}`);
+    } else {
+        const estimatedEntryPrice = Math.max(0.05, Math.min(0.95, kalshiEntryPrice));
+        const winProfit = (1.0 - fee) - estimatedEntryPrice - fee;
+        const lossAmount = estimatedEntryPrice + fee;
+        kellyRaw = winProfit > 0
+            ? (probForBet * winProfit - (1 - probForBet) * lossAmount) / winProfit
+            : 0;
+        kellyFraction = Math.max(0, kellyRaw * 0.25); // Quarter Kelly
+        kellyHasEdge = kellyRaw > 0;
+        console.log(`[bet-quality] Kalshi entry=${(estimatedEntryPrice*100).toFixed(0)}c | prob=${(probForBet*100).toFixed(1)}% | kelly=${kellyRaw.toFixed(3)} | edge=${kellyHasEdge ? 'YES' : 'NO'}`);
+    }
+
+    // If Kelly says no edge after fees, or no orderbook data, override shouldBet
     // Also block bets during cooling off period
-    const shouldBetAdjusted = shouldBet && kellyHasEdge && sessionMult > 0;
+    const shouldBetAdjusted = shouldBet && kellyHasEdge && !kellyError && sessionMult > 0;
 
     return {
         quality, shouldBet: shouldBetAdjusted, waitForBetter: !shouldBetAdjusted && minutesAhead > 8,
         suggestedWait, edge, factors, choppiness: chop, exhaustion,
         betSize, betSizeReason, convictionTier,
-        kellyFraction, kellyHasEdge,
+        kellyFraction, kellyHasEdge, kellyError,
         sessionRisk: {
             consecutiveLosses: sessionRisk.consecutiveLosses,
             consecutiveWins: sessionRisk.consecutiveWins,
@@ -1814,7 +1824,8 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         },
         reason: !shouldBetAdjusted ?
             (sessionMult === 0 ? 'COOLING OFF — ' + sessionRisk.consecutiveLosses + ' consecutive losses, pausing' :
-             !kellyHasEdge ? 'No edge after Kalshi fees (need >' + ((lossAmount / (lossAmount + winProfit)) * 100).toFixed(0) + '% win prob)' :
+             kellyError ? kellyError :
+             !kellyHasEdge ? 'No edge after Kalshi fees (entry=' + (kalshiEntryPrice*100).toFixed(0) + 'c, need higher prob or cheaper entry)' :
              !factors.hasMinEdge ? 'Edge too thin (' + (edge*100).toFixed(1) + '%)' :
              !factors.notChoppy ? 'Market is choppy (ADX=' + chop.adx.toFixed(0) + ')' :
              !factors.notExhausted ? 'Momentum exhaustion detected' :
