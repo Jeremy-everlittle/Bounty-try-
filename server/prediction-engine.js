@@ -1817,10 +1817,10 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         console.log(`[bet-quality] Kalshi entry=${kellyEntryPrice}c | prob=${(probForBet*100).toFixed(1)}% | kelly=${kellyRaw.toFixed(3)} | edge=${kellyHasEdge ? 'YES' : 'NO'}`);
     }
 
-    // If Kelly says no edge after fees, override shouldBet.
-    // When orderbook is empty, kellyHasEdge=true so we don't block here —
-    // trade executor's getAggressivePrice() handles the actual liquidity check.
-    const shouldBetAdjusted = shouldBet && kellyHasEdge && sessionMult > 0;
+    // Kelly criterion is computed for informational purposes (display/logging)
+    // but does NOT gate whether a bet is placed. The quality factors and trade
+    // executor's aggressive pricing handle risk management instead.
+    const shouldBetAdjusted = shouldBet && sessionMult > 0;
 
     return {
         quality, shouldBet: shouldBetAdjusted, waitForBetter: !shouldBetAdjusted && minutesAhead > 8,
@@ -1838,8 +1838,6 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         },
         reason: !shouldBetAdjusted ?
             (sessionMult === 0 ? 'COOLING OFF — ' + sessionRisk.consecutiveLosses + ' consecutive losses, pausing' :
-             kellyError ? kellyError :
-             !kellyHasEdge ? 'No edge after Kalshi fees (entry=' + (kalshiEntryPrice*100).toFixed(0) + 'c, need higher prob or cheaper entry)' :
              !factors.hasMinEdge ? 'Edge too thin (' + (edge*100).toFixed(1) + '%)' :
              !factors.notChoppy ? 'Market is choppy (ADX=' + chop.adx.toFixed(0) + ')' :
              !factors.notExhausted ? 'Momentum exhaustion detected' :
