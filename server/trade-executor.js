@@ -839,6 +839,37 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 // ═══════════════════════════════════════════════════════════════
 
 function onPeriodEnd(gradeResult) {
+    // If currentPosition was cleared (e.g., by sync bug) but we know we entered this period,
+    // still log a settlement so the frontend can show WIN/LOSS instead of PENDING
+    if (!currentPosition && gradeResult && gradeResult.periodKey && enteredPeriods[gradeResult.periodKey]) {
+        const ep = enteredPeriods[gradeResult.periodKey];
+        console.log(`[trade-executor] onPeriodEnd: no currentPosition but enteredPeriods has ${gradeResult.periodKey} — logging settlement from entry record`);
+        const positionWon = (ep.side === 'yes' && gradeResult.actualDirection === 'up') ||
+                            (ep.side === 'no' && gradeResult.actualDirection === 'down');
+        if (positionWon) {
+            dailyStats.wins++;
+        } else {
+            dailyStats.losses++;
+        }
+        logTrade('settle', {
+            ticker: ep.ticker,
+            side: ep.side,
+            contracts: 0, // unknown — position was cleared
+            entryPrice: 0,
+            correct: positionWon,
+            predictionCorrect: gradeResult.correct,
+            pnlCents: 0, // unknown — position was cleared
+            dailyPnlCents: dailyStats.pnlCents,
+            periodKey: gradeResult.periodKey,
+            note: 'settled from enteredPeriods (position was cleared before settlement)',
+            actualDirection: gradeResult.actualDirection,
+            strikePrice: gradeResult.strikePrice,
+            settlementPrice: gradeResult.settlementPrice,
+        });
+        soldThisPeriod = null;
+        syncZeroCount = 0;
+        return;
+    }
     if (!currentPosition) {
         console.log('[trade-executor] onPeriodEnd called but no currentPosition to settle');
         return;
