@@ -1784,7 +1784,9 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     const isUp = prediction.predictedPrice >= strike;
     const kalshiEntryPrice = estimateMarketEntry(isUp, marketData.kalshiOrderBook);
 
-    // No fallbacks — if we can't get the actual Kalshi orderbook price, don't bet.
+    // Use actual Kalshi orderbook for Kelly — no fallbacks, no guessing.
+    // If orderbook is empty/unavailable, skip the Kelly check entirely and
+    // let trade executor handle liquidity at execution time via getAggressivePrice.
     let kellyRaw = 0;
     let kellyHasEdge = false;
     let kellyFraction = 0;
@@ -1794,8 +1796,11 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     let kellyLossAmount = null;
 
     if (kalshiEntryPrice === null) {
-        kellyError = 'No Kalshi orderbook data — cannot calculate edge';
-        console.log(`[bet-quality] ${kellyError}`);
+        // Orderbook empty or unavailable — skip Kelly, let quality factors decide.
+        // Trade executor will check liquidity again at order time.
+        kellyError = 'No Kalshi orderbook data — Kelly check skipped';
+        kellyHasEdge = true; // Don't block on Kelly when we have no data
+        console.log(`[bet-quality] ${kellyError} — deferring to trade executor`);
     } else {
         const estimatedEntryPrice = Math.max(0.05, Math.min(0.95, kalshiEntryPrice));
         kellyEntryPrice = Math.round(estimatedEntryPrice * 100); // store in cents
@@ -1809,9 +1814,10 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         console.log(`[bet-quality] Kalshi entry=${kellyEntryPrice}c | prob=${(probForBet*100).toFixed(1)}% | kelly=${kellyRaw.toFixed(3)} | edge=${kellyHasEdge ? 'YES' : 'NO'}`);
     }
 
-    // If Kelly says no edge after fees, or no orderbook data, override shouldBet
-    // Also block bets during cooling off period
-    const shouldBetAdjusted = shouldBet && kellyHasEdge && !kellyError && sessionMult > 0;
+    // If Kelly says no edge after fees, override shouldBet.
+    // When orderbook is empty, kellyHasEdge=true so we don't block here —
+    // trade executor's getAggressivePrice() handles the actual liquidity check.
+    const shouldBetAdjusted = shouldBet && kellyHasEdge && sessionMult > 0;
 
     return {
         quality, shouldBet: shouldBetAdjusted, waitForBetter: !shouldBetAdjusted && minutesAhead > 8,

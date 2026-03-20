@@ -871,6 +871,14 @@ async function fetchAllData() {
                 const kalshiTrading = require('./kalshi-trading');
                 const kalshiOb = await kalshiTrading.getOrderbook(state.kalshiTicker);
                 state.kalshiOrderBook = kalshiOb;
+                // Debug: log what we got from Kalshi
+                const ob = kalshiOb?.orderbook_fp || kalshiOb?.orderbook || kalshiOb;
+                const yesBids = ob?.yes_dollars || ob?.yes || [];
+                const noBids = ob?.no_dollars || ob?.no || [];
+                console.log(`[kalshi-ob] ${state.kalshiTicker}: yes_bids=${yesBids.length} no_bids=${noBids.length}${yesBids.length === 0 && noBids.length === 0 ? ' (EMPTY orderbook)' : ''}`);
+                if (yesBids.length > 0 || noBids.length > 0) {
+                    console.log(`[kalshi-ob] yes_bids=${JSON.stringify(yesBids.slice(0, 3))} no_bids=${JSON.stringify(noBids.slice(0, 3))}`);
+                }
             } catch (e) {
                 console.log(`[kalshi-ob] Failed to fetch Kalshi orderbook: ${e.message}`);
             }
