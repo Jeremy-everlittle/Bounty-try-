@@ -324,15 +324,12 @@ async function canTrade(periodKey) {
     if (dailyStats.tradeCount >= config.maxDailyTrades) {
         return { ok: false, reason: `Daily trade limit reached (${dailyStats.tradeCount})` };
     }
-    // Track fill failures with escalating cooldown to avoid spamming unfillable orders
-    // After 3 fails: 30s cooldown. After 6 fails: 90s. After 9+: blocked for rest of period.
+    // Track fill failures with short cooldown to avoid spamming unfillable orders
+    // After 5 fails: 5s cooldown. After 10 fails: 15s. After 20+: 30s cooldown.
     if (periodKey && fillFailedPeriods[periodKey]) {
         const ff = fillFailedPeriods[periodKey];
-        if (ff.count >= 9) {
-            return { ok: false, reason: `${ff.count} fill failures this period — no liquidity, skipping` };
-        }
-        if (ff.count >= 3) {
-            const cooldownMs = ff.count >= 6 ? 90000 : 30000; // 30s after 3 fails, 90s after 6
+        if (ff.count >= 5) {
+            const cooldownMs = ff.count >= 20 ? 30000 : ff.count >= 10 ? 15000 : 5000;
             const elapsed = Date.now() - ff.lastAttempt;
             if (elapsed < cooldownMs) {
                 const remaining = Math.round((cooldownMs - elapsed) / 1000);
