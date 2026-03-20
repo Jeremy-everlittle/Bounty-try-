@@ -266,35 +266,6 @@
             height: 100%;
         }
 
-        .signals {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            margin-top: 12px;
-        }
-
-        .signal {
-            background: #21262d;
-            border-radius: 10px;
-            padding: 12px;
-            text-align: center;
-        }
-
-        .signal-name {
-            font-size: 11px;
-            color: #b0b8c1;
-            margin-bottom: 4px;
-        }
-
-        .signal-value {
-            font-size: 14px;
-            font-weight: 600;
-        }
-
-        .signal-value.bullish { color: #3fb950; }
-        .signal-value.bearish { color: #f85149; }
-        .signal-value.neutral { color: #d29922; }
-
         .status-bar {
             font-size: 11px;
             color: #b0b8c1;
@@ -782,28 +753,6 @@
         <div class="card-label">Price History &amp; Prediction</div>
         <div class="chart-container">
             <canvas id="chart"></canvas>
-        </div>
-    </div>
-
-    <div class="card">
-        <div class="card-label">Technical Signals</div>
-        <div class="signals">
-            <div class="signal">
-                <div class="signal-name">Momentum</div>
-                <div class="signal-value" id="sig-momentum">--</div>
-            </div>
-            <div class="signal">
-                <div class="signal-name">Volatility</div>
-                <div class="signal-value" id="sig-volatility">--</div>
-            </div>
-            <div class="signal">
-                <div class="signal-name">Trend</div>
-                <div class="signal-value" id="sig-trend">--</div>
-            </div>
-            <div class="signal">
-                <div class="signal-name">RSI Signal</div>
-                <div class="signal-value" id="sig-rsi">--</div>
-            </div>
         </div>
     </div>
 
@@ -2118,21 +2067,6 @@
                 document.getElementById('updated-confidence-value').textContent = updConf + '%';
             } else {
                 document.getElementById('updated-row').style.display = 'none';
-            }
-
-            // Technical signals (use latest prediction)
-            const activePred = updatedPrediction || originalPrediction;
-            if (activePred) {
-                const sigClasses = {
-                    Bullish: 'bullish', Bearish: 'bearish', Neutral: 'neutral',
-                    Overbought: 'bearish', Oversold: 'bullish',
-                    High: 'bearish', Medium: 'neutral', Low: 'bullish'
-                };
-                for (const [key, val] of Object.entries(activePred.signals)) {
-                    const el = document.getElementById('sig-' + key);
-                    el.textContent = val;
-                    el.className = 'signal-value ' + (sigClasses[val] || 'neutral');
-                }
             }
 
             // Trading advisor signals
