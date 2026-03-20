@@ -713,9 +713,46 @@
         .env-header-badge { display: inline-block; font-size: 9px; font-weight: 800; letter-spacing: 1.2px; padding: 1px 6px; border-radius: 3px; margin-left: 8px; vertical-align: middle; }
         .env-header-demo { background: rgba(63,185,80,0.25); color: #3fb950; }
         .env-header-prod { background: rgba(248,81,73,0.25); color: #f85149; }
+
+        /* ── Login Gate ── */
+        #login-gate {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: #0d1117; z-index: 9999;
+            display: flex; align-items: center; justify-content: center;
+            flex-direction: column; gap: 16px;
+        }
+        #login-gate.hidden { display: none; }
+        .login-box { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; width: 320px; text-align: center; }
+        .login-box h2 { font-size: 18px; margin-bottom: 6px; color: #e6edf3; }
+        .login-box p { font-size: 12px; color: #8b949e; margin-bottom: 20px; }
+        .login-box input[type="password"] {
+            width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #30363d;
+            background: #0d1117; color: #e6edf3; font-size: 14px; outline: none;
+        }
+        .login-box input[type="password"]:focus { border-color: #58a6ff; }
+        .login-box button {
+            width: 100%; padding: 10px; margin-top: 12px; border-radius: 8px; border: none;
+            background: #238636; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+        }
+        .login-box button:hover { background: #2ea043; }
+        .login-error { color: #f85149; font-size: 12px; margin-top: 8px; display: none; }
+        #dashboard-content { display: none; }
+        #dashboard-content.visible { display: block; }
     </style>
 </head>
 <body>
+    <!-- Login gate — shown until valid key is provided -->
+    <div id="login-gate">
+        <div class="login-box">
+            <h2>BTC Predictor</h2>
+            <p>Enter your dashboard password to continue</p>
+            <input type="password" id="login-password" placeholder="Password" autocomplete="current-password">
+            <button id="login-btn" onclick="attemptLogin()">Unlock</button>
+            <div class="login-error" id="login-error">Wrong password. Try again.</div>
+        </div>
+    </div>
+
+    <div id="dashboard-content">
     <div class="header">
         <h1>BTC Predictor <span class="env-header-badge env-header-demo" id="env-header-badge">DEMO</span></h1>
         <p><span class="live-dot"></span>Kalshi BTC Up or Down &middot; 15 min</p>
@@ -943,6 +980,29 @@
 
     <script>
         // ═══════════════════════════════════════════════════════════════
+        // API KEY — read from localStorage (set by login gate) or ?key= param
+        // ═══════════════════════════════════════════════════════════════
+        (function() {
+            const params = new URLSearchParams(location.search);
+            if (params.get('key')) {
+                localStorage.setItem('dashKey', params.get('key'));
+                sessionStorage.setItem('dashKey', params.get('key'));
+                params.delete('key');
+                const clean = params.toString();
+                history.replaceState(null, '', location.pathname + (clean ? '?' + clean : ''));
+            }
+        })();
+        const _DASH_KEY = sessionStorage.getItem('dashKey') || localStorage.getItem('dashKey') || '';
+
+        // Helper: add auth header to all API fetch calls
+        function authFetch(url, opts) {
+            opts = opts || {};
+            opts.headers = opts.headers || {};
+            if (_DASH_KEY) opts.headers['x-api-key'] = _DASH_KEY;
+            return fetch(url, opts);
+        }
+
+        // ═══════════════════════════════════════════════════════════════
         // WEBSOCKET CONNECTION — Receives data from always-on server
         // ═══════════════════════════════════════════════════════════════
         let ws = null;
@@ -952,7 +1012,7 @@
 
         function connectWebSocket() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = protocol + '//' + location.host;
+            const wsUrl = protocol + '//' + location.host + (_DASH_KEY ? '?apiKey=' + encodeURIComponent(_DASH_KEY) : '');
             console.log('Connecting to WebSocket:', wsUrl);
 
             ws = new WebSocket(wsUrl);
@@ -1981,7 +2041,7 @@
                 const ts = serverData && serverData.tradingStatus;
                 const newPaperMode = ts ? !ts.paperMode : true;
                 if (!newPaperMode && !confirm('Switch to LIVE trading? Real money will be used.')) return;
-                await fetch('/api/trading/mode', {
+                await authFetch('/api/trading/mode', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ paperMode: newPaperMode })
@@ -1992,7 +2052,7 @@
         async function switchEnvironment(env) {
             try {
                 if (env === 'production' && !confirm('Switch to PRODUCTION? This uses real money on Kalshi.')) return;
-                const resp = await fetch('/api/trading/environment', {
+                const resp = await authFetch('/api/trading/environment', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ environment: env })
@@ -2033,7 +2093,7 @@
             btn.textContent = 'PLACING...';
             btn.disabled = true;
             try {
-                const resp = await fetch('/api/trading/force-bet', {
+                const resp = await authFetch('/api/trading/force-bet', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({})
@@ -2076,7 +2136,7 @@
             btn.textContent = 'PRESSING...';
             btn.disabled = true;
             try {
-                const resp = await fetch('/api/trading/press-bet', {
+                const resp = await authFetch('/api/trading/press-bet', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({})
@@ -2089,7 +2149,7 @@
                     btn.style.borderColor = 'rgba(63,185,80,0.4)';
                     // Refresh trading status so UI shows updated position immediately
                     try {
-                        const statusResp = await fetch('/api/trading/status');
+                        const statusResp = await authFetch('/api/trading/status');
                         const status = await statusResp.json();
                         if (serverData) serverData.tradingStatus = status;
                     } catch(e) { /* next WS broadcast will catch up */ }
@@ -2125,7 +2185,7 @@
             btn.textContent = 'SELLING...';
             btn.disabled = true;
             try {
-                const resp = await fetch('/api/trading/force-sell', {
+                const resp = await authFetch('/api/trading/force-sell', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({})
@@ -2161,7 +2221,7 @@
             try {
                 const ts = serverData && serverData.tradingStatus;
                 const activate = ts ? !ts.killSwitch : true;
-                await fetch('/api/trading/kill-switch', {
+                await authFetch('/api/trading/kill-switch', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ active: activate })
@@ -3012,7 +3072,7 @@
             btn.textContent = 'Saving...';
             btn.disabled = true;
             try {
-                const resp = await fetch('/api/trading/config', {
+                const resp = await authFetch('/api/trading/config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body)
@@ -3159,6 +3219,76 @@
         startCountdown();
         startLiveRefresh();
         startFastUITicker();
+    </script>
+    </div><!-- end dashboard-content -->
+
+    <script>
+        // ═══════════════════════════════════════════════════════════════
+        // LOGIN GATE — validates key against /api/health, remembers device
+        // ═══════════════════════════════════════════════════════════════
+        function attemptLogin() {
+            var pw = document.getElementById('login-password').value.trim();
+            if (!pw) return;
+            var btn = document.getElementById('login-btn');
+            btn.textContent = 'Checking...';
+            btn.disabled = true;
+            fetch('/api/health', { headers: { 'x-api-key': pw } })
+                .then(function(r) {
+                    if (r.ok) {
+                        localStorage.setItem('dashKey', pw);
+                        sessionStorage.setItem('dashKey', pw);
+                        unlockDashboard();
+                    } else {
+                        document.getElementById('login-error').style.display = 'block';
+                        btn.textContent = 'Unlock';
+                        btn.disabled = false;
+                    }
+                })
+                .catch(function() {
+                    document.getElementById('login-error').textContent = 'Connection error';
+                    document.getElementById('login-error').style.display = 'block';
+                    btn.textContent = 'Unlock';
+                    btn.disabled = false;
+                });
+        }
+
+        function unlockDashboard() {
+            document.getElementById('login-gate').classList.add('hidden');
+            document.getElementById('dashboard-content').classList.add('visible');
+        }
+
+        // Allow Enter key to submit
+        document.getElementById('login-password').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') attemptLogin();
+        });
+
+        // On page load: check if we already have a saved key
+        (function() {
+            var saved = localStorage.getItem('dashKey');
+            if (saved) {
+                // Verify it's still valid
+                sessionStorage.setItem('dashKey', saved);
+                fetch('/api/health', { headers: { 'x-api-key': saved } })
+                    .then(function(r) {
+                        if (r.ok) {
+                            unlockDashboard();
+                        } else {
+                            localStorage.removeItem('dashKey');
+                            sessionStorage.removeItem('dashKey');
+                        }
+                    })
+                    .catch(function() { /* show login */ });
+            }
+            // If no DASHBOARD_API_KEY is set on server, /api/health returns 200 without key
+            // In that case, skip login entirely
+            if (!saved) {
+                fetch('/api/health')
+                    .then(function(r) {
+                        if (r.ok) unlockDashboard(); // no auth required
+                    })
+                    .catch(function() { /* show login */ });
+            }
+        })();
     </script>
 </body>
 </html>

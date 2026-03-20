@@ -24,7 +24,24 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// Serve static frontend
+// ═══════════════════════════════════════════════════════════════
+// API KEY AUTHENTICATION
+// Set DASHBOARD_API_KEY env var to protect all endpoints.
+// If not set, the dashboard runs without auth (local dev only).
+// ═══════════════════════════════════════════════════════════════
+const API_KEY = process.env.DASHBOARD_API_KEY || null;
+
+function requireAuth(req, res, next) {
+    if (!API_KEY) return next(); // no key configured = no auth
+    const provided = req.headers['x-api-key'] || req.query.apiKey;
+    if (provided === API_KEY) return next();
+    return res.status(401).json({ error: 'Unauthorized — invalid or missing API key' });
+}
+
+// Protect all /api routes with API key
+app.use('/api', requireAuth);
+
+// Serve static frontend (HTML/CSS/JS are public — they need the key to call APIs)
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ═══════════════════════════════════════════════════════════════
@@ -877,7 +894,15 @@ tradeExecutor.onTradeNotify((trade) => {
     broadcast({ type: 'trade', trade });
 });
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+    // Authenticate WebSocket connections via ?apiKey= query param
+    if (API_KEY) {
+        const url = new URL(req.url, 'http://localhost');
+        if (url.searchParams.get('apiKey') !== API_KEY) {
+            ws.close(4401, 'Unauthorized');
+            return;
+        }
+    }
     console.log(`Client connected (total: ${wss.clients.size})`);
 
     // Send full current state including predictions immediately
@@ -1271,6 +1296,12 @@ const PORT = process.env.PORT || 3000;
 store.load();
 
 server.listen(PORT, () => {
+    if (!API_KEY) {
+        console.warn('⚠️  WARNING: DASHBOARD_API_KEY is not set — dashboard has NO authentication!');
+        console.warn('   Set DASHBOARD_API_KEY env var to protect your trading endpoints.');
+    } else {
+        console.log('🔒 Dashboard API key authentication is ENABLED');
+    }
     console.log(`BTC Predictor server running on port ${PORT}`);
     console.log(`Frontend: http://localhost:${PORT}`);
     console.log(`Health:   http://localhost:${PORT}/api/health`);
