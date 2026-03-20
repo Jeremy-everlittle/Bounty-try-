@@ -73,7 +73,7 @@ function captureKalshiOrderbook(ticker, reason, minutesRemaining, yesBids, noBid
 // ── Configuration (from env, with safe defaults) ──
 const config = {
     paperMode: (process.env.PAPER_MODE || 'true').toLowerCase() === 'true',
-    baseContracts: parseInt(process.env.BASE_CONTRACTS || '5', 10),
+    baseContracts: parseInt(process.env.BASE_CONTRACTS || '10', 10), // percentage of balance to bet (e.g. 10 = 10%)
     maxPositionContracts: parseInt(process.env.MAX_POSITION_CONTRACTS || '50', 10),
     convictionMaxContracts: parseInt(process.env.CONVICTION_MAX_CONTRACTS || '150', 10), // higher cap for high-conviction bets
     maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '10000', 10),   // $100
@@ -155,6 +155,31 @@ function validateCurrentPosition() {
             setThought('idle', 'Cleared stale position from previous period — ready for new trades');
         }
     }
+}
+
+// ── Dynamic base contract sizing ──
+// baseContracts is a percentage of balance (e.g. 10 = 10%).
+// Given an entry price, compute how many contracts that translates to.
+// Example: balance=$100, baseContracts=10 (10%), entryPrice=50c → $10 / $0.50 = 20 contracts
+function getBaseContractCount(entryPriceCents) {
+    const env = getEnvironment();
+    let balanceCents;
+    if (config.paperMode) {
+        balanceCents = paperBalances[env] || 0;
+    } else {
+        balanceCents = cachedBalance ? cachedBalance.balanceCents : null;
+    }
+    // Fallback: if balance is unknown, use a conservative default
+    if (!balanceCents || balanceCents <= 0) {
+        console.log(`[trade-executor] getBaseContractCount: no balance available — using fallback of 1 contract`);
+        return 1;
+    }
+    const pct = config.baseContracts / 100; // e.g. 10 → 0.10
+    const betAmountCents = balanceCents * pct;
+    const price = Math.max(5, entryPriceCents || 50); // guard against 0/null
+    const contracts = Math.floor(betAmountCents / price);
+    console.log(`[trade-executor] Base sizing: ${config.baseContracts}% of $${(balanceCents/100).toFixed(2)} = $${(betAmountCents/100).toFixed(2)} / ${price}c = ${contracts} contracts`);
+    return Math.max(1, contracts);
 }
 
 // Auto-trader thought status — exposed to the frontend
@@ -783,15 +808,8 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
                               : minutesRemaining > 11 ? 78  // 2-4 min: max 78¢
                               : MAX_ENTRY_PRICE;             // after 4 min: standard 85¢ cap
 
-    // Conviction scaling: high-conviction bets get a higher position cap
-    const isHighConviction = betQuality.betSize > 1.0;
-    const positionCap = isHighConviction ? config.convictionMaxContracts : config.maxPositionContracts;
-    const contracts = Math.max(1, Math.min(
-        positionCap,
-        Math.round(betQuality.betSize * config.baseContracts)
-    ));
     const convictionLabel = betQuality.convictionTier ? ` [${betQuality.convictionTier}]` : '';
-    setThought('buying', `Placing ${isUp ? 'UP' : 'DOWN'} bet: ${contracts}x ${side.toUpperCase()}${convictionLabel}`, {
+    setThought('buying', `Placing ${isUp ? 'UP' : 'DOWN'} bet${convictionLabel}`, {
         edge: betQuality.edge, quality: betQuality.quality, betSize: betQuality.betSize,
         conviction: betQuality.convictionTier || 'normal',
     });
@@ -860,6 +878,15 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         }).catch(e => console.error('[db] Decision log error:', e.message));
         return;
     }
+
+    // ── Dynamic contract sizing: baseContracts% of balance ÷ entry price ──
+    const baseCount = getBaseContractCount(limitPrice);
+    const isHighConviction = betQuality.betSize > 1.0;
+    const positionCap = isHighConviction ? config.convictionMaxContracts : config.maxPositionContracts;
+    const contracts = Math.max(1, Math.min(
+        positionCap,
+        Math.round(betQuality.betSize * baseCount)
+    ));
 
     // ── DB: log bet decision ──
     db.saveDecisionLog({
@@ -1111,7 +1138,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             console.log(`[trade-executor] CONFIDENT FLIP: sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()}`);
             const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
             if (flipPrice !== null) {
-                const flipContracts = await capContractsByBalance(Math.max(1, config.baseContracts), flipPrice);
+                const flipContracts = await capContractsByBalance(Math.max(1, getBaseContractCount(flipPrice)), flipPrice);
                 if (flipContracts > 0) {
                     const flipCost = flipContracts * flipPrice;
                     const env = getEnvironment();
@@ -1205,7 +1232,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             console.log(`[trade-executor] CONFIDENT FLIP (live): sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()}`);
             const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
             if (flipPrice !== null) {
-                const flipContracts = await capContractsByBalance(Math.max(1, config.baseContracts), flipPrice);
+                const flipContracts = await capContractsByBalance(Math.max(1, getBaseContractCount(flipPrice)), flipPrice);
                 if (flipContracts > 0) {
                     try {
                         const flipResult = await trading.placeOrder({
@@ -1453,7 +1480,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
 
     // Scale add size: bigger dip = add more, but cap at half the original position
     const dipScale = Math.min(1.0, entryImprovement / 20); // 20¢ dip = full scale
-    const addContracts = Math.max(1, Math.min(maxAdd, Math.round(dipScale * bq.betSize * config.baseContracts)));
+    const addContracts = Math.max(1, Math.min(maxAdd, Math.round(dipScale * bq.betSize * getBaseContractCount(currentLimitPrice))));
 
     const check = await canTrade(periodKey);
     if (!check.ok) return;
@@ -1784,12 +1811,12 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
     if (!check.ok) return;
 
     // Re-enter at near-full size (was 60%, now 85%) — use conviction cap if high conviction
+    const limitPrice = Math.max(5, Math.min(95, Math.round(probForBet * 100)));
     const reEntryCap = bq.betSize > 1.0 ? config.convictionMaxContracts : config.maxPositionContracts;
     const contracts = Math.max(1, Math.min(
         reEntryCap,
-        Math.round(bq.betSize * config.baseContracts * 0.85)
+        Math.round(bq.betSize * getBaseContractCount(limitPrice) * 0.85)
     ));
-    const limitPrice = Math.max(5, Math.min(95, Math.round(probForBet * 100)));
 
     const tradeInfo = {
         ticker: kalshiTicker,
@@ -2145,7 +2172,7 @@ async function pressBet(addContracts) {
     const side = currentPosition.side;
     const periodKey = currentPosition.periodKey;
     const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
-    const contractsToAdd = addContracts || Math.max(1, config.baseContracts);
+    const contractsToAdd = addContracts || Math.max(1, getBaseContractCount(currentPosition.entryPrice));
 
     console.log(`[trade-executor] PRESS BET: adding ${contractsToAdd}x ${side.toUpperCase()} to existing ${currentContracts}x on ${ticker}`);
 
@@ -2287,7 +2314,7 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
     const direction = isUp ? 'UP' : 'DOWN';
     const probForBet = isUp ? prediction.probability : (1 - prediction.probability);
     const theoreticalPrice = Math.round(probForBet * 100);
-    const contracts = overrideContracts || Math.max(1, config.baseContracts);
+    const contracts = overrideContracts || Math.max(1, getBaseContractCount(theoreticalPrice));
 
     console.log(`[trade-executor] FORCE BET: ${contracts}x ${side.toUpperCase()} (${direction}) on ${kalshiTicker} @ ~${theoreticalPrice}c`);
 
