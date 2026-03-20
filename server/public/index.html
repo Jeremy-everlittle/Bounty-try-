@@ -799,7 +799,7 @@
             </div>
             <div class="trading-stats">
                 <div class="trading-stat">
-                    <div class="trading-stat-label">Balance</div>
+                    <div class="trading-stat-label" id="trading-balance-label">Balance</div>
                     <div class="trading-stat-value" id="trading-balance">--</div>
                 </div>
                 <div class="trading-stat">
@@ -813,6 +813,14 @@
                 <div class="trading-stat">
                     <div class="trading-stat-label">W/L</div>
                     <div class="trading-stat-value" id="trading-wl">0/0</div>
+                </div>
+            </div>
+            <!-- Paper balance controls (shown only in paper mode) -->
+            <div id="paper-balance-controls" style="display:none;margin:6px 0;padding:8px;background:rgba(210,153,34,0.08);border:1px solid rgba(210,153,34,0.25);border-radius:8px;">
+                <div style="display:flex;gap:6px;align-items:center;">
+                    <input type="number" id="paper-balance-input" placeholder="Amount ($)" min="0" step="0.01" style="flex:1;padding:5px 8px;font-size:12px;background:#0d1117;border:1px solid rgba(210,153,34,0.3);border-radius:4px;color:#e6edf3;">
+                    <button class="trading-btn" id="paper-add-btn" onclick="adjustPaperBalance('add')" style="padding:5px 10px;font-size:11px;font-weight:700;background:rgba(63,185,80,0.15);border-color:rgba(63,185,80,0.4);color:#3fb950;white-space:nowrap;">+ Add</button>
+                    <button class="trading-btn" id="paper-set-btn" onclick="adjustPaperBalance('set')" style="padding:5px 10px;font-size:11px;font-weight:700;background:rgba(139,148,158,0.12);border-color:rgba(139,148,158,0.3);color:#8b949e;white-space:nowrap;">Set</button>
                 </div>
             </div>
             <div id="trader-thought-area"></div>
@@ -1865,15 +1873,25 @@
                 badge.className = 'trading-mode-badge trading-mode-off';
             }
 
-            // Balance
+            // Balance — shows paper balance in paper mode, real Kalshi balance in live mode
             const balEl = document.getElementById('trading-balance');
+            const balLabel = document.getElementById('trading-balance-label');
+            const currentEnvLabel = currentEnv === 'production' ? 'Prod' : 'Demo';
+            if (balLabel) {
+                balLabel.textContent = ts.paperMode ? `Balance (${currentEnvLabel} Paper)` : `Balance (${currentEnvLabel} Live)`;
+            }
             if (ts.balanceCents !== null && ts.balanceCents !== undefined) {
                 const bal = ts.balanceCents / 100;
                 balEl.textContent = '$' + bal.toFixed(2);
-                balEl.style.color = '#e6edf3';
+                balEl.style.color = ts.paperMode ? '#d29922' : '#e6edf3';
             } else {
                 balEl.textContent = '--';
                 balEl.style.color = '#8b949e';
+            }
+            // Show/hide paper balance controls
+            const paperControls = document.getElementById('paper-balance-controls');
+            if (paperControls) {
+                paperControls.style.display = ts.paperMode ? '' : 'none';
             }
 
             // Stats
@@ -2014,6 +2032,23 @@
                 if (!resp.ok) { showToast(friendlyError(result.error), 'error'); return; }
                 if (!result.configured) showToast(env.toUpperCase() + ' credentials not configured — trading won\'t work.', 'error');
             } catch (e) { console.error('Environment switch failed:', e); }
+        }
+
+        async function adjustPaperBalance(action) {
+            const input = document.getElementById('paper-balance-input');
+            const amount = parseFloat(input.value);
+            if (!amount || amount <= 0) { showToast('Enter a valid amount', 'error'); return; }
+            try {
+                const resp = await authFetch('/api/trading/paper-balance', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action, amount })
+                });
+                const result = await resp.json();
+                if (!resp.ok) { showToast(friendlyError(result.error), 'error'); return; }
+                input.value = '';
+                showToast(`Paper balance ${action === 'set' ? 'set to' : 'increased by'} $${amount.toFixed(2)} → $${result.balanceDollars}`, 'success');
+            } catch (e) { console.error('Paper balance update failed:', e); }
         }
 
         function toggleTradeHistory() {

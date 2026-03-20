@@ -97,6 +97,12 @@ let soldThisPeriod = null;    // Track sold positions for re-entry: { periodKey,
 let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
 let cachedBalance = null;     // { balanceCents, lastFetched }
 const BALANCE_CACHE_MS = 30000; // refresh balance every 30s
+
+// ── Paper balance tracking (separate per environment) ──
+const paperBalances = {
+    demo: 250000,       // $2500.00 default starting balance (cents)
+    production: 250000, // $2500.00 default starting balance (cents)
+};
 let orderInFlight = false;    // mutex: prevent concurrent order placement
 let fillFailedPeriods = {};   // { periodKey: { count, lastAttempt } } — track fill failures for price adjustment
 let enteredPeriods = {};      // { periodKey: { side, ticker, entryTime } } — prevent duplicate entries even if position is cleared
@@ -631,8 +637,12 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     };
 
     if (config.paperMode) {
+        const costCents = contracts * limitPrice;
+        const env = getEnvironment();
+        // Deduct from paper balance
+        paperBalances[env] = (paperBalances[env] || 0) - costCents;
+        console.log(`[trade-executor] PAPER BUY: ${contracts}x ${side.toUpperCase()} on ${kalshiTicker} @ ${limitPrice}c | Cost=$${(costCents/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
         setThought('bought', `Bought ${contracts}x ${side.toUpperCase()} @ ${limitPrice}c (paper)`, { edge: betQuality.edge, quality: betQuality.quality });
-        console.log(`[trade-executor] PAPER BUY: ${contracts}x ${side.toUpperCase()} on ${kalshiTicker} @ ${limitPrice}c | Edge=${tradeInfo.edge} Quality=${tradeInfo.quality}`);
         currentPosition = {
             ticker: kalshiTicker,
             side,
@@ -641,7 +651,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             orderId: 'paper-' + Date.now(),
             periodKey,
             entryTime: Date.now(),
-            totalCostCents: contracts * limitPrice,
+            totalCostCents: costCents,
             totalContracts: contracts,
         };
         enteredPeriods[periodKey] = { side, ticker: kalshiTicker, entryTime: Date.now() };
@@ -806,7 +816,12 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
     };
 
     if (config.paperMode) {
-        console.log(`[trade-executor] PAPER SELL: ${currentPosition.contracts}x ${currentPosition.side.toUpperCase()} on ${currentPosition.ticker} — reason: ${sellSignal.level}`);
+        const sellContracts = currentPosition.totalContracts || currentPosition.contracts;
+        const sellPrice = Math.max(1, currentPosition.entryPrice - 10); // assume slippage on paper sell
+        const sellProceeds = sellContracts * sellPrice;
+        const env = getEnvironment();
+        paperBalances[env] = (paperBalances[env] || 0) + sellProceeds;
+        console.log(`[trade-executor] PAPER SELL: ${sellContracts}x ${currentPosition.side.toUpperCase()} on ${currentPosition.ticker} @ ${sellPrice}c — reason: ${sellSignal.level} | Proceeds=$${(sellProceeds/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
         logTrade('sell', tradeInfo);
         decisionLog.logSellDecision({ sellSignal, minutesRemaining, acted: true, reason: sellSignal.level, currentPrice, strike });
         dailyStats.tradeCount++;
@@ -966,6 +981,17 @@ function onPeriodEnd(gradeResult) {
         dailyStats.losses++;
     }
     dailyStats.pnlCents += pnl;
+
+    // Credit paper balance on settlement (cost was already deducted on buy)
+    if (config.paperMode) {
+        const env = getEnvironment();
+        if (positionWon) {
+            // Won: get $1 per contract (100c)
+            paperBalances[env] = (paperBalances[env] || 0) + (contracts * 100);
+        }
+        // Lost: nothing to credit — cost was already deducted on buy
+        console.log(`[trade-executor] Paper balance after settle: $${(paperBalances[env]/100).toFixed(2)} (${env})`);
+    }
 
     logTrade('settle', {
         ticker: currentPosition.ticker,
@@ -1525,6 +1551,24 @@ function setPaperMode(enabled) {
     console.log(`[trade-executor] Mode: ${enabled ? 'PAPER' : 'LIVE'}`);
 }
 
+function setPaperBalance(env, cents) {
+    const key = env === 'production' ? 'production' : 'demo';
+    paperBalances[key] = cents;
+    console.log(`[trade-executor] Paper balance set: ${key} = $${(cents / 100).toFixed(2)}`);
+    return paperBalances[key];
+}
+
+function addPaperBalance(env, cents) {
+    const key = env === 'production' ? 'production' : 'demo';
+    paperBalances[key] = (paperBalances[key] || 0) + cents;
+    console.log(`[trade-executor] Paper balance added $${(cents / 100).toFixed(2)}: ${key} = $${(paperBalances[key] / 100).toFixed(2)}`);
+    return paperBalances[key];
+}
+
+function getPaperBalances() {
+    return { ...paperBalances };
+}
+
 function resetState() {
     currentPosition = null;
     dailyStats.date = new Date().toISOString().slice(0, 10);
@@ -1675,14 +1719,20 @@ async function syncPositionWithKalshi() {
 function getStatus() {
     checkDayRollover().catch(e => console.error('[db] Day rollover error:', e.message));
     // Trigger async balance refresh + position sync + balance snapshot (non-blocking)
-    refreshBalance();
+    if (!config.paperMode) {
+        refreshBalance();
+    }
     syncPositionWithKalshi();
     snapshotBalanceToDB().catch(e => {});
+    const env = getEnvironment();
+    const effectiveBalance = config.paperMode
+        ? (paperBalances[env] || 0)
+        : (cachedBalance ? cachedBalance.balanceCents : null);
     return {
         paperMode: config.paperMode,
         killSwitch,
         configured: trading.isConfigured(),
-        balanceCents: cachedBalance ? cachedBalance.balanceCents : null,
+        balanceCents: effectiveBalance,
         currentPosition: currentPosition ? (() => {
             const totalCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
             const totalContracts = currentPosition.totalContracts || currentPosition.contracts;
@@ -1741,6 +1791,9 @@ async function pressBet(addContracts) {
         const newTotal = currentContracts + contractsToAdd;
         currentPosition.totalCostCents = oldCost + addCost;
         currentPosition.totalContracts = newTotal;
+        // Deduct press cost from paper balance
+        const env = getEnvironment();
+        paperBalances[env] = (paperBalances[env] || 0) - addCost;
         setThought('bought', `Pressed +${contractsToAdd}x ${side.toUpperCase()} @ ${limitPrice}c (now ${newTotal}x)`, { contracts: newTotal });
         logTrade('buy', { ...tradeInfo, limitPrice, fillStatus: 'paper-press', filledContracts: contractsToAdd });
         dailyStats.tradeCount++;
@@ -1870,9 +1923,13 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
 
     if (config.paperMode) {
         const limitPrice = Math.max(5, Math.min(95, theoreticalPrice));
+        const costCents = contracts * limitPrice;
+        const env = getEnvironment();
+        // Deduct from paper balance
+        paperBalances[env] = (paperBalances[env] || 0) - costCents;
         if (addingToExisting) {
             const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
-            const addCost = contracts * limitPrice;
+            const addCost = costCents;
             const newTotal = (currentPosition.totalContracts || currentPosition.contracts) + contracts;
             currentPosition.totalCostCents = oldCost + addCost;
             currentPosition.totalContracts = newTotal;
@@ -1882,7 +1939,7 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
             currentPosition = {
                 ticker: kalshiTicker, side, contracts, entryPrice: limitPrice,
                 orderId: 'force-paper-' + Date.now(), periodKey, entryTime: Date.now(),
-                totalCostCents: contracts * limitPrice, totalContracts: contracts,
+                totalCostCents: costCents, totalContracts: contracts,
             };
         }
         enteredPeriods[periodKey] = enteredPeriods[periodKey] || { side, ticker: kalshiTicker, entryTime: Date.now() };
@@ -2008,7 +2065,10 @@ async function forceSell() {
 
     if (config.paperMode) {
         const sellPrice = Math.max(1, currentPosition.entryPrice - 5);
-        console.log(`[trade-executor] PAPER FORCE SELL: ${contracts}x ${side.toUpperCase()} @ ~${sellPrice}c`);
+        const sellProceeds = contracts * sellPrice;
+        const env = getEnvironment();
+        paperBalances[env] = (paperBalances[env] || 0) + sellProceeds;
+        console.log(`[trade-executor] PAPER FORCE SELL: ${contracts}x ${side.toUpperCase()} @ ~${sellPrice}c | Proceeds=$${(sellProceeds/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
         logTrade('sell', { ...tradeInfo, limitPrice: sellPrice, fillStatus: 'paper-force-sell' });
         dailyStats.tradeCount++;
         soldThisPeriod = { periodKey, side, ticker, soldAt: Date.now(), reason: 'force_sell' };
@@ -2136,6 +2196,9 @@ module.exports = {
     onReentryCheck,
     setKillSwitch,
     setPaperMode,
+    setPaperBalance,
+    addPaperBalance,
+    getPaperBalances,
     clearTradeLog,
     resetState,
     getStatus,

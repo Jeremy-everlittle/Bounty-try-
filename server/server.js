@@ -1597,6 +1597,27 @@ app.post('/api/trading/environment', (req, res) => {
     }
 });
 
+// ── Paper balance management ──
+app.get('/api/trading/paper-balance', (req, res) => {
+    res.json(tradeExecutor.getPaperBalances());
+});
+
+app.post('/api/trading/paper-balance', (req, res) => {
+    const { action, amount, environment } = req.body || {};
+    const env = environment || kalshiAuth.getEnvironment();
+    const cents = Math.round((parseFloat(amount) || 0) * 100);
+    if (cents <= 0) return res.status(400).json({ error: 'Amount must be positive' });
+
+    let newBalance;
+    if (action === 'set') {
+        newBalance = tradeExecutor.setPaperBalance(env, cents);
+    } else {
+        // default to 'add'
+        newBalance = tradeExecutor.addPaperBalance(env, cents);
+    }
+    res.json({ environment: env, balanceCents: newBalance, balanceDollars: (newBalance / 100).toFixed(2) });
+});
+
 // ═══════════════════════════════════════════════════════════════
 // DECISION LOG API — Read decision logs for analysis
 // ═══════════════════════════════════════════════════════════════
