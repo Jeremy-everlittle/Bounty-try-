@@ -1054,7 +1054,9 @@
         function clearHistory() {
             predictionLog = [];
             localStorage.removeItem('btcPredLog');
-            // Also clear server-side history
+            // Clear cached trade data so period history doesn't show stale trades
+            recentTradesCache = { timestamp: 0, trades: [] };
+            // Also clear server-side history + trade log
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'clearHistory' }));
             }

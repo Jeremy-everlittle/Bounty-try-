@@ -1208,6 +1208,7 @@ wss.on('connection', (ws, req) => {
                 console.log('Client requested history clear');
                 store.getState().predictionLog = [];
                 store.save();
+                tradeExecutor.clearTradeLog();
             }
         } catch (e) {}
     });

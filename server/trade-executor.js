@@ -1481,6 +1481,11 @@ function resetState() {
     console.log('[trade-executor] State reset — kill switch activated');
 }
 
+function clearTradeLog() {
+    tradeLog.length = 0;
+    console.log('[trade-executor] Trade log cleared');
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Status & logging
 // ═══════════════════════════════════════════════════════════════
@@ -2040,6 +2045,7 @@ module.exports = {
     onReentryCheck,
     setKillSwitch,
     setPaperMode,
+    clearTradeLog,
     resetState,
     getStatus,
     onTradeNotify,
