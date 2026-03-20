@@ -570,6 +570,8 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             orderId: 'paper-' + Date.now(),
             periodKey,
             entryTime: Date.now(),
+            totalCostCents: contracts * limitPrice,
+            totalContracts: contracts,
         };
         logTrade('buy', tradeInfo);
         decisionLog.logTradeExecution({ ...tradeInfo, strategy: 'initial', currentPrice: prediction.predictedPrice, strike, probability: (probForBet * 100).toFixed(1) + '%' });
@@ -642,6 +644,8 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             orderId: order.order_id,
             periodKey,
             entryTime: Date.now(),
+            totalCostCents: filledContracts * limitPrice,
+            totalContracts: filledContracts,
         };
         logTrade('buy', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: cappedContracts });
         dailyStats.tradeCount++;
@@ -1489,8 +1493,8 @@ function getStatus() {
             return {
                 ticker: currentPosition.ticker,
                 side: currentPosition.side,
-                contracts: currentPosition.contracts,
-                entryPrice: Math.round(totalCost / totalContracts), // weighted average, not first entry
+                contracts: totalContracts,              // always show total position size
+                entryPrice: Math.round(totalCost / totalContracts), // weighted average entry
                 periodKey: currentPosition.periodKey,
                 holdingSeconds: Math.round((Date.now() - currentPosition.entryTime) / 1000),
                 totalCostCents: totalCost,
