@@ -375,26 +375,8 @@ function markFillFailed(periodKey) {
  *
  * Returns a price in cents (5-95).
  */
-async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaining) {
-    // Guard against NaN/undefined — fall back to 50c (fair value)
-    if (theoreticalPrice === undefined || theoreticalPrice === null || isNaN(theoreticalPrice) || !isFinite(theoreticalPrice)) {
-        console.warn(`[trade-executor] getAggressivePrice received invalid theoreticalPrice: ${theoreticalPrice} — defaulting to 50c`);
-        theoreticalPrice = 50;
-    }
-    theoreticalPrice = Math.max(5, Math.min(95, Math.round(theoreticalPrice)));
-
-    // Paper and live both use real orderbook for pricing
-
-    // Determine max slippage based on time remaining
-    // Increased from 1/3/5 — Kalshi BTC markets have wider spreads
-    const maxSlippage = (minutesRemaining || 15) <= 3 ? 8
-                      : (minutesRemaining || 15) <= 7 ? 5
-                      : 3; // early period: still willing to cross a typical spread
-
-    const maxPrice = Math.min(95, theoreticalPrice + maxSlippage);
-
-    // Try to get the best price from the orderbook
-    // Auth API first, then public Kalshi API fallback (same data, no auth)
+async function fetchOrderbook(ticker) {
+    // Fetch orderbook: auth API first, then public Kalshi API fallback
     let resp = null;
     try {
         resp = await trading.getOrderbook(ticker);
@@ -414,30 +396,76 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
             console.log(`[trade-executor] Public orderbook also failed: ${e2.message}`);
         }
     }
+    return resp;
+}
+
+function parseOrderbookAsk(resp, side, ticker, minutesRemaining) {
+    // Parse orderbook and return best ask price for the given side (in cents)
+    if (!resp) return null;
+    const book = resp.orderbook_fp || resp.orderbook || resp;
+    const isDollarFmt = !!(book.yes_dollars || book.no_dollars);
+    const yesBids = book.yes_dollars || book.yes || [];
+    const noBids = book.no_dollars || book.no || [];
+    const oppositeBids = side === 'yes' ? noBids : yesBids;
+
+    // ── DB: snapshot the full Kalshi orderbook ──
+    captureKalshiOrderbook(ticker, 'trade_entry', minutesRemaining, yesBids, noBids);
+
+    if (!oppositeBids || oppositeBids.length === 0) return null;
+
+    const askPrices = oppositeBids.map(entry => {
+        const raw = parseFloat(entry[0]);
+        const bidDollars = isDollarFmt ? raw : raw / 100;
+        return Math.round((1.00 - bidDollars) * 100);
+    });
+    return Math.min(...askPrices);
+}
+
+// Get the actual market ask price — what it would cost to buy right now.
+// Used by FORCE BET and PRESS BET to trade at market price (no theoretical cap).
+// Returns price in cents, or null if no liquidity.
+async function getMarketPrice(ticker, side, minutesRemaining) {
     try {
+        const resp = await fetchOrderbook(ticker);
+        if (!resp) return null;
+        const bestAsk = parseOrderbookAsk(resp, side, ticker, minutesRemaining);
+        if (bestAsk === null || !isFinite(bestAsk) || bestAsk < 1 || bestAsk > 99) {
+            console.log(`[trade-executor] Market price: no opposing bids for ${side} on ${ticker}`);
+            return null;
+        }
+        console.log(`[trade-executor] Market price: best ${side} ask = ${bestAsk}c on ${ticker}`);
+        return bestAsk;
+    } catch (e) {
+        console.log(`[trade-executor] Market price fetch failed: ${e.message}`);
+        return null;
+    }
+}
+
+async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaining) {
+    // Guard against NaN/undefined — fall back to 50c (fair value)
+    if (theoreticalPrice === undefined || theoreticalPrice === null || isNaN(theoreticalPrice) || !isFinite(theoreticalPrice)) {
+        console.warn(`[trade-executor] getAggressivePrice received invalid theoreticalPrice: ${theoreticalPrice} — defaulting to 50c`);
+        theoreticalPrice = 50;
+    }
+    theoreticalPrice = Math.max(5, Math.min(95, Math.round(theoreticalPrice)));
+
+    // Paper and live both use real orderbook for pricing
+
+    // Determine max slippage based on time remaining
+    // Increased from 1/3/5 — Kalshi BTC markets have wider spreads
+    const maxSlippage = (minutesRemaining || 15) <= 3 ? 8
+                      : (minutesRemaining || 15) <= 7 ? 5
+                      : 3; // early period: still willing to cross a typical spread
+
+    const maxPrice = Math.min(95, theoreticalPrice + maxSlippage);
+
+    // Try to get the best price from the orderbook
+    try {
+        const resp = await fetchOrderbook(ticker);
         if (!resp) throw new Error('No orderbook data');
-        const book = resp.orderbook_fp || resp.orderbook || resp;
-        // Detect format: yes_dollars/no_dollars = dollar strings, yes/no = cent integers
-        const isDollarFmt = !!(book.yes_dollars || book.no_dollars);
+        const bestAsk = parseOrderbookAsk(resp, side, ticker, minutesRemaining);
 
-        // Kalshi only shows BIDS. To find the ask for our side:
-        // - If we're buying YES: the ask comes from NO bids (ask = 100 - NO bid price)
-        // - If we're buying NO: the ask comes from YES bids (ask = 100 - YES bid price)
-        const yesBids = book.yes_dollars || book.yes || [];
-        const noBids = book.no_dollars || book.no || [];
-        const oppositeBids = side === 'yes' ? noBids : yesBids;
-
-        // ── DB: snapshot the full Kalshi orderbook ──
-        captureKalshiOrderbook(ticker, 'trade_entry', minutesRemaining, yesBids, noBids);
-
-        if (oppositeBids.length > 0) {
-            const askPrices = oppositeBids.map(entry => {
-                const raw = parseFloat(entry[0]);
-                const bidDollars = isDollarFmt ? raw : raw / 100; // normalize to 0-1
-                return Math.round((1.00 - bidDollars) * 100);
-            });
-            const bestAsk = Math.min(...askPrices);
-
+        if (bestAsk !== null) {
             // NEVER pay more than theoretical + maxSlippage
             if (bestAsk > maxPrice) {
                 // Post at our maxPrice (NOT theoreticalPrice) — this is our best chance to fill
@@ -625,18 +653,30 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     }
     const probForBet = isUp ? prediction.probability : (1 - prediction.probability);
     const theoreticalPrice = Math.round(probForBet * 100);
-    const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, 15); // new prediction = ~15 min remaining
+
+    // Fetch orderbook once, use for both market ask (display) and limit price (execution)
+    const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, 15);
+    // If limitPrice is null, check if it's truly no liquidity vs market price too high
+    let marketAsk = null;
     if (limitPrice === null) {
-        console.log(`[trade-executor] No liquidity on orderbook — skipping order, will retry next cycle`);
-        setThought('waiting', 'No liquidity on orderbook — waiting for orders to appear');
+        marketAsk = await getMarketPrice(kalshiTicker, side, 15);
+    }
+    if (limitPrice === null) {
+        // Distinguish between "no orders" and "market price too high for our edge"
+        const noLiquidityMsg = marketAsk === null
+            ? 'No liquidity on orderbook — waiting for orders to appear'
+            : `Market ask ${marketAsk}c too high for model (${theoreticalPrice}c) — no edge at current price`;
+        console.log(`[trade-executor] ${noLiquidityMsg}`);
+        setThought('waiting', noLiquidityMsg);
         db.saveDecisionLog({
-            periodKey, ticker: kalshiTicker, decision: 'no_liquidity',
+            periodKey, ticker: kalshiTicker, decision: marketAsk === null ? 'no_liquidity' : 'no_edge',
             direction: isUp ? 'up' : 'down', side,
             btcPrice: prediction.predictedPrice, strike,
             distanceFromStrike: prediction.predictedPrice - strike,
             probability: prediction.probability, edge: betQuality.edge,
             qualityScore: betQuality.quality, betSize: betQuality.betSize,
-            reason: 'No liquidity on Kalshi orderbook',
+            marketAsk: marketAsk, theoreticalPrice,
+            reason: noLiquidityMsg,
         }).catch(e => console.error('[db] Decision log error:', e.message));
         return;
     }
@@ -1838,7 +1878,9 @@ async function pressBet(addContracts) {
     };
 
     if (config.paperMode) {
-        const limitPrice = currentPosition.entryPrice;
+        // Use actual market ask price, not stale entry price
+        const limitPrice = await getMarketPrice(ticker, side, 15) || currentPosition.entryPrice;
+        console.log(`[trade-executor] PRESS BET paper: market ask = ${limitPrice}c (entry was ${currentPosition.entryPrice}c)`);
         const cappedAdd = await capContractsByBalance(contractsToAdd, limitPrice);
         if (cappedAdd <= 0) return { ok: false, reason: 'Insufficient paper balance' };
         const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
@@ -1854,8 +1896,7 @@ async function pressBet(addContracts) {
         return { ok: true, side, contracts: cappedAdd, entryPrice: limitPrice, totalContracts: newTotal, mode: 'paper' };
     }
 
-    // Live: get price from orderbook and retry like forceBet
-    const theoreticalPrice = currentPosition.entryPrice; // start from current entry
+    // Live: get actual market price from orderbook and retry
     const MAX_ATTEMPTS = 3;
     const PRICE_BUMP = 3;
     let minutesRemaining = 15;
@@ -1868,11 +1909,14 @@ async function pressBet(addContracts) {
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         const priceEscalation = (attempt - 1) * PRICE_BUMP;
-        // Bump theoretical input, not the result — getAggressivePrice caps at orderbook ask
-        const limitPrice = await getAggressivePrice(ticker, side, theoreticalPrice + priceEscalation, minutesRemaining);
+        // PRESS BET: use actual market ask price, not theoretical cap
+        let limitPrice = await getMarketPrice(ticker, side, minutesRemaining);
+        if (limitPrice !== null && attempt > 1) {
+            limitPrice = Math.min(95, limitPrice + priceEscalation);
+        }
         if (limitPrice === null) {
             console.log(`[trade-executor] PRESS BET attempt ${attempt}: no liquidity — will retry`);
-            await new Promise(r => setTimeout(r, 2000)); // brief wait before next attempt
+            await new Promise(r => setTimeout(r, 2000));
             continue;
         }
         const cappedContracts = await capContractsByBalance(contractsToAdd, limitPrice);
@@ -1976,8 +2020,9 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
     };
 
     if (config.paperMode) {
-        // Use real orderbook price just like live mode
-        const limitPrice = await getAggressivePrice(kalshiTicker, side, Math.max(5, Math.min(95, theoreticalPrice)), 15) || Math.max(5, Math.min(95, theoreticalPrice));
+        // Use actual market ask price — FORCE BET should buy at market, not theoretical
+        const limitPrice = await getMarketPrice(kalshiTicker, side, 15) || Math.max(5, Math.min(95, theoreticalPrice));
+        console.log(`[trade-executor] FORCE BET paper: market ask = ${limitPrice}c (theoretical was ${theoreticalPrice}c)`);
         const cappedContracts = await capContractsByBalance(contracts, limitPrice);
         if (cappedContracts <= 0) return { ok: false, reason: 'Insufficient paper balance' };
         const costCents = cappedContracts * limitPrice;
@@ -2018,11 +2063,16 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
 
     for (let attempt = 1; attempt <= MAX_FORCE_ATTEMPTS; attempt++) {
         const priceEscalation = (attempt - 1) * PRICE_BUMP;
-        // Bump theoretical input, not the result — getAggressivePrice caps at orderbook ask
-        const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice + priceEscalation, minutesRemaining);
+        // FORCE BET: use actual market ask price, not theoretical cap
+        // First try market price, then fall back to aggressive price with escalation
+        let limitPrice = await getMarketPrice(kalshiTicker, side, minutesRemaining);
+        if (limitPrice !== null && attempt > 1) {
+            // On retries, bump above market ask to improve fill chance
+            limitPrice = Math.min(95, limitPrice + priceEscalation);
+        }
         if (limitPrice === null) {
             console.log(`[trade-executor] FORCE BET attempt ${attempt}: no liquidity — will retry`);
-            await new Promise(r => setTimeout(r, 2000)); // brief wait before next attempt
+            await new Promise(r => setTimeout(r, 2000));
             continue;
         }
         const cappedContracts = await capContractsByBalance(contracts, limitPrice);
@@ -2030,7 +2080,7 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
             return { ok: false, reason: 'Insufficient balance for force bet' };
         }
 
-        console.log(`[trade-executor] FORCE BET attempt ${attempt}/${MAX_FORCE_ATTEMPTS}: ${cappedContracts}x ${side.toUpperCase()} @ ${limitPrice}c`);
+        console.log(`[trade-executor] FORCE BET attempt ${attempt}/${MAX_FORCE_ATTEMPTS}: ${cappedContracts}x ${side.toUpperCase()} @ ${limitPrice}c (market price)`);
 
         orderInFlight = true;
         try {
