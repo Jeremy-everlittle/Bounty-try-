@@ -1090,6 +1090,19 @@ app.get('/api/trading/status', (req, res) => {
     res.json(tradeExecutor.getStatus());
 });
 
+// Trading analytics — historical data from SQLite
+app.get('/api/trading/analytics', (req, res) => {
+    const db = require('./db');
+    res.json({
+        dailyHistory: db.getDailyStatsHistory(90),
+        cumulativePnl: db.getCumulativePnl(),
+        winRateByDirection: db.getWinRateByDirection(),
+        winRateByHour: db.getWinRateByHour(),
+        winRateByStrategy: db.getWinRateByStrategy(),
+        totalTrades: db.getTradeCount(),
+    });
+});
+
 app.use(express.json());
 
 app.post('/api/trading/kill-switch', (req, res) => {
@@ -1307,6 +1320,9 @@ const PORT = process.env.PORT || 3000;
 
 // Load persisted prediction state before starting
 store.load();
+
+// Initialize SQLite database and restore trade history
+tradeExecutor.initFromDB();
 
 server.listen(PORT, () => {
     if (!API_KEY) {

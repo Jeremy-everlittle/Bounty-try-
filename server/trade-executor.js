@@ -11,6 +11,7 @@
 const trading = require('./kalshi-trading');
 const decisionLog = require('./decision-logger');
 const { getEnvironment } = require('./kalshi-auth');
+const db = require('./db');
 
 // ── Configuration (from env, with safe defaults) ──
 const config = {
@@ -24,6 +25,16 @@ const config = {
 
 // ── State ──
 let currentPosition = null;   // { ticker, side, action, contracts, entryPrice, orderId, periodKey, totalCostCents, totalContracts }
+
+// Persist position to DB whenever it changes (debounced)
+let positionSaveTimer = null;
+function persistPosition() {
+    if (positionSaveTimer) return;
+    positionSaveTimer = setTimeout(() => {
+        positionSaveTimer = null;
+        db.savePosition(currentPosition);
+    }, 1000);
+}
 let killSwitch = false;
 let soldThisPeriod = null;    // Track sold positions for re-entry: { periodKey, side, ticker, soldAt, reason }
 let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
@@ -204,14 +215,34 @@ async function verifyFillIsReal(orderId, ticker, side, claimedFills, balanceBefo
 // Daily reset
 // ═══════════════════════════════════════════════════════════════
 
+let dailyStatsSaveTimer = null;
+function persistDailyStats() {
+    // Debounce — save at most every 2s
+    if (dailyStatsSaveTimer) return;
+    dailyStatsSaveTimer = setTimeout(() => {
+        dailyStatsSaveTimer = null;
+        db.saveDailyStats(dailyStats);
+    }, 2000);
+}
+
 function checkDayRollover() {
     const today = new Date().toISOString().slice(0, 10);
     if (dailyStats.date !== today) {
+        // Save yesterday's final stats before resetting
+        db.saveDailyStats(dailyStats);
         dailyStats.date = today;
         dailyStats.pnlCents = 0;
         dailyStats.tradeCount = 0;
         dailyStats.wins = 0;
         dailyStats.losses = 0;
+        // Load today's stats if they exist (e.g., after restart mid-day)
+        const saved = db.loadDailyStats(today);
+        if (saved) {
+            dailyStats.pnlCents = saved.pnlCents;
+            dailyStats.tradeCount = saved.tradeCount;
+            dailyStats.wins = saved.wins;
+            dailyStats.losses = saved.losses;
+        }
     }
 }
 
@@ -1304,6 +1335,11 @@ function logTrade(type, info) {
     const entry = { type, time: new Date().toISOString(), ...info };
     tradeLog.unshift(entry);
     if (tradeLog.length > MAX_TRADE_LOG) tradeLog.length = MAX_TRADE_LOG;
+    // Persist to SQLite
+    db.logTrade(entry);
+    // Persist daily stats + position (debounced) after every trade
+    persistDailyStats();
+    persistPosition();
     // Notify listeners (for push notifications)
     if (tradeNotifyCallback) {
         try { tradeNotifyCallback(entry); } catch(e) { /* ignore */ }
@@ -1745,7 +1781,43 @@ async function forceSell() {
     return { ok: false, reason: 'Force sell exhausted all attempts' };
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Database initialization — restore state from SQLite on startup
+// ═══════════════════════════════════════════════════════════════
+
+function initFromDB() {
+    db.init();
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Restore today's daily stats
+    const savedStats = db.loadDailyStats(today);
+    if (savedStats) {
+        dailyStats.date = today;
+        dailyStats.pnlCents = savedStats.pnlCents;
+        dailyStats.tradeCount = savedStats.tradeCount;
+        dailyStats.wins = savedStats.wins;
+        dailyStats.losses = savedStats.losses;
+        console.log(`[trade-executor] Restored daily stats from DB: ${savedStats.wins}W/${savedStats.losses}L, P&L: ${savedStats.pnlCents > 0 ? '+' : ''}${(savedStats.pnlCents / 100).toFixed(2)}`);
+    }
+
+    // Restore trade history into in-memory log
+    const savedTrades = db.getRecentTrades(MAX_TRADE_LOG);
+    if (savedTrades.length > 0) {
+        tradeLog.length = 0;
+        tradeLog.push(...savedTrades);
+        console.log(`[trade-executor] Restored ${savedTrades.length} trades from DB (${db.getTradeCount()} total in DB)`);
+    }
+
+    // Restore current position (if server restarted mid-position)
+    const savedPos = db.loadPosition();
+    if (savedPos && savedPos.ticker) {
+        currentPosition = savedPos;
+        console.log(`[trade-executor] Restored position from DB: ${savedPos.contracts}x ${savedPos.side} @ ${savedPos.ticker}`);
+    }
+}
+
 module.exports = {
+    initFromDB,
     onNewPrediction,
     onSellSignal,
     onPeriodEnd,
