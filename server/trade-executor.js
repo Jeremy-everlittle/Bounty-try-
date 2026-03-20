@@ -721,15 +721,34 @@ function onPeriodEnd(gradeResult) {
     console.log(`[trade-executor] onPeriodEnd: settling position ${currentPosition.periodKey}, gradeResult:`, JSON.stringify(gradeResult));
 
     // Position auto-settles on Kalshi. Track the P&L.
-    const wasCorrect = gradeResult && gradeResult.correct;
+    // IMPORTANT: Win/loss is determined by POSITION SIDE vs ACTUAL DIRECTION,
+    // NOT by whether the prediction was correct. The position side may diverge
+    // from the latest prediction (e.g. bet placed on earlier prediction, then
+    // prediction direction changed mid-period).
+    const predictionCorrect = gradeResult && gradeResult.correct;
+    let positionWon;
+    if (gradeResult && gradeResult.actualDirection) {
+        // YES wins when price goes UP, NO wins when price goes DOWN
+        positionWon = (currentPosition.side === 'yes' && gradeResult.actualDirection === 'up') ||
+                      (currentPosition.side === 'no' && gradeResult.actualDirection === 'down');
+    } else {
+        // Fallback if actualDirection not available
+        positionWon = predictionCorrect;
+    }
+    if (positionWon !== predictionCorrect) {
+        console.warn(`[trade-executor] Position side (${currentPosition.side}) diverged from prediction! ` +
+            `Prediction ${predictionCorrect ? 'correct' : 'wrong'} but position ${positionWon ? 'WON' : 'LOST'} ` +
+            `(actual direction: ${gradeResult?.actualDirection})`);
+    }
+
     // Use totalContracts/totalCostCents to include dip buys, late locks, re-entries
     const contracts = currentPosition.totalContracts || currentPosition.contracts;
     const totalCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
     const avgEntryPrice = contracts > 0 ? Math.round(totalCost / contracts) : currentPosition.entryPrice;
 
-    // P&L: if correct, payout is 100c per contract - total cost. If wrong, lose total cost.
+    // P&L: if position won, payout is 100c per contract - total cost. If lost, lose total cost.
     let pnl;
-    if (wasCorrect) {
+    if (positionWon) {
         pnl = (contracts * 100) - totalCost; // total payout minus total cost
         dailyStats.wins++;
     } else {
@@ -743,18 +762,20 @@ function onPeriodEnd(gradeResult) {
         side: currentPosition.side,
         contracts,
         entryPrice: avgEntryPrice,
-        correct: wasCorrect,
+        correct: positionWon,
+        predictionCorrect,
         pnlCents: pnl,
         dailyPnlCents: dailyStats.pnlCents,
         periodKey: currentPosition.periodKey,
     });
 
-    setThought('settled', `${wasCorrect ? 'WON' : 'LOST'}: ${pnl > 0 ? '+' : ''}$${(pnl / 100).toFixed(2)}`, { pnlCents: pnl, wasCorrect });
-    console.log(`[trade-executor] Period settled: ${wasCorrect ? 'WIN' : 'LOSS'} | P&L: ${pnl > 0 ? '+' : ''}${(pnl / 100).toFixed(2)} | Daily: ${dailyStats.pnlCents > 0 ? '+' : ''}$${(dailyStats.pnlCents / 100).toFixed(2)}`);
+    setThought('settled', `${positionWon ? 'WON' : 'LOST'}: ${pnl > 0 ? '+' : ''}$${(pnl / 100).toFixed(2)}`, { pnlCents: pnl, positionWon });
+    console.log(`[trade-executor] Period settled: ${positionWon ? 'WIN' : 'LOSS'} | P&L: ${pnl > 0 ? '+' : ''}${(pnl / 100).toFixed(2)} | Daily: ${dailyStats.pnlCents > 0 ? '+' : ''}$${(dailyStats.pnlCents / 100).toFixed(2)}`);
 
     decisionLog.logSettlement({
         periodKey: currentPosition.periodKey,
-        wasCorrect,
+        wasCorrect: positionWon,
+        predictionCorrect,
         pnlCents: pnl,
         dailyPnlCents: dailyStats.pnlCents,
         contracts,

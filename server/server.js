@@ -648,15 +648,28 @@ async function fetchAllData() {
                     console.log(`[server] Period transition ${currentPeriod.periodKey} → ${periodKey} | ` +
                         `predLog size: ${log.length} | lastGraded: ${lastGraded ? lastGraded.periodKey + ' correct=' + lastGraded.correct : 'NONE'}`);
                     if (lastGraded) {
-                        tradeExecutor.onPeriodEnd({ correct: lastGraded.correct, periodKey: lastGraded.periodKey });
+                        tradeExecutor.onPeriodEnd({
+                            correct: lastGraded.correct,
+                            periodKey: lastGraded.periodKey,
+                            actualDirection: lastGraded.actualDirection,
+                            strikePrice: lastGraded.startPrice,
+                            settlementPrice: lastGraded.actualPrice,
+                        });
                     } else {
                         console.warn(`[server] No graded prediction found for period ${currentPeriod.periodKey} — forcing onPeriodEnd with price-based grading`);
                         // Fallback: grade based on current price vs strike
                         if (currentPeriod.periodStartPrice && state.brtiPrice) {
+                            const actualDirection = state.brtiPrice >= currentPeriod.periodStartPrice ? 'up' : 'down';
                             const correct = currentPeriod.originalPrediction ?
                                 (currentPeriod.originalPrediction.predictedPrice >= currentPeriod.periodStartPrice) === (state.brtiPrice >= currentPeriod.periodStartPrice)
                                 : false;
-                            tradeExecutor.onPeriodEnd({ correct, periodKey: currentPeriod.periodKey });
+                            tradeExecutor.onPeriodEnd({
+                                correct,
+                                periodKey: currentPeriod.periodKey,
+                                actualDirection,
+                                strikePrice: currentPeriod.periodStartPrice,
+                                settlementPrice: state.brtiPrice,
+                            });
                         }
                     }
                 }
