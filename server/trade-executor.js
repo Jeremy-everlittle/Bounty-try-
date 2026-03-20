@@ -906,6 +906,10 @@ function onPeriodEnd(gradeResult) {
         pnlCents: pnl,
     }).catch(e => console.error('[db] Failed to update prediction P&L:', e.message));
 
+    // Snapshot balance after settlement for tracking
+    refreshBalance();
+    snapshotBalanceToDB('post_settle').catch(e => {});
+
     currentPosition = null;
     soldThisPeriod = null; // reset for new period
 }
@@ -1443,10 +1447,34 @@ async function refreshBalance() {
     if (cachedBalance && Date.now() - cachedBalance.lastFetched < BALANCE_CACHE_MS) return;
     try {
         const resp = await trading.getBalance();
-        cachedBalance = { balanceCents: resp.balance, lastFetched: Date.now() };
+        cachedBalance = { balanceCents: resp.balance, portfolioValueCents: resp.portfolio_value, lastFetched: Date.now() };
     } catch (e) {
         // Silently fail — will retry next cycle
     }
+}
+
+// ── Balance snapshot to DB (every 5 minutes) ──
+let lastBalanceSnapshot = 0;
+const BALANCE_SNAPSHOT_MS = 5 * 60 * 1000; // 5 minutes
+
+async function snapshotBalanceToDB(note) {
+    if (!cachedBalance) return;
+    const now = Date.now();
+    // Throttle periodic snapshots (but allow forced snapshots via note)
+    if (!note && now - lastBalanceSnapshot < BALANCE_SNAPSHOT_MS) return;
+    lastBalanceSnapshot = now;
+
+    const env = getEnvironment();
+    db.saveBalanceSnapshot({
+        environment: env,
+        balanceCents: cachedBalance.balanceCents,
+        portfolioValueCents: cachedBalance.portfolioValueCents || null,
+        pnlCents: dailyStats.pnlCents,
+        tradeCount: dailyStats.tradeCount,
+        wins: dailyStats.wins,
+        losses: dailyStats.losses,
+        note: note || 'periodic',
+    }).catch(e => console.error('[db] Balance snapshot error:', e.message));
 }
 
 let lastPositionSync = 0;
@@ -1458,41 +1486,69 @@ async function syncPositionWithKalshi() {
     if (Date.now() - lastPositionSync < POSITION_SYNC_MS) return;
     lastPositionSync = Date.now();
 
+    // Safety: never clear a position that was entered less than 60s ago
+    // (Kalshi API may be slow to reflect newly placed orders)
+    const positionAge = Date.now() - (currentPosition.entryTime || 0);
+    if (positionAge < 60000) {
+        return;
+    }
+
     try {
         const resp = await trading.getPositions();
         const positions = resp.market_positions || resp.positions || [];
         const match = positions.find(p => p.ticker === currentPosition.ticker);
 
         if (match) {
-            // Kalshi reports position quantity and average cost
-            const kalshiContracts = match.position || match.total_traded || 0;
+            // Use the correct fields: yes_count/no_count (or _fp variants)
+            // These are what Kalshi actually returns — NOT .position or .total_traded
+            const side = currentPosition.side;
+            const kalshiContracts = side === 'yes'
+                ? (Math.round(parseFloat(match.yes_count_fp)) || match.yes_count || match.position || match.total_traded || 0)
+                : (Math.round(parseFloat(match.no_count_fp)) || match.no_count || match.position || match.total_traded || 0);
             const kalshiCostCents = match.market_exposure ? Math.round(match.market_exposure * 100) : null;
 
             if (kalshiContracts > 0) {
                 const oldTotal = currentPosition.totalContracts || currentPosition.contracts;
                 if (kalshiContracts !== oldTotal) {
-                    console.log(`[trade-executor] Position sync: app=${oldTotal} Kalshi=${kalshiContracts} contracts — updating`);
+                    console.log(`[trade-executor] Position sync: app=${oldTotal} Kalshi=${kalshiContracts} contracts — updating to Kalshi count`);
                     currentPosition.totalContracts = kalshiContracts;
+                    currentPosition.contracts = kalshiContracts;
+                    // If Kalshi has more than we tracked, update cost estimate
+                    if (kalshiContracts > oldTotal && currentPosition.entryPrice) {
+                        const oldCost = currentPosition.totalCostCents || (oldTotal * currentPosition.entryPrice);
+                        const extraContracts = kalshiContracts - oldTotal;
+                        currentPosition.totalCostCents = oldCost + (extraContracts * currentPosition.entryPrice);
+                        console.log(`[trade-executor] Position sync: adjusted cost for ${extraContracts} extra contracts`);
+                    }
+                    persistPosition();
                 }
                 if (kalshiCostCents && kalshiCostCents !== currentPosition.totalCostCents) {
                     console.log(`[trade-executor] Position sync: app cost=${currentPosition.totalCostCents}c Kalshi cost=${kalshiCostCents}c — updating`);
                     currentPosition.totalCostCents = kalshiCostCents;
+                    // Recalculate entry price from actual cost
+                    if (kalshiContracts > 0) {
+                        currentPosition.entryPrice = Math.round(kalshiCostCents / kalshiContracts);
+                    }
+                    persistPosition();
                 }
             } else {
                 // Kalshi shows 0 contracts — position was settled/expired
                 console.log(`[trade-executor] Position sync: Kalshi reports 0 contracts for ${currentPosition.ticker} — clearing stale position`);
                 currentPosition = null;
+                persistPosition();
             }
         } else {
             // No matching position found on Kalshi — contract likely expired/settled
             console.log(`[trade-executor] Position sync: no position found on Kalshi for ${currentPosition.ticker} — clearing stale position`);
             currentPosition = null;
+            persistPosition();
         }
     } catch (e) {
-        // 404 means the market/contract expired — clear the stale position
-        if (e.status === 404) {
+        // 404 means the market/contract expired — but only clear if position is old enough
+        if (e.status === 404 && positionAge > 120000) {
             console.log(`[trade-executor] Position sync: 404 for ${currentPosition?.ticker} — market expired, clearing position`);
             currentPosition = null;
+            persistPosition();
         }
         // Other errors: silently fail — will retry next cycle
     }
@@ -1500,9 +1556,10 @@ async function syncPositionWithKalshi() {
 
 function getStatus() {
     checkDayRollover().catch(e => console.error('[db] Day rollover error:', e.message));
-    // Trigger async balance refresh + position sync (non-blocking)
+    // Trigger async balance refresh + position sync + balance snapshot (non-blocking)
     refreshBalance();
     syncPositionWithKalshi();
+    snapshotBalanceToDB().catch(e => {});
     return {
         paperMode: config.paperMode,
         killSwitch,
@@ -1908,6 +1965,17 @@ async function initFromDB() {
         currentPosition = savedPos;
         console.log(`[trade-executor] Restored position from DB: ${savedPos.contracts}x ${savedPos.side} @ ${savedPos.ticker}`);
     }
+
+    // Snapshot balance on startup
+    try {
+        await refreshBalance();
+        await snapshotBalanceToDB('startup');
+        if (cachedBalance) {
+            console.log(`[trade-executor] Balance on startup: $${(cachedBalance.balanceCents / 100).toFixed(2)} (${getEnvironment()})`);
+        }
+    } catch (e) {
+        // Non-fatal — balance tracking is best-effort
+    }
 }
 
 module.exports = {
@@ -1926,5 +1994,6 @@ module.exports = {
     forceBet,
     pressBet,
     forceSell,
+    snapshotBalanceToDB,
     config, // exposed for startup logging
 };

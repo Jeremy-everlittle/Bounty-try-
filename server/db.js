@@ -237,6 +237,27 @@ async function init() {
 
         CREATE INDEX IF NOT EXISTS idx_mkt_snap_period ON market_data_snapshots(period_key);
         CREATE INDEX IF NOT EXISTS idx_mkt_snap_created ON market_data_snapshots(created_at);
+
+        -- ═══════════════════════════════════════════════════════════
+        -- ACCOUNT BALANCE SNAPSHOTS — Track demo & prod balances
+        -- Persists across builds for P&L tracking and betting logic
+        -- ═══════════════════════════════════════════════════════════
+
+        CREATE TABLE IF NOT EXISTS account_balances (
+            id SERIAL PRIMARY KEY,
+            environment TEXT NOT NULL,          -- 'demo' or 'production'
+            balance_cents INTEGER NOT NULL,     -- available balance in cents
+            portfolio_value_cents INTEGER,      -- portfolio value in cents
+            pnl_cents INTEGER,                  -- daily P&L at snapshot time
+            trade_count INTEGER,                -- daily trade count at snapshot time
+            wins INTEGER,                       -- daily wins at snapshot time
+            losses INTEGER,                     -- daily losses at snapshot time
+            note TEXT,                          -- optional context (e.g. 'startup', 'periodic', 'post_settle')
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_acct_bal_env ON account_balances(environment);
+        CREATE INDEX IF NOT EXISTS idx_acct_bal_created ON account_balances(created_at);
     `);
 
     ready = true;
@@ -826,6 +847,111 @@ async function getCycleAnalysis(periodKey) {
     }
 }
 
+// ── Account Balance Snapshots ─────────────────────────────────
+
+async function saveBalanceSnapshot(snap) {
+    if (!ready) return;
+    try {
+        await pool.query(`
+            INSERT INTO account_balances (environment, balance_cents, portfolio_value_cents, pnl_cents, trade_count, wins, losses, note)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `, [
+            snap.environment,
+            snap.balanceCents,
+            snap.portfolioValueCents || null,
+            snap.pnlCents || null,
+            snap.tradeCount || null,
+            snap.wins || null,
+            snap.losses || null,
+            snap.note || null,
+        ]);
+    } catch (e) {
+        console.error('[db] Failed to save balance snapshot:', e.message);
+    }
+}
+
+async function getBalanceHistory(options = {}) {
+    if (!ready) return [];
+    try {
+        let query = 'SELECT * FROM account_balances';
+        const params = [];
+        const conditions = [];
+
+        if (options.environment) {
+            params.push(options.environment);
+            conditions.push(`environment = $${params.length}`);
+        }
+        if (options.since) {
+            params.push(options.since);
+            conditions.push(`created_at >= $${params.length}`);
+        }
+
+        if (conditions.length > 0) {
+            query += ' WHERE ' + conditions.join(' AND ');
+        }
+
+        query += ' ORDER BY created_at DESC';
+
+        if (options.limit) {
+            params.push(options.limit);
+            query += ` LIMIT $${params.length}`;
+        }
+
+        const { rows } = await pool.query(query, params);
+        return rows;
+    } catch (e) {
+        console.error('[db] Failed to get balance history:', e.message);
+        return [];
+    }
+}
+
+async function getLatestBalance(environment) {
+    if (!ready) return null;
+    try {
+        const { rows } = await pool.query(
+            'SELECT * FROM account_balances WHERE environment = $1 ORDER BY created_at DESC LIMIT 1',
+            [environment]
+        );
+        return rows.length > 0 ? rows[0] : null;
+    } catch (e) {
+        console.error('[db] Failed to get latest balance:', e.message);
+        return null;
+    }
+}
+
+async function getBalanceSummary() {
+    if (!ready) return [];
+    try {
+        // Get the latest balance for each environment plus 24h change
+        const { rows } = await pool.query(`
+            WITH latest AS (
+                SELECT DISTINCT ON (environment)
+                    environment, balance_cents, portfolio_value_cents, pnl_cents,
+                    trade_count, wins, losses, created_at
+                FROM account_balances
+                ORDER BY environment, created_at DESC
+            ),
+            day_ago AS (
+                SELECT DISTINCT ON (environment)
+                    environment, balance_cents AS balance_24h_ago
+                FROM account_balances
+                WHERE created_at <= NOW() - INTERVAL '24 hours'
+                ORDER BY environment, created_at DESC
+            )
+            SELECT l.*, d.balance_24h_ago,
+                   CASE WHEN d.balance_24h_ago IS NOT NULL
+                        THEN l.balance_cents - d.balance_24h_ago
+                        ELSE NULL END AS change_24h_cents
+            FROM latest l
+            LEFT JOIN day_ago d ON l.environment = d.environment
+        `);
+        return rows;
+    } catch (e) {
+        console.error('[db] Failed to get balance summary:', e.message);
+        return [];
+    }
+}
+
 // ── Cleanup ────────────────────────────────────────────────────
 
 async function close() {
@@ -864,4 +990,9 @@ module.exports = {
     getOrderbookHistory,
     getMarketDataHistory,
     getCycleAnalysis,
+    // Account balance tracking
+    saveBalanceSnapshot,
+    getBalanceHistory,
+    getLatestBalance,
+    getBalanceSummary,
 };

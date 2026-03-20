@@ -1349,15 +1349,16 @@ app.get('/api/trading/status', (req, res) => {
 app.get('/api/trading/analytics', async (req, res) => {
     const db = require('./db');
     try {
-        const [dailyHistory, cumulativePnl, winRateByDirection, winRateByHour, winRateByStrategy, totalTrades] = await Promise.all([
+        const [dailyHistory, cumulativePnl, winRateByDirection, winRateByHour, winRateByStrategy, totalTrades, balanceSummary] = await Promise.all([
             db.getDailyStatsHistory(90),
             db.getCumulativePnl(),
             db.getWinRateByDirection(),
             db.getWinRateByHour(),
             db.getWinRateByStrategy(),
             db.getTradeCount(),
+            db.getBalanceSummary(),
         ]);
-        res.json({ dailyHistory, cumulativePnl, winRateByDirection, winRateByHour, winRateByStrategy, totalTrades });
+        res.json({ dailyHistory, cumulativePnl, winRateByDirection, winRateByHour, winRateByStrategy, totalTrades, balanceSummary });
     } catch (e) {
         console.error('[api] Analytics error:', e.message);
         res.status(500).json({ error: 'Failed to load analytics' });
@@ -1418,6 +1419,32 @@ app.get('/api/snapshots/cycle/:periodKey', async (req, res) => {
         res.json(analysis);
     } catch (e) {
         res.status(500).json({ error: e.message });
+    }
+});
+
+// ── Account Balance Tracking Endpoints ────────────────────────
+
+app.get('/api/trading/balance-history', async (req, res) => {
+    try {
+        const options = {};
+        if (req.query.environment) options.environment = req.query.environment;
+        if (req.query.since) options.since = req.query.since;
+        options.limit = parseInt(req.query.limit || '500', 10);
+        const history = await db.getBalanceHistory(options);
+        res.json({ history });
+    } catch (e) {
+        console.error('[api] Balance history error:', e.message);
+        res.status(500).json({ error: 'Failed to load balance history' });
+    }
+});
+
+app.get('/api/trading/balance-summary', async (req, res) => {
+    try {
+        const summary = await db.getBalanceSummary();
+        res.json({ accounts: summary });
+    } catch (e) {
+        console.error('[api] Balance summary error:', e.message);
+        res.status(500).json({ error: 'Failed to load balance summary' });
     }
 });
 
