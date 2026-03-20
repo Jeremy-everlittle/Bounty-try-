@@ -515,6 +515,7 @@ function getSecondsUntilTarget(target) {
 
 function capturePredictionSnapshot(snapshotType, periodKey, ticker, strike, currentPrice, prediction, betQuality, minutesAhead, marketData) {
     const bq = betQuality || prediction._betQuality;
+    const factors = bq ? bq.factors : null;
     db.savePredictionSnapshot({
         periodKey,
         snapshotType,
@@ -528,12 +529,28 @@ function capturePredictionSnapshot(snapshotType, periodKey, ticker, strike, curr
         direction: prediction.predictedPrice >= strike ? 'up' : 'down',
         minutesAhead,
         shouldBet: bq ? bq.shouldBet : null,
-        betQuality: bq ? bq.quality : null,
+        betQualityScore: bq ? bq.quality : null,
         betEdge: bq ? bq.edge : null,
-        kellyFraction: bq ? bq.kellyFraction : null,
         betSize: bq ? bq.betSize : null,
         betSizeReason: bq ? bq.betSizeReason : null,
+        convictionTier: bq ? bq.convictionTier : null,
         skipReason: bq && !bq.shouldBet ? bq.reason : null,
+        // Individual quality factors
+        factorHasMinEdge: factors ? factors.hasMinEdge : null,
+        factorHasConfidence: factors ? factors.hasConfidence : null,
+        factorNotChoppy: factors ? factors.notChoppy : null,
+        factorNotExhausted: factors ? factors.notExhausted : null,
+        factorHasTime: factors ? factors.hasTime : null,
+        factorSignalAgreement: factors ? factors.signalAgreement : null,
+        // Kelly calculation details
+        kellyEntryPrice: bq ? bq.kellyEntryPrice : null,
+        kellyWinProfit: bq ? bq.kellyWinProfit : null,
+        kellyLossAmount: bq ? bq.kellyLossAmount : null,
+        kellyRaw: bq ? bq.kellyRaw : null,
+        kellyFraction: bq ? bq.kellyFraction : null,
+        kellyHasEdge: bq ? bq.kellyHasEdge : null,
+        kellyError: bq ? bq.kellyError : null,
+        // Signals & regime
         signals: prediction.signals || null,
         regimeInfo: prediction._regimeInfo || null,
         ensembleConfidence: prediction.ensembleConfidence || null,
@@ -541,14 +558,13 @@ function capturePredictionSnapshot(snapshotType, periodKey, ticker, strike, curr
         exhaustionType: prediction._exhaustion ? prediction._exhaustion.type : null,
         choppinessAdx: prediction._choppiness ? prediction._choppiness.adx : null,
         isChoppy: prediction._choppiness ? prediction._choppiness.choppy : null,
-        sessionRisk: {
-            consecutiveLosses: engine.sessionRisk.consecutiveLosses,
-            consecutiveWins: engine.sessionRisk.consecutiveWins,
-            currentDrawdown: engine.sessionRisk.currentDrawdown,
-            coolingOff: engine.sessionRisk.coolingOff,
-            edgeDecayAlert: engine.sessionRisk.edgeDecayAlert,
-            riskMultiplier: engine.getSessionRiskMultiplier(),
-        },
+        // Session risk (individual fields)
+        sessionConsecutiveLosses: engine.sessionRisk.consecutiveLosses,
+        sessionConsecutiveWins: engine.sessionRisk.consecutiveWins,
+        sessionDrawdown: engine.sessionRisk.currentDrawdown,
+        sessionCoolingOff: engine.sessionRisk.coolingOff,
+        sessionEdgeDecay: engine.sessionRisk.edgeDecayAlert,
+        sessionRiskMultiplier: engine.getSessionRiskMultiplier(),
         marketData: {
             fundingRate: marketData.fundingRate,
             fearGreed: marketData.fearGreed,
@@ -901,13 +917,17 @@ async function fetchAllData() {
                             settlementPrice: lastGraded.actualPrice,
                         });
 
-                        // ── DB: backfill prediction outcome ──
+                        // ── DB: backfill prediction + decision outcomes ──
                         db.updatePredictionOutcome(lastGraded.periodKey, {
                             actualPrice: lastGraded.actualPrice,
                             actualDirection: lastGraded.actualDirection,
                             wasCorrect: lastGraded.correct,
                             pnlCents: null, // filled by trade-executor settlement
                         }).catch(e => console.error('[db] Failed to backfill prediction outcome:', e.message));
+                        db.updateDecisionOutcome(lastGraded.periodKey, {
+                            wasCorrect: lastGraded.correct,
+                            pnlCents: null,
+                        }).catch(e => console.error('[db] Failed to backfill decision outcome:', e.message));
                     } else {
                         console.warn(`[server] No graded prediction found for period ${currentPeriod.periodKey} — forcing onPeriodEnd with price-based grading`);
                         // Fallback: grade based on current price vs strike

@@ -479,6 +479,28 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             currentPrice: prediction?.predictedPrice, strike,
             details: betQuality ? { quality: betQuality.quality, betSize: betQuality.betSize, factors: betQuality.factors } : null,
         });
+        // ── DB: log skip decision with full context ──
+        db.saveDecisionLog({
+            periodKey,
+            ticker: kalshiTicker,
+            decision: 'skip',
+            direction: prediction?.predictedPrice >= strike ? 'up' : 'down',
+            side: prediction?.predictedPrice >= strike ? 'yes' : 'no',
+            btcPrice: prediction?.predictedPrice,
+            strike,
+            distanceFromStrike: prediction?.predictedPrice ? prediction.predictedPrice - strike : null,
+            probability: prediction?.probability,
+            edge: betQuality?.edge,
+            kellyEntryPrice: betQuality?.kellyEntryPrice,
+            kellyRaw: betQuality?.kellyRaw,
+            kellyHasEdge: betQuality?.kellyHasEdge,
+            kellyError: betQuality?.kellyError,
+            qualityScore: betQuality?.quality,
+            factors: betQuality?.factors,
+            betSize: betQuality?.betSize,
+            convictionTier: betQuality?.convictionTier,
+            reason,
+        }).catch(e => console.error('[db] Decision log error:', e.message));
         return;
     }
 
@@ -564,8 +586,36 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     if (limitPrice === null) {
         console.log(`[trade-executor] No liquidity on orderbook — skipping order, will retry next cycle`);
         setThought('waiting', 'No liquidity on orderbook — waiting for orders to appear');
-        return; // Don't place order, don't count as fill failure — next cycle will check again
+        db.saveDecisionLog({
+            periodKey, ticker: kalshiTicker, decision: 'no_liquidity',
+            direction: isUp ? 'up' : 'down', side,
+            btcPrice: prediction.predictedPrice, strike,
+            distanceFromStrike: prediction.predictedPrice - strike,
+            probability: prediction.probability, edge: betQuality.edge,
+            qualityScore: betQuality.quality, betSize: betQuality.betSize,
+            reason: 'No liquidity on Kalshi orderbook',
+        }).catch(e => console.error('[db] Decision log error:', e.message));
+        return;
     }
+
+    // ── DB: log bet decision ──
+    db.saveDecisionLog({
+        periodKey, ticker: kalshiTicker, decision: 'bet',
+        direction: isUp ? 'up' : 'down', side,
+        btcPrice: prediction.predictedPrice, strike,
+        distanceFromStrike: prediction.predictedPrice - strike,
+        probability: prediction.probability, edge: betQuality.edge,
+        kellyEntryPrice: betQuality.kellyEntryPrice,
+        kellyRaw: betQuality.kellyRaw,
+        kellyHasEdge: betQuality.kellyHasEdge,
+        qualityScore: betQuality.quality,
+        factors: betQuality.factors,
+        betSize: betQuality.betSize,
+        convictionTier: betQuality.convictionTier,
+        contracts,
+        limitPrice,
+        reason: 'Good entry',
+    }).catch(e => console.error('[db] Decision log error:', e.message));
 
     const tradeInfo = {
         ticker: kalshiTicker,

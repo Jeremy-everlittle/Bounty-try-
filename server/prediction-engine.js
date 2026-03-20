@@ -1789,20 +1789,24 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     let kellyHasEdge = false;
     let kellyFraction = 0;
     let kellyError = null;
+    let kellyEntryPrice = null;  // actual Kalshi ask price in cents
+    let kellyWinProfit = null;
+    let kellyLossAmount = null;
 
     if (kalshiEntryPrice === null) {
         kellyError = 'No Kalshi orderbook data — cannot calculate edge';
         console.log(`[bet-quality] ${kellyError}`);
     } else {
         const estimatedEntryPrice = Math.max(0.05, Math.min(0.95, kalshiEntryPrice));
-        const winProfit = (1.0 - fee) - estimatedEntryPrice - fee;
-        const lossAmount = estimatedEntryPrice + fee;
-        kellyRaw = winProfit > 0
-            ? (probForBet * winProfit - (1 - probForBet) * lossAmount) / winProfit
+        kellyEntryPrice = Math.round(estimatedEntryPrice * 100); // store in cents
+        kellyWinProfit = (1.0 - fee) - estimatedEntryPrice - fee;
+        kellyLossAmount = estimatedEntryPrice + fee;
+        kellyRaw = kellyWinProfit > 0
+            ? (probForBet * kellyWinProfit - (1 - probForBet) * kellyLossAmount) / kellyWinProfit
             : 0;
         kellyFraction = Math.max(0, kellyRaw * 0.25); // Quarter Kelly
         kellyHasEdge = kellyRaw > 0;
-        console.log(`[bet-quality] Kalshi entry=${(estimatedEntryPrice*100).toFixed(0)}c | prob=${(probForBet*100).toFixed(1)}% | kelly=${kellyRaw.toFixed(3)} | edge=${kellyHasEdge ? 'YES' : 'NO'}`);
+        console.log(`[bet-quality] Kalshi entry=${kellyEntryPrice}c | prob=${(probForBet*100).toFixed(1)}% | kelly=${kellyRaw.toFixed(3)} | edge=${kellyHasEdge ? 'YES' : 'NO'}`);
     }
 
     // If Kelly says no edge after fees, or no orderbook data, override shouldBet
@@ -1813,7 +1817,8 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         quality, shouldBet: shouldBetAdjusted, waitForBetter: !shouldBetAdjusted && minutesAhead > 8,
         suggestedWait, edge, factors, choppiness: chop, exhaustion,
         betSize, betSizeReason, convictionTier,
-        kellyFraction, kellyHasEdge, kellyError,
+        kellyEntryPrice, kellyWinProfit, kellyLossAmount,
+        kellyRaw, kellyFraction, kellyHasEdge, kellyError,
         sessionRisk: {
             consecutiveLosses: sessionRisk.consecutiveLosses,
             consecutiveWins: sessionRisk.consecutiveWins,

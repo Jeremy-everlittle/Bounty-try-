@@ -38,32 +38,50 @@ async function init() {
         return null;
     }
 
-    // Create tables
+    // ── Drop all old tables (user confirmed no valid data to keep) ──
     await pool.query(`
+        DROP TABLE IF EXISTS trades CASCADE;
+        DROP TABLE IF EXISTS daily_stats CASCADE;
+        DROP TABLE IF EXISTS positions CASCADE;
+        DROP TABLE IF EXISTS prediction_snapshots CASCADE;
+        DROP TABLE IF EXISTS price_snapshots CASCADE;
+        DROP TABLE IF EXISTS orderbook_snapshots CASCADE;
+        DROP TABLE IF EXISTS market_data_snapshots CASCADE;
+        DROP TABLE IF EXISTS account_balances CASCADE;
+    `);
+    console.log('[db] Dropped old tables — clean slate');
+
+    // ── Create tables ──
+    await pool.query(`
+        -- ═══════════════════════════════════════════════════════════
+        -- TRADES — Every order placed, filled, failed, or settled
+        -- ═══════════════════════════════════════════════════════════
         CREATE TABLE IF NOT EXISTS trades (
             id SERIAL PRIMARY KEY,
-            type TEXT NOT NULL,
+            type TEXT NOT NULL,                 -- 'buy','sell','settle','buy_failed','sell_unfilled','dip_buy', etc.
             time TEXT NOT NULL,
             ticker TEXT,
-            side TEXT,
+            side TEXT,                          -- 'yes' or 'no'
             contracts INTEGER,
-            limit_price INTEGER,
-            entry_price INTEGER,
+            limit_price INTEGER,               -- price offered (cents)
+            entry_price INTEGER,               -- actual fill price (cents)
             period_key TEXT,
-            direction TEXT,
+            direction TEXT,                    -- 'up' or 'down'
             pnl_cents INTEGER,
-            correct INTEGER,
-            strategy TEXT,
+            correct INTEGER,                   -- 1=correct, 0=wrong
+            strategy TEXT,                     -- 'initial','press','dip','late_lock','force', etc.
             order_id TEXT,
             filled_contracts INTEGER,
-            data TEXT,
+            data TEXT,                         -- extra fields as JSON
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
-
         CREATE INDEX IF NOT EXISTS idx_trades_time ON trades(time);
         CREATE INDEX IF NOT EXISTS idx_trades_type ON trades(type);
         CREATE INDEX IF NOT EXISTS idx_trades_period ON trades(period_key);
 
+        -- ═══════════════════════════════════════════════════════════
+        -- DAILY STATS — Aggregate P&L per day
+        -- ═══════════════════════════════════════════════════════════
         CREATE TABLE IF NOT EXISTS daily_stats (
             date TEXT PRIMARY KEY,
             pnl_cents INTEGER DEFAULT 0,
@@ -73,6 +91,9 @@ async function init() {
             updated_at TIMESTAMPTZ DEFAULT NOW()
         );
 
+        -- ═══════════════════════════════════════════════════════════
+        -- POSITIONS — Singleton: current open position (survives restart)
+        -- ═══════════════════════════════════════════════════════════
         CREATE TABLE IF NOT EXISTS positions (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             ticker TEXT,
@@ -88,63 +109,148 @@ async function init() {
         );
 
         -- ═══════════════════════════════════════════════════════════
-        -- PREDICTION CYCLE SNAPSHOTS — Full record of every cycle
-        -- Captures: all inputs, prediction outputs, bet quality,
-        -- and eventual outcome for algorithm improvement
+        -- PREDICTION SNAPSHOTS — Full record of every prediction cycle
+        -- Every input, output, bet quality factor, Kelly calculation,
+        -- Kalshi orderbook price, and eventual outcome.
+        -- This is the PRIMARY table for algorithm improvement.
         -- ═══════════════════════════════════════════════════════════
-
         CREATE TABLE IF NOT EXISTS prediction_snapshots (
             id SERIAL PRIMARY KEY,
             period_key TEXT NOT NULL,
-            snapshot_type TEXT NOT NULL,        -- 'new_period', 'update', 'settlement'
+            snapshot_type TEXT NOT NULL,         -- 'new_period', 'update'
             ticker TEXT,
             strike NUMERIC,
-            current_price NUMERIC,
-            predicted_price NUMERIC,
-            probability NUMERIC,
-            raw_probability NUMERIC,
-            confidence NUMERIC,
+            current_price NUMERIC,              -- BTC price at prediction time
+            predicted_price NUMERIC,            -- model predicted price
+            probability NUMERIC,                -- P(above strike) after calibration
+            raw_probability NUMERIC,            -- P(above strike) before calibration
+            confidence NUMERIC,                 -- model confidence (0-1)
             direction TEXT,                     -- 'up' or 'down'
             minutes_ahead NUMERIC,
-            -- Bet quality assessment
-            should_bet BOOLEAN,
-            bet_quality NUMERIC,
-            bet_edge NUMERIC,
-            kelly_fraction NUMERIC,
-            bet_size NUMERIC,
-            bet_size_reason TEXT,
-            skip_reason TEXT,
-            -- Prediction signals (all individual signal values)
-            signals JSONB,
-            -- Regime info
-            regime_info JSONB,
+
+            -- ── Bet quality assessment ──
+            should_bet BOOLEAN,                 -- final decision: place bet or skip
+            bet_quality_score NUMERIC,          -- weighted quality score (0-1)
+            bet_edge NUMERIC,                   -- edge = probForBet - 0.50
+            bet_size NUMERIC,                   -- position size multiplier
+            bet_size_reason TEXT,               -- human-readable sizing reason
+            conviction_tier TEXT,               -- null, 'ELEVATED', 'HIGH', 'LOCK'
+            skip_reason TEXT,                   -- why bet was skipped (if should_bet=false)
+
+            -- ── Individual quality factors (each true/false) ──
+            -- These determine the quality score. Track each to find which blocks good bets.
+            factor_has_min_edge BOOLEAN,
+            factor_has_confidence BOOLEAN,
+            factor_not_choppy BOOLEAN,
+            factor_not_exhausted BOOLEAN,
+            factor_has_time BOOLEAN,
+            factor_signal_agreement BOOLEAN,
+
+            -- ── Kelly calculation (actual Kalshi orderbook) ──
+            -- This determines if there's real edge after fees.
+            kelly_entry_price NUMERIC,          -- actual best ask from Kalshi orderbook (cents)
+            kelly_win_profit NUMERIC,           -- profit if correct (dollars)
+            kelly_loss_amount NUMERIC,           -- loss if wrong (dollars)
+            kelly_raw NUMERIC,                  -- raw Kelly fraction (negative = no edge)
+            kelly_fraction NUMERIC,             -- quarter-Kelly used for sizing
+            kelly_has_edge BOOLEAN,             -- kellyRaw > 0
+            kelly_error TEXT,                   -- error message if orderbook unavailable
+
+            -- ── Prediction signals ──
+            signals JSONB,                      -- all individual signal values from ensemble
+            regime_info JSONB,                  -- market regime classification
             ensemble_confidence NUMERIC,
-            -- Exhaustion / choppiness
+
+            -- ── Market microstructure ──
             exhaustion_score NUMERIC,
             exhaustion_type TEXT,
             choppiness_adx NUMERIC,
             is_choppy BOOLEAN,
-            -- Session risk state at time of prediction
-            session_risk JSONB,
-            -- Outcome (filled in at settlement)
-            actual_price NUMERIC,
-            actual_direction TEXT,
-            was_correct BOOLEAN,
-            pnl_cents INTEGER,
-            -- Full market data snapshot (JSON for flexibility)
-            market_data JSONB,
+
+            -- ── Session risk state ──
+            session_consecutive_losses INTEGER,
+            session_consecutive_wins INTEGER,
+            session_drawdown NUMERIC,
+            session_cooling_off BOOLEAN,
+            session_edge_decay BOOLEAN,
+            session_risk_multiplier NUMERIC,
+
+            -- ── Outcome (filled at settlement) ──
+            actual_price NUMERIC,               -- actual BTC price at period end
+            actual_direction TEXT,               -- 'up' or 'down'
+            was_correct BOOLEAN,                -- prediction correct?
+            pnl_cents INTEGER,                  -- P&L from trade (if any)
+
+            -- ── Context snapshots ──
+            market_data JSONB,                  -- funding, sentiment, macro context
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
-
         CREATE INDEX IF NOT EXISTS idx_pred_snap_period ON prediction_snapshots(period_key);
         CREATE INDEX IF NOT EXISTS idx_pred_snap_type ON prediction_snapshots(snapshot_type);
         CREATE INDEX IF NOT EXISTS idx_pred_snap_created ON prediction_snapshots(created_at);
+        CREATE INDEX IF NOT EXISTS idx_pred_snap_should_bet ON prediction_snapshots(should_bet);
+        CREATE INDEX IF NOT EXISTS idx_pred_snap_correct ON prediction_snapshots(was_correct);
 
         -- ═══════════════════════════════════════════════════════════
-        -- PRICE SNAPSHOTS — BTC price every tick during each period
+        -- DECISION LOG — Every bet/skip decision with full reasoning
+        -- One row per decision point. Links to prediction_snapshots.
+        -- Use this to audit: "why did we skip?" or "why did we bet?"
+        -- ═══════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS decision_log (
+            id SERIAL PRIMARY KEY,
+            period_key TEXT NOT NULL,
+            ticker TEXT,
+            decision TEXT NOT NULL,             -- 'bet', 'skip', 'no_liquidity', 'error'
+            direction TEXT,                     -- 'up' or 'down'
+            side TEXT,                          -- 'yes' or 'no'
+
+            -- ── What we saw ──
+            btc_price NUMERIC,
+            strike NUMERIC,
+            distance_from_strike NUMERIC,       -- btcPrice - strike
+            probability NUMERIC,                -- P(our side wins)
+            edge NUMERIC,                       -- probability - 0.50
+            minutes_remaining NUMERIC,
+
+            -- ── Kalshi orderbook at decision time ──
+            kalshi_best_yes_ask INTEGER,        -- cents
+            kalshi_best_no_ask INTEGER,         -- cents
+            kalshi_yes_depth NUMERIC,           -- total yes liquidity
+            kalshi_no_depth NUMERIC,            -- total no liquidity
+            kalshi_entry_price INTEGER,         -- what we'd pay (cents)
+
+            -- ── Kelly verdict ──
+            kelly_raw NUMERIC,
+            kelly_has_edge BOOLEAN,
+            kelly_error TEXT,
+
+            -- ── Quality verdict ──
+            quality_score NUMERIC,
+            factors JSONB,                      -- {hasMinEdge: true, hasConfidence: false, ...}
+
+            -- ── Sizing ──
+            bet_size NUMERIC,
+            conviction_tier TEXT,
+            contracts INTEGER,                  -- actual contracts ordered (if bet)
+            limit_price INTEGER,                -- actual limit price used (if bet)
+
+            -- ── Outcome (filled after settlement) ──
+            was_correct BOOLEAN,
+            pnl_cents INTEGER,
+
+            -- ── Full reason string shown in UI ──
+            reason TEXT,
+
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_decision_period ON decision_log(period_key);
+        CREATE INDEX IF NOT EXISTS idx_decision_type ON decision_log(decision);
+        CREATE INDEX IF NOT EXISTS idx_decision_created ON decision_log(created_at);
+
+        -- ═══════════════════════════════════════════════════════════
+        -- PRICE SNAPSHOTS — BTC price every 10s during each period
         -- For analyzing optimal entry/exit timing
         -- ═══════════════════════════════════════════════════════════
-
         CREATE TABLE IF NOT EXISTS price_snapshots (
             id SERIAL PRIMARY KEY,
             period_key TEXT NOT NULL,
@@ -152,110 +258,90 @@ async function init() {
             strike NUMERIC,
             distance_from_strike NUMERIC,
             minutes_remaining NUMERIC,
-            -- Price context
             price_change_1m NUMERIC,
             price_change_5m NUMERIC,
             volatility NUMERIC,
             volume_ratio NUMERIC,
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
-
         CREATE INDEX IF NOT EXISTS idx_price_snap_period ON price_snapshots(period_key);
         CREATE INDEX IF NOT EXISTS idx_price_snap_created ON price_snapshots(created_at);
 
         -- ═══════════════════════════════════════════════════════════
-        -- KALSHI ORDERBOOK SNAPSHOTS — Full order book at key moments
-        -- For backtesting optimal entry prices and timing
+        -- KALSHI ORDERBOOK SNAPSHOTS — Contract orderbook at key moments
+        -- For backtesting entry prices and spread analysis
         -- ═══════════════════════════════════════════════════════════
-
         CREATE TABLE IF NOT EXISTS orderbook_snapshots (
             id SERIAL PRIMARY KEY,
             period_key TEXT NOT NULL,
             ticker TEXT NOT NULL,
-            snapshot_reason TEXT,               -- 'period_start', 'trade_entry', 'trade_exit', 'periodic', 'settlement'
+            snapshot_reason TEXT,                -- 'trade_entry','trade_exit','periodic','bet_quality'
             minutes_remaining NUMERIC,
-            -- Full orderbook data
-            yes_bids JSONB,                     -- [[price, size], ...]
-            no_bids JSONB,                      -- [[price, size], ...]
+            yes_bids JSONB,
+            no_bids JSONB,
             best_yes_bid NUMERIC,
             best_no_bid NUMERIC,
-            best_yes_ask NUMERIC,               -- derived: 1 - best_no_bid
-            best_no_ask NUMERIC,                -- derived: 1 - best_yes_bid
-            yes_depth NUMERIC,                  -- total yes bid volume
-            no_depth NUMERIC,                   -- total no bid volume
-            spread_cents NUMERIC,               -- best ask - best bid for yes side
-            -- BTC price at this moment
+            best_yes_ask NUMERIC,
+            best_no_ask NUMERIC,
+            yes_depth NUMERIC,
+            no_depth NUMERIC,
+            spread_cents NUMERIC,
             btc_price NUMERIC,
             strike NUMERIC,
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
-
         CREATE INDEX IF NOT EXISTS idx_ob_snap_period ON orderbook_snapshots(period_key);
         CREATE INDEX IF NOT EXISTS idx_ob_snap_ticker ON orderbook_snapshots(ticker);
         CREATE INDEX IF NOT EXISTS idx_ob_snap_created ON orderbook_snapshots(created_at);
 
         -- ═══════════════════════════════════════════════════════════
-        -- MARKET DATA SNAPSHOTS — External API data each cycle
-        -- Funding rate, fear/greed, liquidations, OI, etc.
+        -- MARKET DATA SNAPSHOTS — External signals each cycle
         -- ═══════════════════════════════════════════════════════════
-
         CREATE TABLE IF NOT EXISTS market_data_snapshots (
             id SERIAL PRIMARY KEY,
             period_key TEXT NOT NULL,
             btc_price NUMERIC,
             eth_price NUMERIC,
-            -- Binance data
             funding_rate NUMERIC,
             funding_premium NUMERIC,
             open_interest NUMERIC,
             long_short_ratio NUMERIC,
-            -- Liquidations
             liquidation_volume NUMERIC,
             liquidation_imbalance NUMERIC,
-            -- Sentiment
             fear_greed_value INTEGER,
             fear_greed_label TEXT,
-            -- Macro
             is_macro_day BOOLEAN,
             is_near_announcement BOOLEAN,
             macro_sizing_multiplier NUMERIC,
-            -- Binance orderbook imbalance (BTC spot)
             binance_bid_depth NUMERIC,
             binance_ask_depth NUMERIC,
             binance_ob_imbalance NUMERIC,
-            -- Price history summary
             price_high_30 NUMERIC,
             price_low_30 NUMERIC,
             price_range_pct NUMERIC,
             volatility_20 NUMERIC,
-            -- ETH correlation
             eth_price_history JSONB,
-            -- OI history
             oi_history JSONB,
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
-
         CREATE INDEX IF NOT EXISTS idx_mkt_snap_period ON market_data_snapshots(period_key);
         CREATE INDEX IF NOT EXISTS idx_mkt_snap_created ON market_data_snapshots(created_at);
 
         -- ═══════════════════════════════════════════════════════════
         -- ACCOUNT BALANCE SNAPSHOTS — Track demo & prod balances
-        -- Persists across builds for P&L tracking and betting logic
         -- ═══════════════════════════════════════════════════════════
-
         CREATE TABLE IF NOT EXISTS account_balances (
             id SERIAL PRIMARY KEY,
-            environment TEXT NOT NULL,          -- 'demo' or 'production'
-            balance_cents INTEGER NOT NULL,     -- available balance in cents
-            portfolio_value_cents INTEGER,      -- portfolio value in cents
-            pnl_cents INTEGER,                  -- daily P&L at snapshot time
-            trade_count INTEGER,                -- daily trade count at snapshot time
-            wins INTEGER,                       -- daily wins at snapshot time
-            losses INTEGER,                     -- daily losses at snapshot time
-            note TEXT,                          -- optional context (e.g. 'startup', 'periodic', 'post_settle')
+            environment TEXT NOT NULL,
+            balance_cents INTEGER NOT NULL,
+            portfolio_value_cents INTEGER,
+            pnl_cents INTEGER,
+            trade_count INTEGER,
+            wins INTEGER,
+            losses INTEGER,
+            note TEXT,
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
-
         CREATE INDEX IF NOT EXISTS idx_acct_bal_env ON account_balances(environment);
         CREATE INDEX IF NOT EXISTS idx_acct_bal_created ON account_balances(created_at);
     `);
@@ -522,11 +608,18 @@ async function savePredictionSnapshot(snap) {
             INSERT INTO prediction_snapshots (
                 period_key, snapshot_type, ticker, strike, current_price,
                 predicted_price, probability, raw_probability, confidence, direction,
-                minutes_ahead, should_bet, bet_quality, bet_edge, kelly_fraction,
-                bet_size, bet_size_reason, skip_reason, signals, regime_info,
-                ensemble_confidence, exhaustion_score, exhaustion_type,
-                choppiness_adx, is_choppy, session_risk, market_data
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
+                minutes_ahead, should_bet, bet_quality_score, bet_edge,
+                bet_size, bet_size_reason, conviction_tier, skip_reason,
+                factor_has_min_edge, factor_has_confidence, factor_not_choppy,
+                factor_not_exhausted, factor_has_time, factor_signal_agreement,
+                kelly_entry_price, kelly_win_profit, kelly_loss_amount,
+                kelly_raw, kelly_fraction, kelly_has_edge, kelly_error,
+                signals, regime_info, ensemble_confidence,
+                exhaustion_score, exhaustion_type, choppiness_adx, is_choppy,
+                session_consecutive_losses, session_consecutive_wins,
+                session_drawdown, session_cooling_off, session_edge_decay,
+                session_risk_multiplier, market_data
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45)
         `, [
             snap.periodKey,
             snap.snapshotType,
@@ -540,12 +633,28 @@ async function savePredictionSnapshot(snap) {
             snap.direction || null,
             snap.minutesAhead || null,
             snap.shouldBet != null ? snap.shouldBet : null,
-            snap.betQuality || null,
+            snap.betQualityScore || null,
             snap.betEdge || null,
-            snap.kellyFraction || null,
             snap.betSize || null,
             snap.betSizeReason || null,
+            snap.convictionTier || null,
             snap.skipReason || null,
+            // Individual quality factors
+            snap.factorHasMinEdge != null ? snap.factorHasMinEdge : null,
+            snap.factorHasConfidence != null ? snap.factorHasConfidence : null,
+            snap.factorNotChoppy != null ? snap.factorNotChoppy : null,
+            snap.factorNotExhausted != null ? snap.factorNotExhausted : null,
+            snap.factorHasTime != null ? snap.factorHasTime : null,
+            snap.factorSignalAgreement != null ? snap.factorSignalAgreement : null,
+            // Kelly calculation details
+            snap.kellyEntryPrice || null,
+            snap.kellyWinProfit || null,
+            snap.kellyLossAmount || null,
+            snap.kellyRaw || null,
+            snap.kellyFraction || null,
+            snap.kellyHasEdge != null ? snap.kellyHasEdge : null,
+            snap.kellyError || null,
+            // Signals & regime
             snap.signals ? JSON.stringify(snap.signals) : null,
             snap.regimeInfo ? JSON.stringify(snap.regimeInfo) : null,
             snap.ensembleConfidence || null,
@@ -553,7 +662,13 @@ async function savePredictionSnapshot(snap) {
             snap.exhaustionType || null,
             snap.choppinessAdx || null,
             snap.isChoppy != null ? snap.isChoppy : null,
-            snap.sessionRisk ? JSON.stringify(snap.sessionRisk) : null,
+            // Session risk (individual columns, not JSONB)
+            snap.sessionConsecutiveLosses || null,
+            snap.sessionConsecutiveWins || null,
+            snap.sessionDrawdown || null,
+            snap.sessionCoolingOff != null ? snap.sessionCoolingOff : null,
+            snap.sessionEdgeDecay != null ? snap.sessionEdgeDecay : null,
+            snap.sessionRiskMultiplier || null,
             snap.marketData ? JSON.stringify(snap.marketData) : null,
         ]);
     } catch (e) {
@@ -577,6 +692,99 @@ async function updatePredictionOutcome(periodKey, outcome) {
         ]);
     } catch (e) {
         console.error('[db] Failed to update prediction outcome:', e.message);
+    }
+}
+
+// ── Decision Log ─────────────────────────────────────────────
+
+async function saveDecisionLog(entry) {
+    if (!ready) return;
+    try {
+        await pool.query(`
+            INSERT INTO decision_log (
+                period_key, ticker, decision, direction, side,
+                btc_price, strike, distance_from_strike, probability, edge,
+                minutes_remaining, kalshi_best_yes_ask, kalshi_best_no_ask,
+                kalshi_yes_depth, kalshi_no_depth, kalshi_entry_price,
+                kelly_raw, kelly_has_edge, kelly_error,
+                quality_score, factors, bet_size, conviction_tier,
+                contracts, limit_price, reason
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+        `, [
+            entry.periodKey,
+            entry.ticker || null,
+            entry.decision,
+            entry.direction || null,
+            entry.side || null,
+            entry.btcPrice || null,
+            entry.strike || null,
+            entry.distanceFromStrike || null,
+            entry.probability || null,
+            entry.edge || null,
+            entry.minutesRemaining || null,
+            entry.kalshiBestYesAsk || null,
+            entry.kalshiBestNoAsk || null,
+            entry.kalshiYesDepth || null,
+            entry.kalshiNoDepth || null,
+            entry.kalshiEntryPrice || null,
+            entry.kellyRaw || null,
+            entry.kellyHasEdge != null ? entry.kellyHasEdge : null,
+            entry.kellyError || null,
+            entry.qualityScore || null,
+            entry.factors ? JSON.stringify(entry.factors) : null,
+            entry.betSize || null,
+            entry.convictionTier || null,
+            entry.contracts || null,
+            entry.limitPrice || null,
+            entry.reason || null,
+        ]);
+    } catch (e) {
+        console.error('[db] Failed to save decision log:', e.message);
+    }
+}
+
+async function updateDecisionOutcome(periodKey, outcome) {
+    if (!ready) return;
+    try {
+        await pool.query(`
+            UPDATE decision_log
+            SET was_correct = $2, pnl_cents = $3
+            WHERE period_key = $1 AND was_correct IS NULL
+        `, [periodKey, outcome.wasCorrect, outcome.pnlCents || null]);
+    } catch (e) {
+        console.error('[db] Failed to update decision outcome:', e.message);
+    }
+}
+
+async function getDecisionLog(options = {}) {
+    if (!ready) return [];
+    try {
+        let query = 'SELECT * FROM decision_log';
+        const params = [];
+        const conditions = [];
+        if (options.decision) {
+            params.push(options.decision);
+            conditions.push(`decision = $${params.length}`);
+        }
+        if (options.periodKey) {
+            params.push(options.periodKey);
+            conditions.push(`period_key = $${params.length}`);
+        }
+        if (options.since) {
+            params.push(options.since);
+            conditions.push(`created_at >= $${params.length}`);
+        }
+        if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ');
+        query += ' ORDER BY created_at DESC';
+        if (options.limit) {
+            params.push(options.limit);
+            query += ` LIMIT $${params.length}`;
+        }
+        const { rows } = await pool.query(query, params);
+        return rows;
+    } catch (e) {
+        console.error('[db] Failed to get decision log:', e.message);
+        return [];
     }
 }
 
@@ -984,6 +1192,10 @@ module.exports = {
     savePriceSnapshot,
     saveOrderbookSnapshot,
     saveMarketDataSnapshot,
+    // Decision log
+    saveDecisionLog,
+    updateDecisionOutcome,
+    getDecisionLog,
     // Cycle snapshot queries
     getPredictionSnapshots,
     getPriceHistory,
