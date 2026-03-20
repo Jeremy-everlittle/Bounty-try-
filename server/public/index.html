@@ -1970,8 +1970,10 @@
             const posArea = document.getElementById('trading-position-area');
             if (ts.currentPosition) {
                 const p = ts.currentPosition;
-                const costCents = p.totalCostCents || (p.contracts * p.entryPrice);
-                const maxPayoutCents = (p.totalContracts || p.contracts) * 100;
+                const entryPrice = p.entryPrice || 0;
+                const contractCount = p.totalContracts || p.contracts || 0;
+                const costCents = p.totalCostCents || (contractCount * entryPrice);
+                const maxPayoutCents = contractCount * 100;
                 const maxProfitCents = maxPayoutCents - costCents;
                 const holdMin = Math.floor(p.holdingSeconds / 60);
                 const holdSec = p.holdingSeconds % 60;
@@ -1979,7 +1981,7 @@
                 posArea.innerHTML = '<div class="trading-position">' +
                     '<div class="trading-position-label">OPEN POSITION</div>' +
                     '<div class="trading-position-detail">' +
-                    (p.totalContracts || p.contracts) + 'x ' + p.side.toUpperCase() + ' @ ' + p.entryPrice + '\u00A2' +
+                    contractCount + 'x ' + p.side.toUpperCase() + ' @ ' + entryPrice + '\u00A2' +
                     ' &middot; ' + holdStr +
                     '</div>' +
                     '<div style="display:flex;gap:12px;margin-top:4px">' +

@@ -106,6 +106,24 @@ async function getPositions(eventTicker) {
  * @returns {Object} Order response with order_id, status, etc.
  */
 async function placeOrder({ ticker, side, action, count, yesPrice, noPrice, type = 'limit', timeInForce }) {
+    // ── Validate critical parameters before sending to Kalshi ──
+    const priceCentsRaw = yesPrice !== undefined ? yesPrice : noPrice;
+    if (priceCentsRaw === undefined || priceCentsRaw === null || isNaN(priceCentsRaw) || !isFinite(priceCentsRaw)) {
+        const err = new Error(`[kalshi-trading] Invalid price: ${priceCentsRaw} — aborting order`);
+        console.error(err.message);
+        throw err;
+    }
+    if (!count || isNaN(count) || count <= 0) {
+        const err = new Error(`[kalshi-trading] Invalid count: ${count} — aborting order`);
+        console.error(err.message);
+        throw err;
+    }
+    if (!ticker) {
+        const err = new Error(`[kalshi-trading] Missing ticker — aborting order`);
+        console.error(err.message);
+        throw err;
+    }
+
     const clientOrderId = crypto.randomUUID();
 
     // Convert cents (integer) → dollars (string) for the new API format

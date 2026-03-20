@@ -270,7 +270,14 @@ function markFillFailed(periodKey) {
  * Returns a price in cents (5-95).
  */
 async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaining) {
-    if (config.paperMode) return Math.max(5, Math.min(95, theoreticalPrice));
+    // Guard against NaN/undefined — fall back to 50c (fair value)
+    if (theoreticalPrice === undefined || theoreticalPrice === null || isNaN(theoreticalPrice) || !isFinite(theoreticalPrice)) {
+        console.warn(`[trade-executor] getAggressivePrice received invalid theoreticalPrice: ${theoreticalPrice} — defaulting to 50c`);
+        theoreticalPrice = 50;
+    }
+    theoreticalPrice = Math.max(5, Math.min(95, Math.round(theoreticalPrice)));
+
+    if (config.paperMode) return theoreticalPrice;
 
     // Determine max slippage based on time remaining
     const maxSlippage = (minutesRemaining || 15) <= 4 ? 5
@@ -430,6 +437,11 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 
     // Determine limit price — must be aggressive enough to fill
     // Use probability as our max willingness-to-pay, but try the orderbook first
+    if (prediction.probability === undefined || prediction.probability === null || isNaN(prediction.probability)) {
+        console.error(`[trade-executor] prediction.probability is invalid (${prediction.probability}) — skipping trade`);
+        setThought('error', `Skipped bet: invalid probability (${prediction.probability})`);
+        return;
+    }
     const probForBet = isUp ? prediction.probability : (1 - prediction.probability);
     const theoreticalPrice = Math.round(probForBet * 100);
     const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, 15); // new prediction = ~15 min remaining
