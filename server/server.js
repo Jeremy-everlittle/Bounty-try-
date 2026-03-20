@@ -900,12 +900,16 @@ async function fetchAllData() {
                 }
             }
             if (state.kalshiOrderBook) {
+                // Debug: log top-level keys and format to diagnose price display issues
+                const topKeys = Object.keys(state.kalshiOrderBook).join(',');
                 const ob = state.kalshiOrderBook?.orderbook_fp || state.kalshiOrderBook?.orderbook || state.kalshiOrderBook;
+                const obKeys = ob ? Object.keys(ob).join(',') : 'null';
+                const isDollar = !!(ob?.yes_dollars || ob?.no_dollars);
                 const yesBids = ob?.yes_dollars || ob?.yes || [];
                 const noBids = ob?.no_dollars || ob?.no || [];
-                console.log(`[kalshi-ob] ${state.kalshiTicker} (${kalshiAuth.getEnvironment()}): yes_bids=${yesBids.length} no_bids=${noBids.length}${yesBids.length === 0 && noBids.length === 0 ? ' (EMPTY orderbook)' : ''}`);
+                console.log(`[kalshi-ob] ${state.kalshiTicker} (${kalshiAuth.getEnvironment()}): keys=[${topKeys}] ob_keys=[${obKeys}] isDollar=${isDollar} yes=${yesBids.length} no=${noBids.length}`);
                 if (yesBids.length > 0 || noBids.length > 0) {
-                    console.log(`[kalshi-ob] yes_bids=${JSON.stringify(yesBids.slice(0, 3))} no_bids=${JSON.stringify(noBids.slice(0, 3))}`);
+                    console.log(`[kalshi-ob] first_yes=${JSON.stringify(yesBids.slice(0, 3))} first_no=${JSON.stringify(noBids.slice(0, 3))} last_yes=${JSON.stringify(yesBids.slice(-2))} last_no=${JSON.stringify(noBids.slice(-2))}`);
                 }
             }
         } else {

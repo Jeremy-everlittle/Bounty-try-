@@ -2081,59 +2081,64 @@
             // orderbook_fp has yes_dollars/no_dollars (prices as dollar strings "0.81")
             // orderbook has yes/no (prices as cent integers 81)
             const isDollarFormat = !!(book.yes_dollars || book.no_dollars);
-            const yesBids = book.yes_dollars || book.yes || [];
-            const noBids = book.no_dollars || book.no || [];
+            const rawYesBids = book.yes_dollars || book.yes || [];
+            const rawNoBids = book.no_dollars || book.no || [];
 
             // Convert price entry to cents, handling both formats
             function toCents(val) {
                 const n = parseFloat(val);
-                // Dollar format: values are 0-1 range (e.g. 0.81 → 81)
-                // Cent format: values are 0-100 range (e.g. 81 → 81)
                 if (isDollarFormat) return Math.round(n * 100);
                 return Math.round(n);
             }
 
-            // Render YES bids
+            // Parse and sort bids by price descending (best/highest first)
+            function parseBids(raw) {
+                return raw.map(entry => ({
+                    priceCents: toCents(entry[0]),
+                    qty: parseInt(entry[1]) || Math.round(parseFloat(entry[1]) || 0)
+                })).sort((a, b) => b.priceCents - a.priceCents);
+            }
+
+            const yesBids = parseBids(rawYesBids);
+            const noBids = parseBids(rawNoBids);
+
+            // Render YES bids (best first)
             const yesEl = document.getElementById('kalshi-ob-yes');
             if (yesBids.length === 0) {
                 yesEl.innerHTML = '<div style="color:#484f58;text-align:center;padding:8px 0;">No bids</div>';
             } else {
-                const rows = yesBids.slice(0, 8).map(entry => {
-                    const priceCents = toCents(entry[0]);
-                    const qty = parseInt(entry[1]) || Math.round(parseFloat(entry[1]) || 0);
-                    const barW = Math.min(100, qty * 2);
+                const rows = yesBids.slice(0, 8).map(b => {
+                    const barW = Math.min(100, b.qty * 2);
                     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 4px;position:relative;">
                         <div style="position:absolute;left:0;top:0;bottom:0;width:${barW}%;background:rgba(63,185,80,0.1);border-radius:2px;"></div>
-                        <span style="color:#3fb950;z-index:1;">${priceCents}¢</span>
-                        <span style="color:#8b949e;z-index:1;">${qty}</span>
+                        <span style="color:#3fb950;z-index:1;">${b.priceCents}¢</span>
+                        <span style="color:#8b949e;z-index:1;">${b.qty}</span>
                     </div>`;
                 });
                 yesEl.innerHTML = rows.join('');
             }
 
-            // Render NO bids
+            // Render NO bids (best first)
             const noEl = document.getElementById('kalshi-ob-no');
             if (noBids.length === 0) {
                 noEl.innerHTML = '<div style="color:#484f58;text-align:center;padding:8px 0;">No bids</div>';
             } else {
-                const rows = noBids.slice(0, 8).map(entry => {
-                    const priceCents = toCents(entry[0]);
-                    const qty = parseInt(entry[1]) || Math.round(parseFloat(entry[1]) || 0);
-                    const barW = Math.min(100, qty * 2);
+                const rows = noBids.slice(0, 8).map(b => {
+                    const barW = Math.min(100, b.qty * 2);
                     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 4px;position:relative;">
                         <div style="position:absolute;left:0;top:0;bottom:0;width:${barW}%;background:rgba(248,81,73,0.1);border-radius:2px;"></div>
-                        <span style="color:#f85149;z-index:1;">${priceCents}¢</span>
-                        <span style="color:#8b949e;z-index:1;">${qty}</span>
+                        <span style="color:#f85149;z-index:1;">${b.priceCents}¢</span>
+                        <span style="color:#8b949e;z-index:1;">${b.qty}</span>
                     </div>`;
                 });
                 noEl.innerHTML = rows.join('');
             }
 
-            // Spread info
+            // Spread info using best (highest) bids
             const spreadEl = document.getElementById('kalshi-ob-spread');
             if (yesBids.length > 0 && noBids.length > 0) {
-                const bestYes = toCents(yesBids[0][0]);
-                const bestNo = toCents(noBids[0][0]);
+                const bestYes = yesBids[0].priceCents;
+                const bestNo = noBids[0].priceCents;
                 const yesAsk = 100 - bestNo; // to buy YES, cross the NO bid
                 const noAsk = 100 - bestYes; // to buy NO, cross the YES bid
                 spreadEl.textContent = `YES: bid ${bestYes}¢ / ask ${yesAsk}¢  |  NO: bid ${bestNo}¢ / ask ${noAsk}¢  |  Spread: ${Math.abs(yesAsk - bestYes)}¢`;
