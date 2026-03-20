@@ -1385,16 +1385,6 @@
                     totalPnlCents += settlement.pnlCents || 0;
                 } else if (!hasTrades) {
                     outcomeLabel = 'NO BET'; outcomeCls = 'period-outcome-nobet'; periodCls = 'period-no-bet';
-                } else if (p && p.correct !== null && p.correct !== undefined && p.actualPrice) {
-                    // No settlement record but prediction was graded — use prediction outcome
-                    // This handles cases where the position was cleared before settlement could run
-                    if (p.correct) {
-                        outcomeLabel = 'WIN'; outcomeCls = 'period-outcome-win'; periodCls = 'period-win';
-                        totalWins++;
-                    } else {
-                        outcomeLabel = 'LOSS'; outcomeCls = 'period-outcome-loss'; periodCls = 'period-loss';
-                        totalLosses++;
-                    }
                 } else {
                     outcomeLabel = 'PENDING'; outcomeCls = 'period-outcome-pending'; periodCls = 'period-pending';
                 }
