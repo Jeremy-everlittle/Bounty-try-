@@ -865,13 +865,35 @@ async function fetchAllData() {
         // ── Fetch Kalshi orderbook for bet quality assessment ──
         // This is the ACTUAL Kalshi contract orderbook (yes/no bids),
         // NOT the Binance BTC/USDT orderbook stored in state.orderBook.
+        // Try authenticated API first, fall back to public API if it fails.
         state.kalshiOrderBook = null;
         if (state.kalshiTicker) {
+            let kalshiOb = null;
+            // Try 1: authenticated API (uses current environment's base URL)
             try {
                 const kalshiTrading = require('./kalshi-trading');
-                const kalshiOb = await kalshiTrading.getOrderbook(state.kalshiTicker);
+                kalshiOb = await kalshiTrading.getOrderbook(state.kalshiTicker);
+            } catch (e) {
+                console.log(`[kalshi-ob] Authenticated fetch failed (${kalshiAuth.getEnvironment()}): ${e.message}${e.status ? ' status=' + e.status : ''}`);
+            }
+            // Try 2: public API (always available, no auth needed)
+            if (!kalshiOb) {
+                try {
+                    const publicUrl = `${KALSHI_MARKET_API}/markets/${state.kalshiTicker}/orderbook`;
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), 5000);
+                    const res = await fetch(publicUrl, { signal: controller.signal });
+                    clearTimeout(timer);
+                    if (res.ok) {
+                        kalshiOb = await res.json();
+                        console.log(`[kalshi-ob] Public API fallback OK for ${state.kalshiTicker}`);
+                    }
+                } catch (e2) {
+                    console.log(`[kalshi-ob] Public API fallback also failed: ${e2.message}`);
+                }
+            }
+            if (kalshiOb) {
                 state.kalshiOrderBook = kalshiOb;
-                // Debug: log what we got from Kalshi
                 const ob = kalshiOb?.orderbook_fp || kalshiOb?.orderbook || kalshiOb;
                 const yesBids = ob?.yes_dollars || ob?.yes || [];
                 const noBids = ob?.no_dollars || ob?.no || [];
@@ -879,8 +901,6 @@ async function fetchAllData() {
                 if (yesBids.length > 0 || noBids.length > 0) {
                     console.log(`[kalshi-ob] yes_bids=${JSON.stringify(yesBids.slice(0, 3))} no_bids=${JSON.stringify(noBids.slice(0, 3))}`);
                 }
-            } catch (e) {
-                console.log(`[kalshi-ob] Failed to fetch Kalshi orderbook: ${e.message}`);
             }
         }
 

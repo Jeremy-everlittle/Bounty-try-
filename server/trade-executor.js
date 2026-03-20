@@ -394,8 +394,25 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
     const maxPrice = Math.min(95, theoreticalPrice + maxSlippage);
 
     // Try to get the best price from the orderbook
+    // First try authenticated API, fall back to public API if it fails
+    let resp = null;
     try {
-        const resp = await trading.getOrderbook(ticker);
+        resp = await trading.getOrderbook(ticker);
+    } catch (e) {
+        console.log(`[trade-executor] Auth orderbook failed: ${e.message} — trying public API`);
+        try {
+            const publicUrl = `https://api.elections.kalshi.com/trade-api/v2/markets/${ticker}/orderbook`;
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 5000);
+            const res = await fetch(publicUrl, { signal: controller.signal });
+            clearTimeout(timer);
+            if (res.ok) resp = await res.json();
+        } catch (e2) {
+            console.log(`[trade-executor] Public orderbook also failed: ${e2.message}`);
+        }
+    }
+    try {
+        if (!resp) throw new Error('No orderbook data from either API');
         const book = resp.orderbook_fp || resp.orderbook || resp;
 
         // Kalshi only shows BIDS. To find the ask for our side:
