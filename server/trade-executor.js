@@ -99,6 +99,8 @@ let cachedBalance = null;     // { balanceCents, lastFetched }
 const BALANCE_CACHE_MS = 30000; // refresh balance every 30s
 let orderInFlight = false;    // mutex: prevent concurrent order placement
 let fillFailedPeriods = {};   // { periodKey: { count, lastAttempt } } — track fill failures for price adjustment
+let enteredPeriods = {};      // { periodKey: { side, ticker, entryTime } } — prevent duplicate entries even if position is cleared
+let syncZeroCount = 0;        // consecutive times sync read 0 contracts — require 3 before clearing
 
 // Auto-trader thought status — exposed to the frontend
 let traderThought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
@@ -490,6 +492,16 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         return;
     }
 
+    // CRITICAL: Don't re-enter a period we already entered, even if currentPosition was cleared
+    // This prevents the bug where syncPositionWithKalshi clears the position and we place
+    // duplicate orders, ending up with way more contracts on Kalshi than we're tracking
+    if (enteredPeriods[periodKey]) {
+        const ep = enteredPeriods[periodKey];
+        console.log(`[trade-executor] Already entered period ${periodKey} (${ep.side} at ${new Date(ep.entryTime).toLocaleTimeString()}) — skipping duplicate entry`);
+        setThought('holding', `Already entered this period (${ep.side})`, { side: ep.side });
+        return;
+    }
+
     // Close stale position from a previous period — settle it instead of silently discarding
     if (currentPosition && currentPosition.periodKey !== periodKey) {
         console.log(`[trade-executor] Stale position from ${currentPosition.periodKey} — auto-settling before new entry`);
@@ -578,6 +590,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             totalCostCents: contracts * limitPrice,
             totalContracts: contracts,
         };
+        enteredPeriods[periodKey] = { side, ticker: kalshiTicker, entryTime: Date.now() };
         logTrade('buy', tradeInfo);
         decisionLog.logTradeExecution({ ...tradeInfo, strategy: 'initial', currentPrice: prediction.predictedPrice, strike, probability: (probForBet * 100).toFixed(1) + '%' });
         dailyStats.tradeCount++;
@@ -652,6 +665,9 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             totalCostCents: filledContracts * limitPrice,
             totalContracts: filledContracts,
         };
+        // Mark this period as entered to prevent duplicate entries
+        enteredPeriods[periodKey] = { side, ticker: kalshiTicker, entryTime: Date.now() };
+        syncZeroCount = 0; // reset sync counter on new entry
         logTrade('buy', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: cappedContracts });
         dailyStats.tradeCount++;
         console.log(`[trade-executor] LIVE BUY: ${filledContracts}x ${side.toUpperCase()} on ${kalshiTicker} — order ${order.order_id} (${order.status})`);
@@ -912,6 +928,15 @@ function onPeriodEnd(gradeResult) {
 
     currentPosition = null;
     soldThisPeriod = null; // reset for new period
+    syncZeroCount = 0;
+    // Clean up old period entries (keep last 5 for safety)
+    const periodKeys = Object.keys(enteredPeriods);
+    if (periodKeys.length > 5) {
+        const sorted = periodKeys.sort();
+        for (let i = 0; i < sorted.length - 5; i++) {
+            delete enteredPeriods[sorted[i]];
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1157,6 +1182,7 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
                 totalCostCents: contracts * limitPrice,
                 totalContracts: contracts,
             };
+            enteredPeriods[periodKey] = { side, ticker, entryTime: Date.now() };
         }
         logTrade(strategy, tradeInfo);
         decisionLog.logTradeExecution({ ...tradeInfo, strategy });
@@ -1221,6 +1247,8 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
                 totalCostCents: filledContracts * limitPrice,
                 totalContracts: filledContracts,
             };
+            enteredPeriods[periodKey] = { side, ticker, entryTime: Date.now() };
+            syncZeroCount = 0;
         }
         logTrade(strategy, { ...tradeInfo, orderId: order.order_id, filledContracts });
         dailyStats.tradeCount++;
@@ -1416,6 +1444,8 @@ function resetState() {
     dailyStats.wins = 0;
     dailyStats.losses = 0;
     tradeLog.length = 0;
+    enteredPeriods = {};
+    syncZeroCount = 0;
     killSwitch = true;
     console.log('[trade-executor] State reset — kill switch activated');
 }
@@ -1486,69 +1516,60 @@ async function syncPositionWithKalshi() {
     if (Date.now() - lastPositionSync < POSITION_SYNC_MS) return;
     lastPositionSync = Date.now();
 
-    // Safety: never clear a position that was entered less than 60s ago
+    // Safety: never clear a position that was entered less than 90s ago
     // (Kalshi API may be slow to reflect newly placed orders)
     const positionAge = Date.now() - (currentPosition.entryTime || 0);
-    if (positionAge < 60000) {
+    if (positionAge < 90000) {
         return;
     }
 
     try {
-        const resp = await trading.getPositions();
-        const positions = resp.market_positions || resp.positions || [];
-        const match = positions.find(p => p.ticker === currentPosition.ticker);
+        // Use verifyPositionOnKalshi which correctly reads yes_count/no_count fields
+        const kalshiContracts = await verifyPositionOnKalshi(currentPosition.ticker, currentPosition.side);
 
-        if (match) {
-            // Use the correct fields: yes_count/no_count (or _fp variants)
-            // These are what Kalshi actually returns — NOT .position or .total_traded
-            const side = currentPosition.side;
-            const kalshiContracts = side === 'yes'
-                ? (Math.round(parseFloat(match.yes_count_fp)) || match.yes_count || match.position || match.total_traded || 0)
-                : (Math.round(parseFloat(match.no_count_fp)) || match.no_count || match.position || match.total_traded || 0);
-            const kalshiCostCents = match.market_exposure ? Math.round(match.market_exposure * 100) : null;
+        if (kalshiContracts === -1) {
+            // Verification failed (network error) — do nothing, retry next cycle
+            return;
+        }
 
-            if (kalshiContracts > 0) {
-                const oldTotal = currentPosition.totalContracts || currentPosition.contracts;
-                if (kalshiContracts !== oldTotal) {
-                    console.log(`[trade-executor] Position sync: app=${oldTotal} Kalshi=${kalshiContracts} contracts — updating to Kalshi count`);
-                    currentPosition.totalContracts = kalshiContracts;
-                    currentPosition.contracts = kalshiContracts;
-                    // If Kalshi has more than we tracked, update cost estimate
-                    if (kalshiContracts > oldTotal && currentPosition.entryPrice) {
-                        const oldCost = currentPosition.totalCostCents || (oldTotal * currentPosition.entryPrice);
-                        const extraContracts = kalshiContracts - oldTotal;
-                        currentPosition.totalCostCents = oldCost + (extraContracts * currentPosition.entryPrice);
-                        console.log(`[trade-executor] Position sync: adjusted cost for ${extraContracts} extra contracts`);
-                    }
-                    persistPosition();
+        if (kalshiContracts > 0) {
+            syncZeroCount = 0; // reset zero counter
+            const oldTotal = currentPosition.totalContracts || currentPosition.contracts;
+            if (kalshiContracts !== oldTotal) {
+                console.log(`[trade-executor] Position sync: app=${oldTotal} Kalshi=${kalshiContracts} contracts — updating to Kalshi count`);
+                currentPosition.totalContracts = kalshiContracts;
+                currentPosition.contracts = kalshiContracts;
+                // If Kalshi has more than we tracked, update cost estimate
+                if (kalshiContracts > oldTotal && currentPosition.entryPrice) {
+                    const oldCost = currentPosition.totalCostCents || (oldTotal * currentPosition.entryPrice);
+                    const extraContracts = kalshiContracts - oldTotal;
+                    currentPosition.totalCostCents = oldCost + (extraContracts * currentPosition.entryPrice);
+                    console.log(`[trade-executor] Position sync: adjusted cost for ${extraContracts} extra contracts`);
                 }
-                if (kalshiCostCents && kalshiCostCents !== currentPosition.totalCostCents) {
-                    console.log(`[trade-executor] Position sync: app cost=${currentPosition.totalCostCents}c Kalshi cost=${kalshiCostCents}c — updating`);
-                    currentPosition.totalCostCents = kalshiCostCents;
-                    // Recalculate entry price from actual cost
-                    if (kalshiContracts > 0) {
-                        currentPosition.entryPrice = Math.round(kalshiCostCents / kalshiContracts);
-                    }
-                    persistPosition();
-                }
-            } else {
-                // Kalshi shows 0 contracts — position was settled/expired
-                console.log(`[trade-executor] Position sync: Kalshi reports 0 contracts for ${currentPosition.ticker} — clearing stale position`);
-                currentPosition = null;
                 persistPosition();
             }
         } else {
-            // No matching position found on Kalshi — contract likely expired/settled
-            console.log(`[trade-executor] Position sync: no position found on Kalshi for ${currentPosition.ticker} — clearing stale position`);
-            currentPosition = null;
-            persistPosition();
+            // Kalshi reports 0 or no position — but require 3 consecutive zero readings
+            // before clearing (to handle API lag, temporary 404s, etc.)
+            syncZeroCount++;
+            console.log(`[trade-executor] Position sync: Kalshi reports 0 for ${currentPosition.ticker} (zero count: ${syncZeroCount}/3)`);
+            if (syncZeroCount >= 3 && positionAge > 120000) {
+                console.log(`[trade-executor] Position sync: confirmed 0 contracts after ${syncZeroCount} checks — clearing position`);
+                currentPosition = null;
+                syncZeroCount = 0;
+                persistPosition();
+            }
         }
     } catch (e) {
-        // 404 means the market/contract expired — but only clear if position is old enough
-        if (e.status === 404 && positionAge > 120000) {
-            console.log(`[trade-executor] Position sync: 404 for ${currentPosition?.ticker} — market expired, clearing position`);
-            currentPosition = null;
-            persistPosition();
+        // 404 means the market/contract expired — but require age check
+        if (e.status === 404 && positionAge > 180000) {
+            syncZeroCount++;
+            if (syncZeroCount >= 3) {
+                console.log(`[trade-executor] Position sync: 404 for ${currentPosition?.ticker} after ${syncZeroCount} checks — clearing position`);
+                currentPosition = null;
+                syncZeroCount = 0;
+                persistPosition();
+            }
         }
         // Other errors: silently fail — will retry next cycle
     }
