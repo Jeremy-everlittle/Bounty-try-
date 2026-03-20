@@ -321,7 +321,7 @@ async function canTrade(periodKey) {
 
     if (killSwitch) return { ok: false, reason: 'Kill switch active' };
     if (orderInFlight) return { ok: false, reason: 'Order already in flight' };
-    if (!trading.isConfigured() && !config.paperMode) {
+    if (!trading.isConfigured()) {
         return { ok: false, reason: 'Kalshi API not configured (set KALSHI_API_KEY + KALSHI_PRIVATE_KEY)' };
     }
     if (dailyStats.pnlCents <= -config.maxDailyLossCents) {
@@ -383,7 +383,7 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
     }
     theoreticalPrice = Math.max(5, Math.min(95, Math.round(theoreticalPrice)));
 
-    if (config.paperMode) return theoreticalPrice;
+    // Paper and live both use real orderbook for pricing
 
     // Determine max slippage based on time remaining
     // Increased from 1/3/5 — Kalshi BTC markets have wider spreads
@@ -443,7 +443,21 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
  * Returns 0 if we can't afford even 1 contract.
  */
 async function capContractsByBalance(contracts, pricePerContract) {
-    if (config.paperMode) return contracts;
+    // Paper mode: cap by paper balance instead of skipping
+    if (config.paperMode) {
+        const env = getEnvironment();
+        const availableCents = paperBalances[env] || 0;
+        const maxAffordable = Math.floor(availableCents / pricePerContract);
+        if (maxAffordable <= 0) {
+            console.log(`[trade-executor] Paper: can't afford any contracts: balance=${availableCents}c, price=${pricePerContract}c`);
+            return 0;
+        }
+        const capped = Math.min(contracts, maxAffordable);
+        if (capped < contracts) {
+            console.log(`[trade-executor] Paper: capping contracts ${contracts} → ${capped} (balance=${availableCents}c @ ${pricePerContract}c each)`);
+        }
+        return capped;
+    }
     try {
         const balanceResp = await trading.getBalance();
         const availableCents = balanceResp.balance;
@@ -637,24 +651,26 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     };
 
     if (config.paperMode) {
-        const costCents = contracts * limitPrice;
+        const cappedContracts = await capContractsByBalance(contracts, limitPrice);
+        if (cappedContracts <= 0) return;
+        const costCents = cappedContracts * limitPrice;
         const env = getEnvironment();
-        // Deduct from paper balance
         paperBalances[env] = (paperBalances[env] || 0) - costCents;
-        console.log(`[trade-executor] PAPER BUY: ${contracts}x ${side.toUpperCase()} on ${kalshiTicker} @ ${limitPrice}c | Cost=$${(costCents/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
-        setThought('bought', `Bought ${contracts}x ${side.toUpperCase()} @ ${limitPrice}c (paper)`, { edge: betQuality.edge, quality: betQuality.quality });
+        console.log(`[trade-executor] PAPER BUY: ${cappedContracts}x ${side.toUpperCase()} on ${kalshiTicker} @ ${limitPrice}c | Cost=$${(costCents/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
+        setThought('bought', `Bought ${cappedContracts}x ${side.toUpperCase()} @ ${limitPrice}c (paper)`, { edge: betQuality.edge, quality: betQuality.quality });
         currentPosition = {
             ticker: kalshiTicker,
             side,
-            contracts,
+            contracts: cappedContracts,
             entryPrice: limitPrice,
             orderId: 'paper-' + Date.now(),
             periodKey,
             entryTime: Date.now(),
             totalCostCents: costCents,
-            totalContracts: contracts,
+            totalContracts: cappedContracts,
         };
         enteredPeriods[periodKey] = { side, ticker: kalshiTicker, entryTime: Date.now() };
+        tradeInfo.contracts = cappedContracts;
         logTrade('buy', tradeInfo);
         decisionLog.logTradeExecution({ ...tradeInfo, strategy: 'initial', currentPrice: prediction.predictedPrice, strike, probability: (probForBet * 100).toFixed(1) + '%' });
         dailyStats.tradeCount++;
@@ -1118,15 +1134,20 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
     };
 
     if (config.paperMode) {
-        console.log(`[trade-executor] PAPER DIP-BUY: +${addContracts}x ${currentPosition.side.toUpperCase()} @ ${currentLimitPrice}c (${entryImprovement}c cheaper) | Prob=${(probForBet*100).toFixed(0)}%`);
+        const cappedAdd = await capContractsByBalance(addContracts, currentLimitPrice);
+        if (cappedAdd <= 0) return;
+        const addCost = cappedAdd * currentLimitPrice;
+        const env = getEnvironment();
+        paperBalances[env] = (paperBalances[env] || 0) - addCost;
+        console.log(`[trade-executor] PAPER DIP-BUY: +${cappedAdd}x ${currentPosition.side.toUpperCase()} @ ${currentLimitPrice}c (${entryImprovement}c cheaper) | Cost=$${(addCost/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
         // Update position with averaged entry
         const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
-        const addCost = addContracts * currentLimitPrice;
-        const newTotal = currentContracts + addContracts;
+        const newTotal = currentContracts + cappedAdd;
         currentPosition.totalCostCents = oldCost + addCost;
         currentPosition.totalContracts = newTotal;
         currentPosition.contracts = newTotal;
         currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal); // weighted avg
+        tradeInfo.contracts = cappedAdd;
         logTrade('dip_buy', tradeInfo);
         decisionLog.logTradeExecution({ ...tradeInfo, strategy: 'dip_buyer', currentPrice, strike });
         dailyStats.tradeCount++;
@@ -1222,8 +1243,7 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     const winProb = Math.min(0.99, 0.5 + 0.5 * erf(sigmaDistance / Math.SQRT2));
     const maxLockPrice = Math.min(95, Math.max(85, Math.round(winProb * 100)));
     // Use orderbook to find actual best price — may be much cheaper than our max
-    const limitPrice = config.paperMode ? maxLockPrice
-        : await getAggressivePrice(kalshiTicker, lockSide, maxLockPrice, minutesRemaining);
+    const limitPrice = await getAggressivePrice(kalshiTicker, lockSide, maxLockPrice, minutesRemaining);
     if (limitPrice === null) {
         console.log(`[trade-executor] Late-lock: no liquidity on orderbook — skipping, will retry next cycle`);
         return;
@@ -1277,28 +1297,32 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
     };
 
     if (config.paperMode) {
-        console.log(`[trade-executor] PAPER ${strategy.toUpperCase()}: ${contracts}x ${side.toUpperCase()} @ ${limitPrice}c | ${sigmaDistance.toFixed(1)}σ away | Expected +$${((contracts * profitPerContract) / 100).toFixed(2)}`);
+        const cappedContracts = await capContractsByBalance(contracts, limitPrice);
+        if (cappedContracts <= 0) return;
+        const costCents = cappedContracts * limitPrice;
+        const env = getEnvironment();
+        paperBalances[env] = (paperBalances[env] || 0) - costCents;
+        console.log(`[trade-executor] PAPER ${strategy.toUpperCase()}: ${cappedContracts}x ${side.toUpperCase()} @ ${limitPrice}c | ${sigmaDistance.toFixed(1)}σ away | Cost=$${(costCents/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
         if (currentPosition && currentPosition.periodKey === periodKey) {
-            // Adding to existing position
             const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
-            const addCost = contracts * limitPrice;
-            const newTotal = (currentPosition.totalContracts || currentPosition.contracts) + contracts;
-            currentPosition.totalCostCents = oldCost + addCost;
+            const newTotal = (currentPosition.totalContracts || currentPosition.contracts) + cappedContracts;
+            currentPosition.totalCostCents = oldCost + costCents;
             currentPosition.totalContracts = newTotal;
             currentPosition.contracts = newTotal;
-            currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal);
+            currentPosition.entryPrice = Math.round((oldCost + costCents) / newTotal);
         } else {
             currentPosition = {
-                ticker, side, contracts,
+                ticker, side, contracts: cappedContracts,
                 entryPrice: limitPrice,
                 orderId: 'paper-lock-' + Date.now(),
                 periodKey,
                 entryTime: Date.now(),
-                totalCostCents: contracts * limitPrice,
-                totalContracts: contracts,
+                totalCostCents: costCents,
+                totalContracts: cappedContracts,
             };
             enteredPeriods[periodKey] = { side, ticker, entryTime: Date.now() };
         }
+        tradeInfo.contracts = cappedContracts;
         logTrade(strategy, tradeInfo);
         decisionLog.logTradeExecution({ ...tradeInfo, strategy });
         dailyStats.tradeCount++;
@@ -1443,18 +1467,24 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
     };
 
     if (config.paperMode) {
-        console.log(`[trade-executor] PAPER RE-ENTRY: ${contracts}x ${origSide.toUpperCase()} @ ${limitPrice}c | Prob=${(probForBet*100).toFixed(0)}% | After sell: ${soldThisPeriod.reason}`);
+        const cappedContracts = await capContractsByBalance(contracts, limitPrice);
+        if (cappedContracts <= 0) return;
+        const costCents = cappedContracts * limitPrice;
+        const env = getEnvironment();
+        paperBalances[env] = (paperBalances[env] || 0) - costCents;
+        console.log(`[trade-executor] PAPER RE-ENTRY: ${cappedContracts}x ${origSide.toUpperCase()} @ ${limitPrice}c | Cost=$${(costCents/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
         currentPosition = {
             ticker: kalshiTicker,
             side: origSide,
-            contracts,
+            contracts: cappedContracts,
             entryPrice: limitPrice,
             orderId: 'paper-reentry-' + Date.now(),
             periodKey,
             entryTime: Date.now(),
-            totalCostCents: contracts * limitPrice,
-            totalContracts: contracts,
+            totalCostCents: costCents,
+            totalContracts: cappedContracts,
         };
+        tradeInfo.contracts = cappedContracts;
         logTrade('re_entry', tradeInfo);
         decisionLog.logTradeExecution({ ...tradeInfo, strategy: 're_entry', currentPrice, strike, probability: (probForBet * 100).toFixed(1) + '%' });
         dailyStats.tradeCount++;
@@ -1785,19 +1815,20 @@ async function pressBet(addContracts) {
     };
 
     if (config.paperMode) {
-        const limitPrice = currentPosition.entryPrice; // use same entry price
+        const limitPrice = currentPosition.entryPrice;
+        const cappedAdd = await capContractsByBalance(contractsToAdd, limitPrice);
+        if (cappedAdd <= 0) return { ok: false, reason: 'Insufficient paper balance' };
         const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
-        const addCost = contractsToAdd * limitPrice;
-        const newTotal = currentContracts + contractsToAdd;
+        const addCost = cappedAdd * limitPrice;
+        const newTotal = currentContracts + cappedAdd;
         currentPosition.totalCostCents = oldCost + addCost;
         currentPosition.totalContracts = newTotal;
-        // Deduct press cost from paper balance
         const env = getEnvironment();
         paperBalances[env] = (paperBalances[env] || 0) - addCost;
-        setThought('bought', `Pressed +${contractsToAdd}x ${side.toUpperCase()} @ ${limitPrice}c (now ${newTotal}x)`, { contracts: newTotal });
-        logTrade('buy', { ...tradeInfo, limitPrice, fillStatus: 'paper-press', filledContracts: contractsToAdd });
+        setThought('bought', `Pressed +${cappedAdd}x ${side.toUpperCase()} @ ${limitPrice}c (now ${newTotal}x)`, { contracts: newTotal });
+        logTrade('buy', { ...tradeInfo, limitPrice, fillStatus: 'paper-press', filledContracts: cappedAdd });
         dailyStats.tradeCount++;
-        return { ok: true, side, contracts: contractsToAdd, entryPrice: limitPrice, totalContracts: newTotal, mode: 'paper' };
+        return { ok: true, side, contracts: cappedAdd, entryPrice: limitPrice, totalContracts: newTotal, mode: 'paper' };
     }
 
     // Live: get price from orderbook and retry like forceBet
@@ -1922,30 +1953,32 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
     };
 
     if (config.paperMode) {
-        const limitPrice = Math.max(5, Math.min(95, theoreticalPrice));
-        const costCents = contracts * limitPrice;
+        // Use real orderbook price just like live mode
+        const limitPrice = await getAggressivePrice(kalshiTicker, side, Math.max(5, Math.min(95, theoreticalPrice)), 15) || Math.max(5, Math.min(95, theoreticalPrice));
+        const cappedContracts = await capContractsByBalance(contracts, limitPrice);
+        if (cappedContracts <= 0) return { ok: false, reason: 'Insufficient paper balance' };
+        const costCents = cappedContracts * limitPrice;
         const env = getEnvironment();
-        // Deduct from paper balance
         paperBalances[env] = (paperBalances[env] || 0) - costCents;
         if (addingToExisting) {
             const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
-            const addCost = costCents;
-            const newTotal = (currentPosition.totalContracts || currentPosition.contracts) + contracts;
-            currentPosition.totalCostCents = oldCost + addCost;
+            const newTotal = (currentPosition.totalContracts || currentPosition.contracts) + cappedContracts;
+            currentPosition.totalCostCents = oldCost + costCents;
             currentPosition.totalContracts = newTotal;
             currentPosition.contracts = newTotal;
-            currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal);
+            currentPosition.entryPrice = Math.round((oldCost + costCents) / newTotal);
         } else {
             currentPosition = {
-                ticker: kalshiTicker, side, contracts, entryPrice: limitPrice,
+                ticker: kalshiTicker, side, contracts: cappedContracts, entryPrice: limitPrice,
                 orderId: 'force-paper-' + Date.now(), periodKey, entryTime: Date.now(),
-                totalCostCents: costCents, totalContracts: contracts,
+                totalCostCents: costCents, totalContracts: cappedContracts,
             };
         }
         enteredPeriods[periodKey] = enteredPeriods[periodKey] || { side, ticker: kalshiTicker, entryTime: Date.now() };
+        tradeInfo.contracts = cappedContracts;
         logTrade('buy', { ...tradeInfo, limitPrice, fillStatus: 'paper-forced' });
         dailyStats.tradeCount++;
-        return { ok: true, side, direction, contracts, entryPrice: limitPrice, mode: 'paper' };
+        return { ok: true, side, direction, contracts: cappedContracts, entryPrice: limitPrice, mode: 'paper' };
     }
 
     // Live order — retry with escalating price up to 3 attempts

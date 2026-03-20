@@ -1178,7 +1178,8 @@ async function fetchAllData() {
             fearGreed: state.fearGreed,
             macroEvent: state.macroEvent,
             tradingStatus: tradeExecutor.getStatus(),
-            kalshiEnvironment: kalshiAuth.getEnvironment()
+            kalshiEnvironment: kalshiAuth.getEnvironment(),
+            kalshiOrderBook: state.kalshiOrderBook || null,
         });
 
         console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | Env=${kalshiAuth.getEnvironment()} | ${wss.clients.size} clients`);
