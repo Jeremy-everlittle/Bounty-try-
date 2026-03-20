@@ -3266,22 +3266,22 @@
         (function() {
             var saved = localStorage.getItem('dashKey');
             if (saved) {
-                // Verify it's still valid
+                // Optimistically unlock immediately — no flash
                 sessionStorage.setItem('dashKey', saved);
+                unlockDashboard();
+                // Validate in background; if key was changed/revoked, lock again
                 fetch('/api/health', { headers: { 'x-api-key': saved } })
                     .then(function(r) {
-                        if (r.ok) {
-                            unlockDashboard();
-                        } else {
+                        if (!r.ok) {
                             localStorage.removeItem('dashKey');
                             sessionStorage.removeItem('dashKey');
+                            document.getElementById('login-gate').classList.remove('hidden');
+                            document.getElementById('dashboard-content').classList.remove('visible');
                         }
                     })
-                    .catch(function() { /* show login */ });
-            }
-            // If no DASHBOARD_API_KEY is set on server, /api/health returns 200 without key
-            // In that case, skip login entirely
-            if (!saved) {
+                    .catch(function() { /* keep unlocked — network hiccup, key was valid last time */ });
+            } else {
+                // No saved key — check if server even requires auth
                 fetch('/api/health')
                     .then(function(r) {
                         if (r.ok) unlockDashboard(); // no auth required
