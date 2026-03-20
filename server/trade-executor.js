@@ -760,6 +760,29 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 
     const isUp = prediction.predictedPrice >= strike;
     const side = isUp ? 'yes' : 'no';
+
+    // Compute minutes remaining in this period
+    const now = new Date();
+    const mins = now.getMinutes();
+    const periodEnd = (Math.floor(mins / 15) + 1) * 15;
+    const minutesRemaining = Math.max(0.5, periodEnd - mins - (now.getSeconds() / 60));
+
+    // ── ENTRY PRICE PROTECTION ──
+    // Hard cap: never pay more than 85¢ for standard entries.
+    // Above 85¢, risk/reward is terrible — risking 85¢+ to make at most 15¢.
+    // Exception: LOCK conviction tier (last ~5 min, near-guaranteed) can go up to 95¢.
+    const isLockTier = betQuality.convictionTier === 'LOCK';
+    const MAX_ENTRY_PRICE = isLockTier ? 95 : 85;
+
+    // Early period protection: in the first 2 minutes of a period, the model
+    // has minimal data and price direction hasn't established. Require cheaper
+    // entries to compensate for the higher uncertainty.
+    // LOCK bets bypass early period limits (they only trigger with <5 min left anyway).
+    const earlyPeriodMaxPrice = isLockTier ? MAX_ENTRY_PRICE
+                              : minutesRemaining > 13 ? 70  // first ~2 min: max 70¢
+                              : minutesRemaining > 11 ? 78  // 2-4 min: max 78¢
+                              : MAX_ENTRY_PRICE;             // after 4 min: standard 85¢ cap
+
     // Conviction scaling: high-conviction bets get a higher position cap
     const isHighConviction = betQuality.betSize > 1.0;
     const positionCap = isHighConviction ? config.convictionMaxContracts : config.maxPositionContracts;
@@ -781,15 +804,37 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         return;
     }
     const probForBet = isUp ? prediction.probability : (1 - prediction.probability);
-    const theoreticalPrice = Math.round(probForBet * 100);
+    const rawTheoreticalPrice = Math.round(probForBet * 100);
+    // Apply entry price cap — never pay more than the time-adjusted maximum
+    const effectiveMaxEntry = Math.min(MAX_ENTRY_PRICE, earlyPeriodMaxPrice);
+    const theoreticalPrice = Math.min(rawTheoreticalPrice, effectiveMaxEntry);
+    if (rawTheoreticalPrice > effectiveMaxEntry) {
+        console.log(`[trade-executor] Entry price capped: theoretical=${rawTheoreticalPrice}c → ${theoreticalPrice}c (max=${effectiveMaxEntry}c, ${minutesRemaining.toFixed(1)}m left)`);
+    }
+
+    // Skip entry entirely if raw price suggests terrible risk/reward
+    // If the model says 95%+ but we cap at 70-85¢, we'd be posting below market
+    // and unlikely to fill anyway. Only skip if the market is genuinely expensive.
+    if (rawTheoreticalPrice > effectiveMaxEntry + 10) {
+        const msg = `Entry price too high (${rawTheoreticalPrice}c, max=${effectiveMaxEntry}c with ${minutesRemaining.toFixed(1)}m left) — risk/reward unfavorable`;
+        console.log(`[trade-executor] ${msg}`);
+        setThought('skip', msg);
+        return;
+    }
 
     // Fetch orderbook once, use for both market ask (display) and limit price (execution)
-    let limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, 15);
+    let limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, minutesRemaining);
     // Paper mode safety net: if getAggressivePrice still returned null, use theoretical price
     // Paper trades don't hit the exchange, so "no liquidity" should never block them
     if (limitPrice === null && config.paperMode) {
-        limitPrice = Math.max(5, Math.min(95, theoreticalPrice));
+        limitPrice = Math.max(5, Math.min(effectiveMaxEntry, theoreticalPrice));
         console.log(`[trade-executor] Paper mode: orderbook unavailable, using theoretical price ${limitPrice}c`);
+    }
+
+    // Enforce hard cap on the final limit price regardless of orderbook
+    if (limitPrice !== null && limitPrice > effectiveMaxEntry) {
+        console.log(`[trade-executor] Limit price capped: ${limitPrice}c → ${effectiveMaxEntry}c (max entry protection)`);
+        limitPrice = effectiveMaxEntry;
     }
     // If limitPrice is null, check if it's truly no liquidity vs market price too high
     let marketAsk = null;
