@@ -321,17 +321,20 @@ async function canTrade(periodKey) {
     if (dailyStats.tradeCount >= config.maxDailyTrades) {
         return { ok: false, reason: `Daily trade limit reached (${dailyStats.tradeCount})` };
     }
-    // Track fill failures but don't block — let retry logic handle with better price
-    // Only block after 3 consecutive failures in the same period (likely no liquidity)
+    // Track fill failures with escalating cooldown to avoid spamming unfillable orders
+    // After 3 fails: 30s cooldown. After 6 fails: 90s. After 9+: blocked for rest of period.
     if (periodKey && fillFailedPeriods[periodKey]) {
         const ff = fillFailedPeriods[periodKey];
+        if (ff.count >= 9) {
+            return { ok: false, reason: `${ff.count} fill failures this period — no liquidity, skipping` };
+        }
         if (ff.count >= 3) {
+            const cooldownMs = ff.count >= 6 ? 90000 : 30000; // 30s after 3 fails, 90s after 6
             const elapsed = Date.now() - ff.lastAttempt;
-            if (elapsed < 30000) {
-                return { ok: false, reason: `3 fill failures this period — brief cooldown ${Math.round((30000 - elapsed) / 1000)}s` };
+            if (elapsed < cooldownMs) {
+                const remaining = Math.round((cooldownMs - elapsed) / 1000);
+                return { ok: false, reason: `${ff.count} fill failures this period — cooldown ${remaining}s` };
             }
-            // Reset after 30s cooldown so it can try again
-            ff.count = 0;
         }
     }
     return { ok: true };
@@ -343,7 +346,7 @@ function markFillFailed(periodKey) {
     }
     fillFailedPeriods[periodKey].count++;
     fillFailedPeriods[periodKey].lastAttempt = Date.now();
-    console.log(`[trade-executor] Fill failed for period ${periodKey} (attempt ${fillFailedPeriods[periodKey].count}/3)`);
+    console.log(`[trade-executor] Fill failed for period ${periodKey} (attempt ${fillFailedPeriods[periodKey].count})`);
 }
 
 /**
@@ -377,9 +380,10 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
     if (config.paperMode) return theoreticalPrice;
 
     // Determine max slippage based on time remaining
-    const maxSlippage = (minutesRemaining || 15) <= 4 ? 5
-                      : (minutesRemaining || 15) <= 10 ? 3
-                      : 1; // early period: post near fair value
+    // Increased from 1/3/5 — Kalshi BTC markets have wider spreads
+    const maxSlippage = (minutesRemaining || 15) <= 3 ? 8
+                      : (minutesRemaining || 15) <= 7 ? 5
+                      : 3; // early period: still willing to cross a typical spread
 
     const maxPrice = Math.min(95, theoreticalPrice + maxSlippage);
 
@@ -407,23 +411,24 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
 
             // NEVER pay more than theoretical + maxSlippage
             if (bestAsk > maxPrice) {
-                console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c > max ${maxPrice}c (theory=${theoreticalPrice}c) — posting at fair value`);
-                return Math.max(5, Math.min(95, theoreticalPrice));
+                // Post at our maxPrice (NOT theoreticalPrice) — this is our best chance to fill
+                // while staying within our willingness-to-pay limit
+                console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c > max ${maxPrice}c (theory=${theoreticalPrice}c) — posting at maxPrice ${maxPrice}c`);
+                return Math.max(5, maxPrice);
             }
 
             const price = Math.min(maxPrice, bestAsk);
             console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c — buying at ${price}c (theory=${theoreticalPrice}c, max=${maxPrice}c)`);
             return Math.max(5, price);
         }
-        console.log(`[trade-executor] Orderbook: no opposing bids — posting at fair value ${theoreticalPrice}c`);
+        console.log(`[trade-executor] Orderbook: no opposing bids — posting at maxPrice ${maxPrice}c`);
     } catch (e) {
-        console.log(`[trade-executor] Orderbook fetch failed: ${e.message} — posting at fair value`);
+        console.log(`[trade-executor] Orderbook fetch failed: ${e.message} — posting at maxPrice`);
     }
 
-    // No orderbook data: post at fair value + small slippage, NOT theory+10
-    const price = Math.min(maxPrice, theoreticalPrice + 2);
-    console.log(`[trade-executor] Using limit price: ${price}c (theory=${theoreticalPrice}c)`);
-    return Math.max(5, price);
+    // No orderbook data: post at maxPrice for best fill chance
+    console.log(`[trade-executor] Using limit price: ${maxPrice}c (theory=${theoreticalPrice}c)`);
+    return Math.max(5, maxPrice);
 }
 
 /**
@@ -918,6 +923,10 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
     if (Date.now() - lastDipCheckTime < 8000) return; // throttle
     lastDipCheckTime = Date.now();
 
+    // Respect fill failure cooldowns — don't spam orders when there's no liquidity
+    const dipCheck = await canTrade(periodKey);
+    if (!dipCheck.ok) return;
+
     const betIsUp = currentPosition.side === 'yes';
     const onWrongSide = (betIsUp && currentPrice < strike) || (!betIsUp && currentPrice >= strike);
     if (!onWrongSide) return; // not a dip — price is in our favor
@@ -1004,6 +1013,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
         let order = result.order || {};
         if (order.status === 'canceled' || order.status === 'rejected') {
             logTrade('dip_buy_failed', { ...tradeInfo, reason: order.status });
+            markFillFailed(periodKey);
             return;
         }
         // ── FILL VERIFICATION ──
@@ -1013,11 +1023,13 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
         const fills = parseOrderFills(order);
         if (fills.filled === 0) {
             logTrade('dip_buy_unfilled', { ...tradeInfo, orderId: order.order_id });
+            markFillFailed(periodKey);
             return;
         }
         let filledContracts = await verifyFillIsReal(order.order_id, kalshiTicker, currentPosition.side, fills.filled, balanceBefore);
         if (filledContracts === 0) {
             logTrade('dip_buy_phantom', { ...tradeInfo, orderId: order.order_id, claimedFills: fills.filled });
+            markFillFailed(periodKey);
             return;
         }
         const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
@@ -1064,11 +1076,14 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     const priceAboveStrike = currentPrice >= strike;
     const lockSide = priceAboveStrike ? 'yes' : 'no';
 
-    // Calculate the entry price (high, since it's nearly guaranteed)
+    // Calculate the maximum entry price (high, since it's nearly guaranteed)
     // At 2.5σ, prob ≈ 0.994, so price ≈ 99¢ for winning side
     // We cap at 95¢ to ensure at least 5¢ profit per contract
     const winProb = Math.min(0.99, 0.5 + 0.5 * erf(sigmaDistance / Math.SQRT2));
-    const limitPrice = Math.min(95, Math.max(85, Math.round(winProb * 100)));
+    const maxLockPrice = Math.min(95, Math.max(85, Math.round(winProb * 100)));
+    // Use orderbook to find actual best price — may be much cheaper than our max
+    const limitPrice = config.paperMode ? maxLockPrice
+        : await getAggressivePrice(kalshiTicker, lockSide, maxLockPrice, minutesRemaining);
     const profitPerContract = 100 - limitPrice;
 
     // Skip if profit margin is too thin (< 3¢ per contract after fees)
@@ -1081,6 +1096,9 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
             const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
             const addContracts = config.convictionMaxContracts - currentContracts; // late-lock = high conviction
             if (addContracts <= 0) return; // already maxed out
+            // Respect fill failure cooldowns
+            const addCheck = await canTrade(periodKey);
+            if (!addCheck.ok) return;
             return await executeLockEntry(lockSide, addContracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock_add');
         } else {
             // On the wrong side?! This shouldn't happen if sell signals work, but don't fight it
@@ -1162,6 +1180,7 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
         let order = result.order || {};
         if (order.status === 'canceled' || order.status === 'rejected') {
             logTrade(strategy + '_failed', { ...tradeInfo, reason: order.status });
+            markFillFailed(periodKey);
             return;
         }
         // ── FILL VERIFICATION ──
@@ -1171,11 +1190,13 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
         const fills = parseOrderFills(order);
         if (fills.filled === 0) {
             logTrade(strategy + '_unfilled', { ...tradeInfo, orderId: order.order_id });
+            markFillFailed(periodKey);
             return;
         }
         let filledContracts = await verifyFillIsReal(order.order_id, ticker, side, fills.filled, balanceBefore);
         if (filledContracts === 0) {
             logTrade(strategy + '_phantom', { ...tradeInfo, orderId: order.order_id, claimedFills: fills.filled });
+            markFillFailed(periodKey);
             return;
         }
         if (currentPosition && currentPosition.periodKey === periodKey) {
