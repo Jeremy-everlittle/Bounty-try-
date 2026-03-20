@@ -870,21 +870,46 @@ async function fetchAllData() {
         // NOT the Binance BTC/USDT orderbook stored in state.orderBook.
         // Uses authenticated API only (demo or prod based on current mode).
         state.kalshiOrderBook = null;
+        state.kalshiOrderBookError = null;
         if (state.kalshiTicker) {
+            // Try 1: authenticated API (uses current env's credentials)
             try {
                 const kalshiTrading = require('./kalshi-trading');
-                const kalshiOb = await kalshiTrading.getOrderbook(state.kalshiTicker);
-                state.kalshiOrderBook = kalshiOb;
-                const ob = kalshiOb?.orderbook_fp || kalshiOb?.orderbook || kalshiOb;
+                state.kalshiOrderBook = await kalshiTrading.getOrderbook(state.kalshiTicker);
+            } catch (e) {
+                const errMsg = `${e.message}${e.status ? ' (HTTP ' + e.status + ')' : ''}`;
+                console.log(`[kalshi-ob] Auth API failed (${kalshiAuth.getEnvironment()}): ${errMsg}`);
+                state.kalshiOrderBookError = errMsg;
+            }
+            // Try 2: public Kalshi API (same data, no auth needed)
+            if (!state.kalshiOrderBook) {
+                try {
+                    const publicUrl = `${KALSHI_MARKET_API}/markets/${state.kalshiTicker}/orderbook`;
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), 5000);
+                    const res = await fetch(publicUrl, { signal: controller.signal });
+                    clearTimeout(timer);
+                    if (res.ok) {
+                        state.kalshiOrderBook = await res.json();
+                        state.kalshiOrderBookError = null;
+                        console.log(`[kalshi-ob] Public API fallback OK for ${state.kalshiTicker}`);
+                    }
+                } catch (e2) {
+                    console.log(`[kalshi-ob] Public API fallback also failed: ${e2.message}`);
+                    state.kalshiOrderBookError = (state.kalshiOrderBookError || '') + '; public API also failed: ' + e2.message;
+                }
+            }
+            if (state.kalshiOrderBook) {
+                const ob = state.kalshiOrderBook?.orderbook_fp || state.kalshiOrderBook?.orderbook || state.kalshiOrderBook;
                 const yesBids = ob?.yes_dollars || ob?.yes || [];
                 const noBids = ob?.no_dollars || ob?.no || [];
                 console.log(`[kalshi-ob] ${state.kalshiTicker} (${kalshiAuth.getEnvironment()}): yes_bids=${yesBids.length} no_bids=${noBids.length}${yesBids.length === 0 && noBids.length === 0 ? ' (EMPTY orderbook)' : ''}`);
                 if (yesBids.length > 0 || noBids.length > 0) {
                     console.log(`[kalshi-ob] yes_bids=${JSON.stringify(yesBids.slice(0, 3))} no_bids=${JSON.stringify(noBids.slice(0, 3))}`);
                 }
-            } catch (e) {
-                console.log(`[kalshi-ob] Failed to fetch orderbook (${kalshiAuth.getEnvironment()}): ${e.message}${e.status ? ' status=' + e.status : ''}`);
             }
+        } else {
+            state.kalshiOrderBookError = 'No active Kalshi ticker';
         }
 
         // ═══════════════════════════════════════════════════════
@@ -1183,6 +1208,7 @@ async function fetchAllData() {
             tradingStatus: tradeExecutor.getStatus(),
             kalshiEnvironment: kalshiAuth.getEnvironment(),
             kalshiOrderBook: state.kalshiOrderBook || null,
+            kalshiOrderBookError: state.kalshiOrderBookError || null,
         });
 
         console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | Env=${kalshiAuth.getEnvironment()} | ${wss.clients.size} clients`);

@@ -393,9 +393,29 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
 
     const maxPrice = Math.min(95, theoreticalPrice + maxSlippage);
 
-    // Try to get the best price from the orderbook (authenticated API only)
+    // Try to get the best price from the orderbook
+    // Auth API first, then public Kalshi API fallback (same data, no auth)
+    let resp = null;
     try {
-        const resp = await trading.getOrderbook(ticker);
+        resp = await trading.getOrderbook(ticker);
+    } catch (e) {
+        console.log(`[trade-executor] Auth orderbook failed: ${e.message} — trying public API`);
+        try {
+            const publicUrl = `https://api.elections.kalshi.com/trade-api/v2/markets/${ticker}/orderbook`;
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 5000);
+            const res = await fetch(publicUrl, { signal: controller.signal });
+            clearTimeout(timer);
+            if (res.ok) {
+                resp = await res.json();
+                console.log(`[trade-executor] Public API orderbook OK for ${ticker}`);
+            }
+        } catch (e2) {
+            console.log(`[trade-executor] Public orderbook also failed: ${e2.message}`);
+        }
+    }
+    try {
+        if (!resp) throw new Error('No orderbook data');
         const book = resp.orderbook_fp || resp.orderbook || resp;
         // Detect format: yes_dollars/no_dollars = dollar strings, yes/no = cent integers
         const isDollarFmt = !!(book.yes_dollars || book.no_dollars);

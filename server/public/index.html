@@ -2058,11 +2058,23 @@
             if (!card) return;
             const ob = serverData && serverData.kalshiOrderBook;
             const ticker = serverData && serverData.kalshiTicker;
-            if (!ob || !ticker) {
+            const obError = serverData && serverData.kalshiOrderBookError;
+            if (!ticker) {
                 card.style.display = 'none';
                 return;
             }
             card.style.display = '';
+            document.getElementById('kalshi-ob-ticker').textContent = ticker;
+            if (!ob) {
+                // Show error state
+                const errMsg = obError || 'Orderbook unavailable';
+                const env = (serverData && serverData.kalshiEnvironment) || '?';
+                document.getElementById('kalshi-ob-yes').innerHTML = '';
+                document.getElementById('kalshi-ob-no').innerHTML = '';
+                document.getElementById('kalshi-ob-spread').innerHTML =
+                    `<span style="color:#f0883e;">Orderbook fetch failed (${env}): ${errMsg}</span>`;
+                return;
+            }
             document.getElementById('kalshi-ob-ticker').textContent = ticker;
 
             const book = ob.orderbook_fp || ob.orderbook || ob;
