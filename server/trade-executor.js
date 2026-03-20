@@ -1764,10 +1764,8 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
         return { ok: false, reason: 'Missing prediction, ticker, or strike data' };
     }
 
-    // Don't double-enter same period
-    if (currentPosition && currentPosition.periodKey === periodKey) {
-        return { ok: false, reason: 'Already have a position for this period' };
-    }
+    // Force bet should ADD to existing position, not refuse
+    const addingToExisting = currentPosition && currentPosition.periodKey === periodKey;
 
     // Close stale position from a previous period
     if (currentPosition && currentPosition.periodKey !== periodKey) {
@@ -1806,11 +1804,22 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
 
     if (config.paperMode) {
         const limitPrice = Math.max(5, Math.min(95, theoreticalPrice));
-        currentPosition = {
-            ticker: kalshiTicker, side, contracts, entryPrice: limitPrice,
-            orderId: 'force-paper-' + Date.now(), periodKey, entryTime: Date.now(),
-            totalCostCents: contracts * limitPrice, totalContracts: contracts,
-        };
+        if (addingToExisting) {
+            const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+            const addCost = contracts * limitPrice;
+            const newTotal = (currentPosition.totalContracts || currentPosition.contracts) + contracts;
+            currentPosition.totalCostCents = oldCost + addCost;
+            currentPosition.totalContracts = newTotal;
+            currentPosition.contracts = newTotal;
+            currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal);
+        } else {
+            currentPosition = {
+                ticker: kalshiTicker, side, contracts, entryPrice: limitPrice,
+                orderId: 'force-paper-' + Date.now(), periodKey, entryTime: Date.now(),
+                totalCostCents: contracts * limitPrice, totalContracts: contracts,
+            };
+        }
+        enteredPeriods[periodKey] = enteredPeriods[periodKey] || { side, ticker: kalshiTicker, entryTime: Date.now() };
         logTrade('buy', { ...tradeInfo, limitPrice, fillStatus: 'paper-forced' });
         dailyStats.tradeCount++;
         return { ok: true, side, direction, contracts, entryPrice: limitPrice, mode: 'paper' };
@@ -1873,11 +1882,22 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
                 continue;
             }
 
-            currentPosition = {
-                ticker: kalshiTicker, side, contracts: filledContracts, entryPrice: limitPrice,
-                orderId: order.order_id, periodKey, entryTime: Date.now(),
-                totalCostCents: filledContracts * limitPrice, totalContracts: filledContracts,
-            };
+            if (addingToExisting) {
+                const oldCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+                const addCost = filledContracts * limitPrice;
+                const newTotal = (currentPosition.totalContracts || currentPosition.contracts) + filledContracts;
+                currentPosition.totalCostCents = oldCost + addCost;
+                currentPosition.totalContracts = newTotal;
+                currentPosition.contracts = newTotal;
+                currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal);
+            } else {
+                currentPosition = {
+                    ticker: kalshiTicker, side, contracts: filledContracts, entryPrice: limitPrice,
+                    orderId: order.order_id, periodKey, entryTime: Date.now(),
+                    totalCostCents: filledContracts * limitPrice, totalContracts: filledContracts,
+                };
+            }
+            enteredPeriods[periodKey] = enteredPeriods[periodKey] || { side, ticker: kalshiTicker, entryTime: Date.now() };
             logTrade('buy', { ...tradeInfo, limitPrice, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: cappedContracts, attempt });
             dailyStats.tradeCount++;
             return { ok: true, side, direction, contracts: filledContracts, entryPrice: limitPrice, mode: 'live', orderId: order.order_id, attempts: attempt };
