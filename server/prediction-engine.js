@@ -2429,11 +2429,39 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const noTimeLeft = minutesRemaining < 1.0;
     const almostNoTime = minutesRemaining < 2.0;
 
+    // ── CASE 0: CONFIDENT FLIP — model strongly disagrees with position ──
+    // When the updated prediction has HIGH confidence the other way AND price confirms it,
+    // sell and flip to the winning side. This is different from normal "wrong side" holds
+    // because the model is highly confident (not just briefly on wrong side).
+    // Requirements (all must be true):
+    //   1. On wrong side of strike (price confirms the model)
+    //   2. Model flipped direction OR updated probability strongly favors the other side
+    //   3. High confidence (>=80%) — not just a marginal signal
+    //   4. Enough time to profit from the flip (>=4 min remaining)
+    //   5. Sigma distance >= 0.8 — not just a tiny blip across strike
+    const updProbForOtherSide = betIsUp ? (1 - updPred.probability) : updPred.probability;
+    const confidenceForFlip = updPred.confidence || 0;
+    const shouldFlip = onWrongSide
+        && (modelFlipped || updProbForOtherSide >= 0.70)
+        && confidenceForFlip >= 0.80
+        && minutesRemaining >= 4
+        && sigmaDistance >= 0.8;
+
+    if (shouldFlip) {
+        level = 'confident_flip'; shortLabel = 'FLIP';
+        urgency = 85;
+        advice = 'Model strongly predicts ' + updDirection + ' (' + (confidenceForFlip * 100).toFixed(0) +
+            '% confidence) while holding ' + origDirection + '. Price is ' + sigmaDistance.toFixed(1) +
+            'σ on wrong side with ' + minutesRemaining.toFixed(1) + ' min left — selling to flip.';
+        reasons.push('High confidence flip: ' + (confidenceForFlip * 100).toFixed(0) + '% conf ' + updDirection);
+        reasons.push(sigmaDistance.toFixed(1) + 'σ on wrong side');
+    }
+
     // ── CASE 1: LOST CAUSE — mathematically dead ──
     // Binary options: only sell when recovery is essentially impossible.
     // At 2.5σ, recovery probability is ~1.2%. At 3.0σ, it's ~0.3%.
-    // The trade executor enforces: sell ONLY lost_cause, so this is the sole sell gate.
-    if (
+    // The trade executor enforces: sell ONLY lost_cause or confident_flip, so these are the sell gates.
+    else if (
         (onWrongSide && sigmaDistance >= 2.5 && minutesRemaining < 1.5) ||  // ~1.2% recovery
         (onWrongSide && sigmaDistance >= 3.0)                                // ~0.3% recovery, any time
     ) {

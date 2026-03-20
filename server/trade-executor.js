@@ -441,6 +441,35 @@ async function getMarketPrice(ticker, side, minutesRemaining) {
     }
 }
 
+// Get the best bid price for selling — what we'd receive if selling our position now.
+// When selling YES contracts, the bid comes from YES bids directly.
+// When selling NO contracts, the bid comes from NO bids directly.
+// Returns price in cents, or null if no liquidity.
+async function getMarketSellPrice(ticker, side, minutesRemaining) {
+    try {
+        const resp = await fetchOrderbook(ticker);
+        if (!resp) return null;
+        const book = resp.orderbook_fp || resp.orderbook || resp;
+        const isDollarFmt = !!(book.yes_dollars || book.no_dollars);
+        // For selling, we want bids on OUR side (not opposite)
+        const ourBids = side === 'yes'
+            ? (book.yes_dollars || book.yes || [])
+            : (book.no_dollars || book.no || []);
+        if (!ourBids || ourBids.length === 0) return null;
+        const bidPrices = ourBids.map(entry => {
+            const raw = parseFloat(entry[0]);
+            return isDollarFmt ? Math.round(raw * 100) : Math.round(raw);
+        });
+        const bestBid = Math.max(...bidPrices);
+        if (!isFinite(bestBid) || bestBid < 1 || bestBid > 99) return null;
+        console.log(`[trade-executor] Market sell price: best ${side} bid = ${bestBid}c on ${ticker}`);
+        return bestBid;
+    } catch (e) {
+        console.log(`[trade-executor] Market sell price fetch failed: ${e.message}`);
+        return null;
+    }
+}
+
 async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaining) {
     // Guard against NaN/undefined — fall back to 50c (fair value)
     if (theoreticalPrice === undefined || theoreticalPrice === null || isNaN(theoreticalPrice) || !isFinite(theoreticalPrice)) {
@@ -836,12 +865,15 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, strike, currentPrice) {
     if (!currentPosition || !sellSignal) return;
 
-    // ── BINARY OPTIONS: ALMOST NEVER SELL ──
+    // ── BINARY OPTIONS: ALMOST NEVER SELL (except confident flips) ──
     // Binary options settle at exactly 100¢ or 0¢. Selling early means:
     // - If winning: you get less than the 100¢ settlement payout
     // - If losing: you pay the spread twice (sell + potential re-entry) for minimal salvage
-    // The ONLY mathematically justified sell is when recovery is essentially impossible:
-    // wrong side, >2.5 sigma away, <1.5 min remaining (recovery prob <1.2%)
+    // The mathematically justified sells:
+    // 1. Recovery essentially impossible (lost_cause)
+    // 2. Model highly confident the other way + price confirms (confident_flip)
+    const isConfidentFlip = sellSignal.level === 'confident_flip';
+
     if (strike && currentPrice) {
         const betIsUp = currentPosition.side === 'yes';
         const onRightSide = (betIsUp && currentPrice >= strike) || (!betIsUp && currentPrice < strike);
@@ -855,28 +887,29 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             return;
         }
 
-        // On wrong side: only sell if mathematically dead
+        // On wrong side: sell if mathematically dead OR model is highly confident the other way
         const remainingVol = (updatedPrediction && updatedPrediction._remainingVol) || 0.002;
         const distancePct = Math.abs(currentPrice - strike) / strike;
         const sigmaDistance = distancePct / remainingVol;
 
-        // Recovery probability at various sigma distances:
-        // 2.0σ → ~4.6% (position worth ~5¢, not worth selling after spread)
-        // 2.5σ → ~1.2% (position worth ~1¢, sell to free margin)
-        // 3.0σ → ~0.3% (dead, sell at any price)
         const isMathematicallyDead = (sigmaDistance >= 2.5 && minutesRemaining < 1.5) || sigmaDistance >= 3.0;
-        if (!isMathematicallyDead) {
+        if (!isMathematicallyDead && !isConfidentFlip) {
             // Hold — recovery is still plausible or spread eats any salvage value
             setThought('losing', `Wrong side (${sigmaDistance.toFixed(1)}σ) — holding, recovery possible`, {
                 sigmaDistance: sigmaDistance.toFixed(1), minutesRemaining, recoveryProb: sigmaDistance < 2 ? '~5%' : '~1%',
             });
             return;
         }
-        setThought('selling', `Mathematically dead (${sigmaDistance.toFixed(1)}σ, ${minutesRemaining.toFixed(1)}m left) — selling`);
+        if (isConfidentFlip) {
+            const conf = updatedPrediction?.confidence ? (updatedPrediction.confidence * 100).toFixed(0) : '?';
+            setThought('flipping', `Flipping position — ${conf}% confidence other way, ${sigmaDistance.toFixed(1)}σ on wrong side`);
+        } else {
+            setThought('selling', `Mathematically dead (${sigmaDistance.toFixed(1)}σ, ${minutesRemaining.toFixed(1)}m left) — selling`);
+        }
     }
 
-    // Only lost_cause sells reach this point (wrong side, >2.5σ, <1.5 min)
-    const shouldSell = (sellSignal.level === 'lost_cause');
+    // Sell on lost_cause (mathematically dead) or confident_flip (high-confidence reversal)
+    const shouldSell = (sellSignal.level === 'lost_cause' || sellSignal.level === 'confident_flip');
 
     if (!shouldSell) {
         decisionLog.logSellDecision({ sellSignal, minutesRemaining, acted: false, reason: 'Thresholds not met for sell', currentPrice, strike });
@@ -896,7 +929,10 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 
     if (config.paperMode) {
         const sellContracts = currentPosition.totalContracts || currentPosition.contracts;
-        const sellPrice = Math.max(1, currentPosition.entryPrice - 10); // assume slippage on paper sell
+        // Use actual market bid for sell price: our side's best bid from orderbook
+        // Fallback to entry - 10 if orderbook unavailable
+        const marketSellPrice = await getMarketSellPrice(currentPosition.ticker, currentPosition.side, minutesRemaining);
+        const sellPrice = marketSellPrice || Math.max(1, currentPosition.entryPrice - 10);
         const sellProceeds = sellContracts * sellPrice;
         const env = getEnvironment();
         paperBalances[env] = (paperBalances[env] || 0) + sellProceeds;
@@ -905,14 +941,50 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         decisionLog.logSellDecision({ sellSignal, minutesRemaining, acted: true, reason: sellSignal.level, currentPrice, strike });
         dailyStats.tradeCount++;
         // Record for potential re-entry
+        const soldTicker = currentPosition.ticker;
+        const soldPeriodKey = currentPosition.periodKey;
+        const soldSide = currentPosition.side;
         soldThisPeriod = {
-            periodKey: currentPosition.periodKey,
-            side: currentPosition.side,
-            ticker: currentPosition.ticker,
+            periodKey: soldPeriodKey,
+            side: soldSide,
+            ticker: soldTicker,
             soldAt: Date.now(),
             reason: sellSignal.level,
         };
         currentPosition = null;
+
+        // ── FLIP: immediately enter the opposite side ──
+        if (isConfidentFlip && updatedPrediction && soldTicker && soldPeriodKey) {
+            const flipSide = soldSide === 'yes' ? 'no' : 'yes';
+            console.log(`[trade-executor] CONFIDENT FLIP: sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()}`);
+            const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
+            if (flipPrice !== null) {
+                const flipContracts = await capContractsByBalance(Math.max(1, config.baseContracts), flipPrice);
+                if (flipContracts > 0) {
+                    const flipCost = flipContracts * flipPrice;
+                    const env = getEnvironment();
+                    paperBalances[env] = (paperBalances[env] || 0) - flipCost;
+                    currentPosition = {
+                        ticker: soldTicker, side: flipSide, contracts: flipContracts,
+                        entryPrice: flipPrice, orderId: 'flip-paper-' + Date.now(),
+                        periodKey: soldPeriodKey, entryTime: Date.now(),
+                        totalCostCents: flipCost, totalContracts: flipContracts,
+                    };
+                    enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
+                    logTrade('buy', {
+                        ticker: soldTicker, side: flipSide, action: 'buy',
+                        contracts: flipContracts, limitPrice: flipPrice,
+                        periodKey: soldPeriodKey, direction: flipSide === 'yes' ? 'UP' : 'DOWN',
+                        strategy: 'confident_flip', fillStatus: 'paper-flip',
+                    });
+                    dailyStats.tradeCount++;
+                    setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipContracts}x @ ${flipPrice}c`, {
+                        contracts: flipContracts, side: flipSide, strategy: 'confident_flip',
+                    });
+                    console.log(`[trade-executor] PAPER FLIP: ${flipContracts}x ${flipSide.toUpperCase()} @ ${flipPrice}c`);
+                }
+            }
+        }
         return;
     }
 
@@ -963,14 +1035,66 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         // Fully sold
         logTrade('sell', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts });
         dailyStats.tradeCount++;
+        const soldTicker = currentPosition.ticker;
+        const soldPeriodKey = currentPosition.periodKey;
+        const soldSide = currentPosition.side;
         soldThisPeriod = {
-            periodKey: currentPosition.periodKey,
-            side: currentPosition.side,
-            ticker: currentPosition.ticker,
+            periodKey: soldPeriodKey,
+            side: soldSide,
+            ticker: soldTicker,
             soldAt: Date.now(),
             reason: sellSignal.level,
         };
         currentPosition = null;
+
+        // ── FLIP: immediately enter the opposite side (live) ──
+        if (isConfidentFlip && updatedPrediction && soldTicker && soldPeriodKey) {
+            const flipSide = soldSide === 'yes' ? 'no' : 'yes';
+            console.log(`[trade-executor] CONFIDENT FLIP (live): sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()}`);
+            const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
+            if (flipPrice !== null) {
+                const flipContracts = await capContractsByBalance(Math.max(1, config.baseContracts), flipPrice);
+                if (flipContracts > 0) {
+                    try {
+                        const flipResult = await trading.placeOrder({
+                            ticker: soldTicker, side: flipSide, action: 'buy', count: flipContracts,
+                            yesPrice: flipSide === 'yes' ? flipPrice : undefined,
+                            noPrice: flipSide === 'no' ? flipPrice : undefined,
+                        });
+                        let flipOrder = flipResult.order || {};
+                        if (flipOrder.status === 'resting' || flipOrder.status === 'open') {
+                            flipOrder = await waitForFill(flipOrder.order_id, flipOrder, 8000);
+                        }
+                        const flipFills = parseOrderFills(flipOrder);
+                        if (flipFills.filled > 0) {
+                            const avgPrice = flipFills.avgPrice || flipPrice;
+                            const flipCost = flipFills.filled * avgPrice;
+                            currentPosition = {
+                                ticker: soldTicker, side: flipSide, contracts: flipFills.filled,
+                                entryPrice: avgPrice, orderId: flipOrder.order_id,
+                                periodKey: soldPeriodKey, entryTime: Date.now(),
+                                totalCostCents: flipCost, totalContracts: flipFills.filled,
+                            };
+                            enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
+                            logTrade('buy', {
+                                ticker: soldTicker, side: flipSide, action: 'buy',
+                                contracts: flipFills.filled, limitPrice: avgPrice,
+                                periodKey: soldPeriodKey, direction: flipSide === 'yes' ? 'UP' : 'DOWN',
+                                strategy: 'confident_flip', orderId: flipOrder.order_id,
+                            });
+                            dailyStats.tradeCount++;
+                            setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipFills.filled}x @ ${avgPrice}c`, {
+                                contracts: flipFills.filled, side: flipSide, strategy: 'confident_flip',
+                            });
+                            console.log(`[trade-executor] LIVE FLIP: ${flipFills.filled}x ${flipSide.toUpperCase()} @ ${avgPrice}c — order ${flipOrder.order_id}`);
+                        }
+                    } catch (flipErr) {
+                        console.error(`[trade-executor] Flip buy failed:`, flipErr.message);
+                        logTrade('flip_error', { ticker: soldTicker, side: flipSide, error: flipErr.message });
+                    }
+                }
+            }
+        }
 
     } catch (err) {
         const detail = err.response ? JSON.stringify(err.response) : '';
