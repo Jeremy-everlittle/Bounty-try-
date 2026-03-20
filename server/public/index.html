@@ -1916,7 +1916,16 @@
             // Stats
             const pnl = (ts.daily.pnlCents / 100);
             const pnlEl = document.getElementById('trading-pnl');
-            pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+            // Calculate P&L percentage based on starting balance (current balance minus today's P&L)
+            let pnlPct = '';
+            if (ts.balanceCents !== null && ts.balanceCents !== undefined) {
+                const startBalanceCents = ts.balanceCents - ts.daily.pnlCents;
+                if (startBalanceCents > 0) {
+                    const pctVal = (ts.daily.pnlCents / startBalanceCents) * 100;
+                    pnlPct = ' (' + (pctVal >= 0 ? '+' : '') + pctVal.toFixed(1) + '%)';
+                }
+            }
+            pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + pnlPct;
             pnlEl.style.color = pnl >= 0 ? '#3fb950' : '#f85149';
 
             document.getElementById('trading-count').textContent = ts.daily.tradeCount;
