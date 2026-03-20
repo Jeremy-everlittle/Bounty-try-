@@ -425,24 +425,56 @@ function markFillFailed(periodKey) {
  * Returns a price in cents (5-95).
  */
 async function fetchOrderbook(ticker) {
-    // Fetch orderbook: auth API first, then public Kalshi API fallback
+    // Fetch orderbook: auth API first, then trading-api fallback, then public API fallback
     let resp = null;
     try {
         resp = await trading.getOrderbook(ticker);
     } catch (e) {
-        console.log(`[trade-executor] Auth orderbook failed: ${e.message} — trying public API`);
+        console.log(`[trade-executor] Auth orderbook failed: ${e.message} — trying fallback APIs`);
+    }
+    // Validate the response has actual data — some responses are empty shells
+    if (resp) {
+        const book = resp.orderbook_fp || resp.orderbook || resp;
+        const hasData = book && (
+            (book.yes_dollars && book.yes_dollars.length > 0) ||
+            (book.no_dollars && book.no_dollars.length > 0) ||
+            (book.yes && book.yes.length > 0) ||
+            (book.no && book.no.length > 0)
+        );
+        if (hasData) return resp;
+        console.log(`[trade-executor] Auth orderbook returned empty structure: keys=${Object.keys(book).join(',')} — trying fallbacks`);
+        resp = null;
+    }
+    // Fallback 1: use the correct base URL (trading-api.kalshi.com for prod, demo-api.kalshi.co for demo)
+    const { getBaseUrl } = require('./kalshi-auth');
+    const fallbackUrls = [
+        `${getBaseUrl()}/trade-api/v2/markets/${ticker}/orderbook`,
+        `https://api.elections.kalshi.com/trade-api/v2/markets/${ticker}/orderbook`,
+    ];
+    for (const url of fallbackUrls) {
         try {
-            const publicUrl = `https://api.elections.kalshi.com/trade-api/v2/markets/${ticker}/orderbook`;
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), 5000);
-            const res = await fetch(publicUrl, { signal: controller.signal });
+            const res = await fetch(url, { signal: controller.signal });
             clearTimeout(timer);
             if (res.ok) {
                 resp = await res.json();
-                console.log(`[trade-executor] Public API orderbook OK for ${ticker}`);
+                const book = resp.orderbook_fp || resp.orderbook || resp;
+                const hasData = book && (
+                    (book.yes_dollars && book.yes_dollars.length > 0) ||
+                    (book.no_dollars && book.no_dollars.length > 0) ||
+                    (book.yes && book.yes.length > 0) ||
+                    (book.no && book.no.length > 0)
+                );
+                if (hasData) {
+                    console.log(`[trade-executor] Fallback orderbook OK from ${url.split('/markets/')[0]}`);
+                    return resp;
+                }
+                console.log(`[trade-executor] Fallback returned empty orderbook from ${url.split('/markets/')[0]}`);
+                resp = null;
             }
         } catch (e2) {
-            console.log(`[trade-executor] Public orderbook also failed: ${e2.message}`);
+            console.log(`[trade-executor] Fallback orderbook failed (${url.split('/markets/')[0]}): ${e2.message}`);
         }
     }
     return resp;
@@ -455,12 +487,23 @@ function parseOrderbookAsk(resp, side, ticker, minutesRemaining) {
     const isDollarFmt = !!(book.yes_dollars || book.no_dollars);
     const yesBids = book.yes_dollars || book.yes || [];
     const noBids = book.no_dollars || book.no || [];
+
+    // Debug: log what we parsed so we can diagnose "no liquidity" false positives
+    if (yesBids.length === 0 && noBids.length === 0) {
+        const respKeys = Object.keys(resp).join(',');
+        const bookKeys = book ? Object.keys(book).join(',') : 'null';
+        console.log(`[trade-executor] parseOrderbookAsk: EMPTY orderbook — resp keys=[${respKeys}], book keys=[${bookKeys}], isDollar=${isDollarFmt}`);
+    }
+
     const oppositeBids = side === 'yes' ? noBids : yesBids;
 
     // ── DB: snapshot the full Kalshi orderbook ──
     captureKalshiOrderbook(ticker, 'trade_entry', minutesRemaining, yesBids, noBids);
 
-    if (!oppositeBids || oppositeBids.length === 0) return null;
+    if (!oppositeBids || oppositeBids.length === 0) {
+        console.log(`[trade-executor] parseOrderbookAsk: no ${side === 'yes' ? 'NO' : 'YES'} bids (opposing side empty) — yes=${yesBids.length} bids, no=${noBids.length} bids`);
+        return null;
+    }
 
     const askPrices = oppositeBids.map(entry => {
         const raw = parseFloat(entry[0]);
@@ -556,8 +599,15 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
             console.log(`[trade-executor] Orderbook: best ${side} ask = ${bestAsk}c — buying at ${price}c (theory=${theoreticalPrice}c, max=${maxPrice}c)`);
             return Math.max(5, price);
         }
+        // In paper mode, don't block on "no opposing bids" — the server's orderbook
+        // display may be showing data from a different fetch. Use maxPrice as a
+        // reasonable fill price for the simulated trade.
+        if (config.paperMode) {
+            console.log(`[trade-executor] Orderbook: no opposing bids for ${side} — paper mode, using maxPrice ${maxPrice}c as simulated fill`);
+            return Math.max(5, maxPrice);
+        }
         console.log(`[trade-executor] Orderbook: no opposing bids — skipping order, will retry when liquidity appears`);
-        return null; // Signal: no liquidity, don't place order
+        return null; // Signal: no liquidity, don't place order (live mode only)
     } catch (e) {
         console.log(`[trade-executor] Orderbook fetch failed: ${e.message} — posting at maxPrice`);
     }
@@ -734,7 +784,13 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const theoreticalPrice = Math.round(probForBet * 100);
 
     // Fetch orderbook once, use for both market ask (display) and limit price (execution)
-    const limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, 15);
+    let limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, 15);
+    // Paper mode safety net: if getAggressivePrice still returned null, use theoretical price
+    // Paper trades don't hit the exchange, so "no liquidity" should never block them
+    if (limitPrice === null && config.paperMode) {
+        limitPrice = Math.max(5, Math.min(95, theoreticalPrice));
+        console.log(`[trade-executor] Paper mode: orderbook unavailable, using theoretical price ${limitPrice}c`);
+    }
     // If limitPrice is null, check if it's truly no liquidity vs market price too high
     let marketAsk = null;
     if (limitPrice === null) {
