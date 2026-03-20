@@ -1349,10 +1349,23 @@ async function syncPositionWithKalshi() {
                     console.log(`[trade-executor] Position sync: app cost=${currentPosition.totalCostCents}c Kalshi cost=${kalshiCostCents}c — updating`);
                     currentPosition.totalCostCents = kalshiCostCents;
                 }
+            } else {
+                // Kalshi shows 0 contracts — position was settled/expired
+                console.log(`[trade-executor] Position sync: Kalshi reports 0 contracts for ${currentPosition.ticker} — clearing stale position`);
+                currentPosition = null;
             }
+        } else {
+            // No matching position found on Kalshi — contract likely expired/settled
+            console.log(`[trade-executor] Position sync: no position found on Kalshi for ${currentPosition.ticker} — clearing stale position`);
+            currentPosition = null;
         }
     } catch (e) {
-        // Silently fail — will retry next cycle
+        // 404 means the market/contract expired — clear the stale position
+        if (e.status === 404) {
+            console.log(`[trade-executor] Position sync: 404 for ${currentPosition?.ticker} — market expired, clearing position`);
+            currentPosition = null;
+        }
+        // Other errors: silently fail — will retry next cycle
     }
 }
 
