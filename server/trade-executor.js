@@ -30,7 +30,7 @@ let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
 let cachedBalance = null;     // { balanceCents, lastFetched }
 const BALANCE_CACHE_MS = 30000; // refresh balance every 30s
 let orderInFlight = false;    // mutex: prevent concurrent order placement
-let fillFailedPeriods = {};   // { periodKey: timestamp } — cooldown after phantom/unfilled
+let fillFailedPeriods = {};   // { periodKey: { count, lastAttempt } } — track fill failures for price adjustment
 
 // Auto-trader thought status — exposed to the frontend
 let traderThought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
@@ -233,20 +233,29 @@ function canTrade(periodKey) {
     if (dailyStats.tradeCount >= config.maxDailyTrades) {
         return { ok: false, reason: `Daily trade limit reached (${dailyStats.tradeCount})` };
     }
-    // Cooldown: don't retry after phantom/unfilled for this period (60s cooldown)
+    // Track fill failures but don't block — let retry logic handle with better price
+    // Only block after 3 consecutive failures in the same period (likely no liquidity)
     if (periodKey && fillFailedPeriods[periodKey]) {
-        const elapsed = Date.now() - fillFailedPeriods[periodKey];
-        if (elapsed < 60000) {
-            return { ok: false, reason: `Fill failed for this period — cooldown ${Math.round((60000 - elapsed) / 1000)}s` };
+        const ff = fillFailedPeriods[periodKey];
+        if (ff.count >= 3) {
+            const elapsed = Date.now() - ff.lastAttempt;
+            if (elapsed < 30000) {
+                return { ok: false, reason: `3 fill failures this period — brief cooldown ${Math.round((30000 - elapsed) / 1000)}s` };
+            }
+            // Reset after 30s cooldown so it can try again
+            ff.count = 0;
         }
-        delete fillFailedPeriods[periodKey]; // cooldown expired
     }
     return { ok: true };
 }
 
 function markFillFailed(periodKey) {
-    fillFailedPeriods[periodKey] = Date.now();
-    console.log(`[trade-executor] Marking period ${periodKey} as fill-failed — 60s cooldown`);
+    if (!fillFailedPeriods[periodKey]) {
+        fillFailedPeriods[periodKey] = { count: 0, lastAttempt: 0 };
+    }
+    fillFailedPeriods[periodKey].count++;
+    fillFailedPeriods[periodKey].lastAttempt = Date.now();
+    console.log(`[trade-executor] Fill failed for period ${periodKey} (attempt ${fillFailedPeriods[periodKey].count}/3)`);
 }
 
 /**
