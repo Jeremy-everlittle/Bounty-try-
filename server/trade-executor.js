@@ -393,27 +393,12 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
 
     const maxPrice = Math.min(95, theoreticalPrice + maxSlippage);
 
-    // Try to get the best price from the orderbook
-    // First try authenticated API, fall back to public API if it fails
-    let resp = null;
+    // Try to get the best price from the orderbook (authenticated API only)
     try {
-        resp = await trading.getOrderbook(ticker);
-    } catch (e) {
-        console.log(`[trade-executor] Auth orderbook failed: ${e.message} — trying public API`);
-        try {
-            const publicUrl = `https://api.elections.kalshi.com/trade-api/v2/markets/${ticker}/orderbook`;
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 5000);
-            const res = await fetch(publicUrl, { signal: controller.signal });
-            clearTimeout(timer);
-            if (res.ok) resp = await res.json();
-        } catch (e2) {
-            console.log(`[trade-executor] Public orderbook also failed: ${e2.message}`);
-        }
-    }
-    try {
-        if (!resp) throw new Error('No orderbook data from either API');
+        const resp = await trading.getOrderbook(ticker);
         const book = resp.orderbook_fp || resp.orderbook || resp;
+        // Detect format: yes_dollars/no_dollars = dollar strings, yes/no = cent integers
+        const isDollarFmt = !!(book.yes_dollars || book.no_dollars);
 
         // Kalshi only shows BIDS. To find the ask for our side:
         // - If we're buying YES: the ask comes from NO bids (ask = 100 - NO bid price)
@@ -427,7 +412,8 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
 
         if (oppositeBids.length > 0) {
             const askPrices = oppositeBids.map(entry => {
-                const bidDollars = parseFloat(entry[0]);
+                const raw = parseFloat(entry[0]);
+                const bidDollars = isDollarFmt ? raw : raw / 100; // normalize to 0-1
                 return Math.round((1.00 - bidDollars) * 100);
             });
             const bestAsk = Math.min(...askPrices);

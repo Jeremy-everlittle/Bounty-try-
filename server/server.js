@@ -702,16 +702,19 @@ async function capturePeriodicOrderbook(ticker, periodKey, minutesRemaining, btc
         const kalshiTrading = require('./kalshi-trading');
         const resp = await kalshiTrading.getOrderbook(ticker);
         const book = resp.orderbook_fp || resp.orderbook || resp;
+        // Detect format: yes_dollars/no_dollars = dollar strings, yes/no = cent integers
+        const isDollarFmt = !!(book.yes_dollars || book.no_dollars);
         const yesBids = book.yes_dollars || book.yes || [];
         const noBids = book.no_dollars || book.no || [];
 
-        // Parse bids
+        // Parse bids — normalize to dollar-range (0-1) for consistent math
         const parseBids = (bids) => {
             if (!bids || bids.length === 0) return { best: null, depth: 0, entries: [] };
             let best = 0, depth = 0;
             const entries = [];
             for (const entry of bids) {
-                const price = parseFloat(entry[0]);
+                const raw = parseFloat(entry[0]);
+                const price = isDollarFmt ? raw : raw / 100; // normalize to 0-1
                 const size = parseFloat(entry[1]);
                 if (price > best) best = price;
                 depth += size;
@@ -865,42 +868,22 @@ async function fetchAllData() {
         // ── Fetch Kalshi orderbook for bet quality assessment ──
         // This is the ACTUAL Kalshi contract orderbook (yes/no bids),
         // NOT the Binance BTC/USDT orderbook stored in state.orderBook.
-        // Try authenticated API first, fall back to public API if it fails.
+        // Uses authenticated API only (demo or prod based on current mode).
         state.kalshiOrderBook = null;
         if (state.kalshiTicker) {
-            let kalshiOb = null;
-            // Try 1: authenticated API (uses current environment's base URL)
             try {
                 const kalshiTrading = require('./kalshi-trading');
-                kalshiOb = await kalshiTrading.getOrderbook(state.kalshiTicker);
-            } catch (e) {
-                console.log(`[kalshi-ob] Authenticated fetch failed (${kalshiAuth.getEnvironment()}): ${e.message}${e.status ? ' status=' + e.status : ''}`);
-            }
-            // Try 2: public API (always available, no auth needed)
-            if (!kalshiOb) {
-                try {
-                    const publicUrl = `${KALSHI_MARKET_API}/markets/${state.kalshiTicker}/orderbook`;
-                    const controller = new AbortController();
-                    const timer = setTimeout(() => controller.abort(), 5000);
-                    const res = await fetch(publicUrl, { signal: controller.signal });
-                    clearTimeout(timer);
-                    if (res.ok) {
-                        kalshiOb = await res.json();
-                        console.log(`[kalshi-ob] Public API fallback OK for ${state.kalshiTicker}`);
-                    }
-                } catch (e2) {
-                    console.log(`[kalshi-ob] Public API fallback also failed: ${e2.message}`);
-                }
-            }
-            if (kalshiOb) {
+                const kalshiOb = await kalshiTrading.getOrderbook(state.kalshiTicker);
                 state.kalshiOrderBook = kalshiOb;
                 const ob = kalshiOb?.orderbook_fp || kalshiOb?.orderbook || kalshiOb;
                 const yesBids = ob?.yes_dollars || ob?.yes || [];
                 const noBids = ob?.no_dollars || ob?.no || [];
-                console.log(`[kalshi-ob] ${state.kalshiTicker}: yes_bids=${yesBids.length} no_bids=${noBids.length}${yesBids.length === 0 && noBids.length === 0 ? ' (EMPTY orderbook)' : ''}`);
+                console.log(`[kalshi-ob] ${state.kalshiTicker} (${kalshiAuth.getEnvironment()}): yes_bids=${yesBids.length} no_bids=${noBids.length}${yesBids.length === 0 && noBids.length === 0 ? ' (EMPTY orderbook)' : ''}`);
                 if (yesBids.length > 0 || noBids.length > 0) {
                     console.log(`[kalshi-ob] yes_bids=${JSON.stringify(yesBids.slice(0, 3))} no_bids=${JSON.stringify(noBids.slice(0, 3))}`);
                 }
+            } catch (e) {
+                console.log(`[kalshi-ob] Failed to fetch orderbook (${kalshiAuth.getEnvironment()}): ${e.message}${e.status ? ' status=' + e.status : ''}`);
             }
         }
 

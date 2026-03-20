@@ -1590,6 +1590,8 @@ function estimateMarketEntry(isUp, kalshiOrderBook) {
     try {
         const ob = kalshiOrderBook.orderbook_fp || kalshiOrderBook.orderbook || kalshiOrderBook;
         if (!ob) return null;
+        // Detect format: yes_dollars/no_dollars = dollar strings, yes/no = cent integers
+        const isDollarFmt = !!(ob.yes_dollars || ob.no_dollars);
         const yesBids = ob.yes_dollars || ob.yes || [];
         const noBids = ob.no_dollars || ob.no || [];
         // Our side = YES → opposite bids = NO; side = NO → opposite bids = YES
@@ -1597,9 +1599,10 @@ function estimateMarketEntry(isUp, kalshiOrderBook) {
         const oppositeBids = side === 'yes' ? noBids : yesBids;
         if (!oppositeBids || oppositeBids.length === 0) return null;
 
-        // Each entry is [price_dollars_string, quantity_string]
+        // Each entry is [price, quantity] — normalize to dollar range (0-1)
         const askPrices = oppositeBids.map(entry => {
-            const bidDollars = parseFloat(entry[0]);
+            const raw = parseFloat(entry[0]);
+            const bidDollars = isDollarFmt ? raw : raw / 100;
             return 1.00 - bidDollars; // ask = 1 - opposing bid
         });
         const bestAsk = Math.min(...askPrices);
