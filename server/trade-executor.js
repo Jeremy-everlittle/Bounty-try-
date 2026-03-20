@@ -201,6 +201,7 @@ async function waitForFill(orderId, createResponse, maxWaitMs = 15000) {
  */
 async function verifyPositionOnKalshi(ticker, side) {
     if (config.paperMode) return -1; // skip verification in paper mode
+    if (getEnvironment() === 'demo') return -1; // demo portfolio doesn't reflect demo orders
     try {
         const resp = await trading.getPositions();
         const positions = resp.market_positions || resp.positions || [];
@@ -1548,6 +1549,9 @@ const POSITION_SYNC_MS = 15000; // sync with Kalshi every 15s
 
 async function syncPositionWithKalshi() {
     if (config.paperMode) return;
+    // Demo API doesn't reflect demo orders in portfolio/positions endpoint,
+    // so syncing would always see 0 contracts and incorrectly clear the position
+    if (getEnvironment() === 'demo') return;
     if (!currentPosition || !currentPosition.ticker) return;
     if (Date.now() - lastPositionSync < POSITION_SYNC_MS) return;
     lastPositionSync = Date.now();
