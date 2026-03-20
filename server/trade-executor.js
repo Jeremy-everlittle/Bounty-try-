@@ -108,6 +108,55 @@ let fillFailedPeriods = {};   // { periodKey: { count, lastAttempt } } — track
 let enteredPeriods = {};      // { periodKey: { side, ticker, entryTime } } — prevent duplicate entries even if position is cleared
 let syncZeroCount = 0;        // consecutive times sync read 0 contracts — require 3 before clearing
 
+// Get the current 15-minute period key (matches server.js getPeriodKey format)
+function getCurrentPeriodKey() {
+    const now = new Date();
+    const mins = now.getMinutes();
+    const periodStart = Math.floor(mins / 15) * 15;
+    return now.getHours() + ':' + periodStart;
+}
+
+// Validate currentPosition against the current period.
+// If the position is from a previous period, auto-settle it to prevent phantom positions.
+// This is critical for paper mode (no Kalshi API to sync with) and also catches
+// stale positions restored from DB after server restart.
+function validateCurrentPosition() {
+    if (!currentPosition) return;
+    const currentPeriod = getCurrentPeriodKey();
+    if (currentPosition.periodKey && currentPosition.periodKey !== currentPeriod) {
+        const positionAge = Date.now() - (currentPosition.entryTime || 0);
+        // Only clear if position is old enough (>2 min) to avoid race conditions at period boundaries
+        if (positionAge > 120000) {
+            console.log(`[trade-executor] Stale position detected: position period=${currentPosition.periodKey}, current period=${currentPeriod}, age=${Math.round(positionAge/1000)}s — auto-settling`);
+            // In paper mode, settle the position (assume loss conservatively)
+            if (config.paperMode) {
+                const contracts = currentPosition.totalContracts || currentPosition.contracts;
+                const cost = currentPosition.totalCostCents || (contracts * currentPosition.entryPrice);
+                // We don't know the result, but the position should have been settled by onPeriodEnd.
+                // If it wasn't (missed period end), assume loss.
+                dailyStats.losses++;
+                dailyStats.pnlCents -= cost;
+                const env = getEnvironment();
+                // Don't add back proceeds — assume worst case (total loss)
+                logTrade('settle', {
+                    ticker: currentPosition.ticker,
+                    side: currentPosition.side,
+                    contracts,
+                    entryPrice: currentPosition.entryPrice,
+                    correct: false,
+                    pnlCents: -cost,
+                    dailyPnlCents: dailyStats.pnlCents,
+                    periodKey: currentPosition.periodKey,
+                    note: 'auto-settled stale phantom position (missed period end)',
+                });
+            }
+            currentPosition = null;
+            persistPosition();
+            setThought('idle', 'Cleared stale position from previous period — ready for new trades');
+        }
+    }
+}
+
 // Auto-trader thought status — exposed to the frontend
 let traderThought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
 
@@ -562,6 +611,7 @@ async function capContractsByBalance(contracts, pricePerContract) {
 // ═══════════════════════════════════════════════════════════════
 
 async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
+    validateCurrentPosition(); // Clear stale positions from previous periods
     if (!prediction || !kalshiTicker || strike === null) return;
 
     const betQuality = prediction._betQuality;
@@ -863,6 +913,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 // ═══════════════════════════════════════════════════════════════
 
 async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, strike, currentPrice) {
+    validateCurrentPosition(); // Clear stale positions from previous periods
     if (!currentPosition || !sellSignal) return;
 
     // ── BINARY OPTIONS: ALMOST NEVER SELL (except confident flips) ──
@@ -1935,6 +1986,8 @@ async function syncPositionWithKalshi() {
 
 function getStatus() {
     checkDayRollover().catch(e => console.error('[db] Day rollover error:', e.message));
+    // Validate position is still for current period (prevents phantom positions)
+    validateCurrentPosition();
     // Trigger async balance refresh + position sync + balance snapshot (non-blocking)
     if (!config.paperMode) {
         refreshBalance();
@@ -2400,8 +2453,15 @@ async function initFromDB() {
     // Restore current position (if server restarted mid-position)
     const savedPos = await db.loadPosition();
     if (savedPos && savedPos.ticker) {
-        currentPosition = savedPos;
-        console.log(`[trade-executor] Restored position from DB: ${savedPos.contracts}x ${savedPos.side} @ ${savedPos.ticker}`);
+        const currentPeriod = getCurrentPeriodKey();
+        if (savedPos.periodKey && savedPos.periodKey !== currentPeriod) {
+            console.log(`[trade-executor] Restored position from DB but period expired: position=${savedPos.periodKey}, current=${currentPeriod} — discarding`);
+            // Clear the stale position from DB
+            db.savePosition(null).catch(e => console.error('[db] Position clear error:', e.message));
+        } else {
+            currentPosition = savedPos;
+            console.log(`[trade-executor] Restored position from DB: ${savedPos.contracts}x ${savedPos.side} @ ${savedPos.ticker} (period=${savedPos.periodKey})`);
+        }
     }
 
     // Snapshot balance on startup
