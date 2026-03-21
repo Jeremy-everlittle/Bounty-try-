@@ -24,7 +24,11 @@ const path = require('path');
 
 let _privateKey = null;
 let _apiKeyId = null;
-let _currentEnv = 'demo'; // default to demo for safety
+// SAFETY: Always default to demo. Live/production trading requires explicit opt-in
+// by setting KALSHI_ENV=production. This prevents accidental real-money trades.
+let _currentEnv = (process.env.KALSHI_ENV || 'demo').toLowerCase() === 'production'
+    ? 'production'
+    : 'demo';
 
 function getEnvironment() {
     return _currentEnv;
@@ -46,6 +50,8 @@ function getBaseUrl() {
     if (_currentEnv === 'demo') {
         return process.env.KALSHI_DEMO_BASE_URL || 'https://demo-api.kalshi.co';
     }
+    // Production: trading-api.kalshi.com is the current correct URL.
+    // The old api.elections.kalshi.com also works but is the market-data URL.
     return process.env.KALSHI_BASE_URL || 'https://trading-api.kalshi.com';
 }
 

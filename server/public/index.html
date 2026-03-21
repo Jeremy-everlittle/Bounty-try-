@@ -128,6 +128,12 @@
             max-width: 400px;
             margin-bottom: 16px;
         }
+        #current-card {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
 
         .card-label {
             font-size: 12px;
@@ -239,35 +245,6 @@
             height: 100%;
         }
 
-        .signals {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            margin-top: 12px;
-        }
-
-        .signal {
-            background: #21262d;
-            border-radius: 10px;
-            padding: 12px;
-            text-align: center;
-        }
-
-        .signal-name {
-            font-size: 11px;
-            color: #b0b8c1;
-            margin-bottom: 4px;
-        }
-
-        .signal-value {
-            font-size: 14px;
-            font-weight: 600;
-        }
-
-        .signal-value.bullish { color: #3fb950; }
-        .signal-value.bearish { color: #f85149; }
-        .signal-value.neutral { color: #d29922; }
-
         .status-bar {
             font-size: 11px;
             color: #b0b8c1;
@@ -344,13 +321,13 @@
 
         .bet-badge {
             display: inline-block;
-            font-size: 22px;
+            font-size: 14px;
             font-weight: 800;
-            letter-spacing: 2px;
+            letter-spacing: 1.5px;
             text-transform: uppercase;
-            padding: 10px 24px;
+            padding: 5px 14px;
             border-radius: 12px;
-            margin: 12px 0;
+            margin: 6px 0 4px 0;
             text-align: center;
         }
 
@@ -401,10 +378,7 @@
         }
 
         .updated-bet-badge {
-            font-size: 14px !important;
-            padding: 5px 14px !important;
-            margin: 6px 0 4px 0 !important;
-            letter-spacing: 1.5px !important;
+            /* same size as original badge */
         }
 
         .pred-row {
@@ -624,6 +598,74 @@
         .trade-history-meta { display: flex; gap: 8px; font-size: 9px; color: #8b949e; margin-top: 3px; }
         .trade-history-error { font-size: 9px; color: #f85149; margin-top: 3px; word-break: break-all; }
         .trade-history-ticker { font-size: 9px; color: #484f58; margin-top: 2px; font-family: monospace; }
+        /* ── Combined Period History ── */
+        .period-item { padding: 12px; border-radius: 8px; margin-bottom: 8px; font-size: 14px; font-variant-numeric: tabular-nums; border: 1px solid rgba(255,255,255,0.06); background: rgba(255,255,255,0.02); }
+        .period-item.period-win { border-left: 3px solid #3fb950; }
+        .period-item.period-loss { border-left: 3px solid #f85149; }
+        .period-item.period-no-bet { border-left: 3px solid #484f58; }
+        .period-item.period-pending { border-left: 3px solid #d29922; }
+        .period-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .period-time { color: #c9d1d9; font-size: 14px; font-weight: 600; }
+        .period-outcome { font-size: 11px; font-weight: 800; letter-spacing: 0.8px; padding: 2px 8px; border-radius: 4px; }
+        .period-outcome-win { background: rgba(63,185,80,0.2); color: #3fb950; }
+        .period-outcome-loss { background: rgba(248,81,73,0.2); color: #f85149; }
+        .period-outcome-nobet { background: rgba(255,255,255,0.08); color: #8b949e; }
+        .period-outcome-pending { background: rgba(210,153,34,0.2); color: #d29922; }
+        .period-prediction { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .period-dir-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+        .period-dir-up { background: rgba(63,185,80,0.15); color: #3fb950; }
+        .period-dir-down { background: rgba(248,81,73,0.15); color: #f85149; }
+        .period-prices { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px 8px; margin-bottom: 6px; }
+        .period-price-cell { display: flex; flex-direction: column; }
+        .period-price-label { color: #9ca3af; font-size: 10px; }
+        .period-price-value { color: #c9d1d9; font-size: 13px; font-weight: 500; }
+        .period-price-value.pred { color: #58a6ff; }
+        .period-trades { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.06); }
+        .period-trades-title { font-size: 10px; color: #8b949e; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+        .period-trade-entry { display: flex; align-items: center; gap: 6px; padding: 4px 6px; margin-bottom: 3px; border-radius: 4px; background: rgba(255,255,255,0.03); flex-wrap: wrap; }
+        .period-trade-type { font-size: 9px; font-weight: 800; letter-spacing: 0.6px; padding: 1px 5px; border-radius: 3px; }
+        .period-trade-info { font-size: 10px; color: #b0b8c1; }
+        .period-trade-pnl { font-size: 11px; font-weight: 700; margin-left: auto; }
+        .period-pnl-summary { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.04); }
+        .period-pnl-label { font-size: 10px; color: #8b949e; }
+        .period-pnl-value { font-size: 14px; font-weight: 700; }
+        .period-accuracy { font-size: 10px; color: #8b949e; margin-top: 4px; }
+        .period-no-trades { font-size: 10px; color: #484f58; font-style: italic; margin-top: 4px; }
+        /* ── Trader Thought Bubble ── */
+        .trader-thought { margin-top: 8px; padding: 8px 10px; border-radius: 6px; font-size: 11px; }
+        .trader-thought-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 3px; }
+        .trader-thought-msg { font-weight: 600; font-size: 12px; }
+        .trader-thought-detail { font-size: 10px; margin-top: 3px; color: rgba(255,255,255,0.5); }
+        .trader-thought.thought-idle { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); }
+        .trader-thought.thought-idle .trader-thought-label { color: #8b949e; }
+        .trader-thought.thought-idle .trader-thought-msg { color: #8b949e; }
+        .trader-thought.thought-skip { background: rgba(210,153,34,0.1); border: 1px solid rgba(210,153,34,0.25); }
+        .trader-thought.thought-skip .trader-thought-label { color: #d29922; }
+        .trader-thought.thought-skip .trader-thought-msg { color: #d29922; }
+        .trader-thought.thought-buying { background: rgba(56,139,253,0.1); border: 1px solid rgba(56,139,253,0.25); }
+        .trader-thought.thought-buying .trader-thought-label { color: #58a6ff; }
+        .trader-thought.thought-buying .trader-thought-msg { color: #58a6ff; }
+        .trader-thought.thought-bought { background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.25); }
+        .trader-thought.thought-bought .trader-thought-label { color: #3fb950; }
+        .trader-thought.thought-bought .trader-thought-msg { color: #3fb950; }
+        .trader-thought.thought-holding { background: rgba(56,139,253,0.08); border: 1px solid rgba(56,139,253,0.2); }
+        .trader-thought.thought-holding .trader-thought-label { color: #58a6ff; }
+        .trader-thought.thought-holding .trader-thought-msg { color: #79c0ff; }
+        .trader-thought.thought-winning { background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.25); }
+        .trader-thought.thought-winning .trader-thought-label { color: #3fb950; }
+        .trader-thought.thought-winning .trader-thought-msg { color: #56d364; }
+        .trader-thought.thought-losing { background: rgba(248,81,73,0.1); border: 1px solid rgba(248,81,73,0.25); }
+        .trader-thought.thought-losing .trader-thought-label { color: #f85149; }
+        .trader-thought.thought-losing .trader-thought-msg { color: #f85149; }
+        .trader-thought.thought-selling { background: rgba(248,81,73,0.15); border: 1px solid rgba(248,81,73,0.3); }
+        .trader-thought.thought-selling .trader-thought-label { color: #f85149; }
+        .trader-thought.thought-selling .trader-thought-msg { color: #f85149; }
+        .trader-thought.thought-settled { background: rgba(136,87,255,0.1); border: 1px solid rgba(136,87,255,0.25); }
+        .trader-thought.thought-settled .trader-thought-label { color: #a371f7; }
+        .trader-thought.thought-settled .trader-thought-msg { color: #d2a8ff; }
+        .trader-thought.thought-blocked { background: rgba(248,81,73,0.08); border: 1px solid rgba(248,81,73,0.2); }
+        .trader-thought.thought-blocked .trader-thought-label { color: #f85149; }
+        .trader-thought.thought-blocked .trader-thought-msg { color: #f85149; }
         .trading-controls { display: flex; gap: 6px; margin-top: 8px; }
         .trading-btn { font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: #e6edf3; cursor: pointer; }
         .trading-btn:hover { background: rgba(255,255,255,0.1); }
@@ -639,18 +681,63 @@
         .env-header-badge { display: inline-block; font-size: 9px; font-weight: 800; letter-spacing: 1.2px; padding: 1px 6px; border-radius: 3px; margin-left: 8px; vertical-align: middle; }
         .env-header-demo { background: rgba(63,185,80,0.25); color: #3fb950; }
         .env-header-prod { background: rgba(248,81,73,0.25); color: #f85149; }
+
+        /* ── Login Gate ── */
+        #login-gate {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: #0d1117; z-index: 9999;
+            display: flex; align-items: center; justify-content: center;
+            flex-direction: column; gap: 16px;
+        }
+        #login-gate.hidden { display: none; }
+        .login-box { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; width: 320px; text-align: center; }
+        .login-box h2 { font-size: 18px; margin-bottom: 6px; color: #e6edf3; }
+        .login-box p { font-size: 12px; color: #8b949e; margin-bottom: 20px; }
+        .login-box input[type="password"] {
+            width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #30363d;
+            background: #0d1117; color: #e6edf3; font-size: 14px; outline: none;
+        }
+        .login-box input[type="password"]:focus { border-color: #58a6ff; }
+        .login-box button {
+            width: 100%; padding: 10px; margin-top: 12px; border-radius: 8px; border: none;
+            background: #238636; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+        }
+        .login-box button:hover { background: #2ea043; }
+        .login-error { color: #f85149; font-size: 12px; margin-top: 8px; display: none; }
+        #dashboard-content { display: none; }
+        #dashboard-content.visible { display: block; }
     </style>
 </head>
 <body>
+    <!-- Login gate — shown until valid key is provided -->
+    <div id="login-gate">
+        <div class="login-box">
+            <h2>BTC Predictor</h2>
+            <p>Enter your dashboard password to continue</p>
+            <input type="password" id="login-password" placeholder="Password" autocomplete="current-password">
+            <button id="login-btn" onclick="attemptLogin()">Unlock</button>
+            <div class="login-error" id="login-error">Wrong password. Try again.</div>
+        </div>
+    </div>
+
+    <div id="dashboard-content">
     <div class="header">
         <h1>BTC Predictor <span class="env-header-badge env-header-demo" id="env-header-badge">DEMO</span></h1>
         <p><span class="live-dot"></span>Kalshi BTC Up or Down &middot; 15 min</p>
     </div>
 
     <div class="card" id="current-card">
-        <div class="card-label"><span class="live-dot"></span> Current Price</div>
-        <div class="price" id="current-price">--</div>
-        <div class="price-sub" id="price-change-24h"></div>
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+            <div>
+                <div class="card-label"><span class="live-dot"></span> Current Price</div>
+                <div class="price" id="current-price">--</div>
+                <div class="price-sub" id="price-change-24h"></div>
+            </div>
+            <div class="countdown" id="countdown" style="margin-top:0;flex-direction:column;align-items:flex-end;gap:2px;">
+                <span style="font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;">Next period in</span>
+                <span class="countdown-time" id="countdown-time" style="font-size:18px;">--:--</span>
+            </div>
+        </div>
         <div class="period-info" id="period-start-row">
             <span class="period-label" id="period-label">Period open (strike)</span>
             <span class="period-value" id="period-start-price">--</span>
@@ -662,41 +749,42 @@
         <div class="card-label">Prediction for</div>
         <div class="target-time" id="target-time">--:--</div>
 
-        <div class="bet-badge" id="bet-badge">--</div>
-
-        <div class="pred-row original">
-            <div class="pred-row-label">Original</div>
-            <div class="price predicted-price" id="original-predicted-price">--</div>
-            <div id="original-predicted-change"></div>
-            <div id="original-risk-badge"></div>
-            <div class="confidence" id="original-confidence">
-                <div class="confidence-label">Original Confidence</div>
-                <div class="confidence-bar">
-                    <div class="confidence-fill" id="original-confidence-fill" style="width: 0%"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;" id="pred-columns">
+            <div class="pred-row original" style="border:1px solid rgba(139,148,158,0.1);border-radius:8px;padding:8px;">
+                <div class="pred-row-label">Original</div>
+                <div class="bet-badge" id="bet-badge">--</div>
+                <div class="price predicted-price" id="original-predicted-price" style="font-size:20px;">--</div>
+                <div id="original-predicted-change"></div>
+                <div id="original-risk-badge"></div>
+                <div class="confidence" id="original-confidence">
+                    <div class="confidence-label">Confidence</div>
+                    <div class="confidence-bar">
+                        <div class="confidence-fill" id="original-confidence-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="confidence-value" id="original-confidence-value">--</div>
                 </div>
-                <div class="confidence-value" id="original-confidence-value">--</div>
+            </div>
+
+            <div class="pred-row updated" id="updated-row" style="display:none;border:1px solid rgba(139,148,158,0.1);border-radius:8px;padding:8px;">
+                <div class="pred-row-label">Updated</div>
+                <div class="bet-badge updated-bet-badge" id="updated-bet-badge"></div>
+                <div class="price predicted-price updated-color" id="updated-predicted-price" style="font-size:20px;">--</div>
+                <div id="updated-predicted-change"></div>
+                <div id="updated-risk-badge"></div>
+                <div class="confidence" id="updated-confidence">
+                    <div class="confidence-label">Confidence</div>
+                    <div class="confidence-bar">
+                        <div class="confidence-fill" id="updated-confidence-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="confidence-value" id="updated-confidence-value">--</div>
+                </div>
             </div>
         </div>
 
-        <div class="pred-row updated" id="updated-row" style="display:none;">
-            <div class="pred-row-label">Updated</div>
-            <div class="bet-badge updated-bet-badge" id="updated-bet-badge"></div>
-            <div class="price predicted-price updated-color" id="updated-predicted-price">--</div>
-            <div id="updated-predicted-change"></div>
-            <div id="updated-risk-badge"></div>
-            <div class="confidence" id="updated-confidence">
-                <div class="confidence-label">Updated Confidence</div>
-                <div class="confidence-bar">
-                    <div class="confidence-fill" id="updated-confidence-fill" style="width: 0%"></div>
-                </div>
-                <div class="confidence-value" id="updated-confidence-value">--</div>
-            </div>
-        </div>
+    </div>
 
-        <div id="prebuy-signal-badge"></div>
-        <div id="sell-signal-badge"></div>
-
-        <!-- Auto-Trading Panel -->
+    <!-- Auto-Trading Card (separate) -->
+    <div class="card" id="trading-card-wrapper">
         <div class="trading-panel" id="trading-panel">
             <div class="trading-panel-header">
                 <span class="trading-panel-title">Auto Trading</span>
@@ -708,7 +796,7 @@
             </div>
             <div class="trading-stats">
                 <div class="trading-stat">
-                    <div class="trading-stat-label">Balance</div>
+                    <div class="trading-stat-label" id="trading-balance-label">Balance</div>
                     <div class="trading-stat-value" id="trading-balance">--</div>
                 </div>
                 <div class="trading-stat">
@@ -724,16 +812,78 @@
                     <div class="trading-stat-value" id="trading-wl">0/0</div>
                 </div>
             </div>
+            <!-- Paper balance controls (shown only in paper mode) -->
+            <div id="paper-balance-controls" style="display:none;margin:6px 0;padding:8px;background:rgba(210,153,34,0.08);border:1px solid rgba(210,153,34,0.25);border-radius:8px;">
+                <div style="display:flex;gap:6px;align-items:center;">
+                    <input type="number" id="paper-balance-input" placeholder="Amount ($)" min="0" step="0.01" style="flex:1;padding:5px 8px;font-size:12px;background:#0d1117;border:1px solid rgba(210,153,34,0.3);border-radius:4px;color:#e6edf3;">
+                    <button class="trading-btn" id="paper-add-btn" onclick="adjustPaperBalance('add')" style="padding:5px 10px;font-size:11px;font-weight:700;background:rgba(63,185,80,0.15);border-color:rgba(63,185,80,0.4);color:#3fb950;white-space:nowrap;">+ Add</button>
+                    <button class="trading-btn" id="paper-set-btn" onclick="adjustPaperBalance('set')" style="padding:5px 10px;font-size:11px;font-weight:700;background:rgba(139,148,158,0.12);border-color:rgba(139,148,158,0.3);color:#8b949e;white-space:nowrap;">Set</button>
+                </div>
+            </div>
+            <div id="trader-thought-area"></div>
             <div id="trading-position-area"></div>
-            <div class="trading-recent" id="trading-recent-area"></div>
             <div class="trading-controls">
                 <button class="trading-btn" id="trading-mode-btn" onclick="toggleTradingMode()">Toggle Mode</button>
                 <button class="trading-btn trading-btn-danger" id="trading-kill-btn" onclick="toggleKillSwitch()">Kill Switch</button>
                 <button class="trading-btn" id="notif-btn" onclick="toggleNotifications()" style="font-size:12px">Notifications: OFF</button>
             </div>
+            <div style="margin-top:6px;display:flex;gap:6px;">
+                <button class="trading-btn" id="force-bet-btn" onclick="forceBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(136,87,255,0.15);border-color:rgba(136,87,255,0.4);color:#a371f7;">FORCE BET</button>
+                <button class="trading-btn" id="press-bet-btn" onclick="pressBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(56,139,253,0.15);border-color:rgba(56,139,253,0.4);color:#58a6ff;display:none;">PRESS BET</button>
+                <button class="trading-btn trading-btn-danger" id="force-sell-btn" onclick="forceSellPosition()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(248,81,73,0.15);border-color:rgba(248,81,73,0.4);color:#f85149;display:none;">FORCE SELL</button>
+            </div>
+            <!-- Settings gear toggle -->
+            <div style="margin-top:8px;">
+                <button class="trading-btn" id="config-toggle-btn" onclick="toggleConfigPanel()" style="width:100%;padding:6px 0;font-size:11px;background:rgba(139,148,158,0.08);border-color:rgba(139,148,158,0.2);color:#8b949e;">Settings</button>
+            </div>
+            <!-- Collapsible config panel -->
+            <div id="config-panel" style="display:none;margin-top:8px;padding:10px;background:rgba(22,27,34,0.6);border:1px solid rgba(139,148,158,0.15);border-radius:8px;">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                    <div>
+                        <label style="font-size:10px;color:#8b949e;display:block;margin-bottom:2px;">Base Bet (%)</label>
+                        <input type="number" id="cfg-baseContracts" min="1" max="100" style="width:100%;padding:4px 6px;font-size:13px;background:#0d1117;border:1px solid rgba(139,148,158,0.3);border-radius:4px;color:#e6edf3;">
+                    </div>
+                    <div>
+                        <label style="font-size:10px;color:#8b949e;display:block;margin-bottom:2px;">Max Position</label>
+                        <input type="number" id="cfg-maxPositionContracts" min="1" style="width:100%;padding:4px 6px;font-size:13px;background:#0d1117;border:1px solid rgba(139,148,158,0.3);border-radius:4px;color:#e6edf3;">
+                    </div>
+                    <div>
+                        <label style="font-size:10px;color:#8b949e;display:block;margin-bottom:2px;">Conviction Max</label>
+                        <input type="number" id="cfg-convictionMaxContracts" min="1" style="width:100%;padding:4px 6px;font-size:13px;background:#0d1117;border:1px solid rgba(139,148,158,0.3);border-radius:4px;color:#e6edf3;">
+                    </div>
+                    <div>
+                        <label style="font-size:10px;color:#8b949e;display:block;margin-bottom:2px;">Daily Loss Limit ($)</label>
+                        <input type="number" id="cfg-maxDailyLossCents" min="1" step="1" style="width:100%;padding:4px 6px;font-size:13px;background:#0d1117;border:1px solid rgba(139,148,158,0.3);border-radius:4px;color:#e6edf3;">
+                    </div>
+                    <div>
+                        <label style="font-size:10px;color:#8b949e;display:block;margin-bottom:2px;">Max Daily Trades</label>
+                        <input type="number" id="cfg-maxDailyTrades" min="1" style="width:100%;padding:4px 6px;font-size:13px;background:#0d1117;border:1px solid rgba(139,148,158,0.3);border-radius:4px;color:#e6edf3;">
+                    </div>
+                </div>
+                <button class="trading-btn" id="cfg-save-btn" onclick="saveConfig()" style="width:100%;margin-top:8px;padding:6px 0;font-size:12px;font-weight:700;background:rgba(63,185,80,0.15);border-color:rgba(63,185,80,0.4);color:#3fb950;">Save Settings</button>
+            </div>
         </div>
 
-        <!-- Wallet removed - will be re-added later -->
+        <!-- Kalshi Orderbook Card -->
+        <div class="card" id="kalshi-orderbook-card" style="display:none;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <span style="font-size:13px;font-weight:700;color:#e6edf3;letter-spacing:1px;text-transform:uppercase;">Kalshi Orderbook</span>
+                <span id="kalshi-ob-ticker" style="font-size:11px;color:#8b949e;font-family:monospace;"></span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                <!-- YES side -->
+                <div>
+                    <div style="font-size:10px;font-weight:700;color:#3fb950;text-transform:uppercase;margin-bottom:4px;text-align:center;">YES Bids</div>
+                    <div id="kalshi-ob-yes" style="font-size:11px;font-family:monospace;"></div>
+                </div>
+                <!-- NO side -->
+                <div>
+                    <div style="font-size:10px;font-weight:700;color:#f85149;text-transform:uppercase;margin-bottom:4px;text-align:center;">NO Bids</div>
+                    <div id="kalshi-ob-no" style="font-size:11px;font-family:monospace;"></div>
+                </div>
+            </div>
+            <div id="kalshi-ob-spread" style="margin-top:6px;font-size:11px;color:#8b949e;text-align:center;"></div>
+        </div>
 
         <!-- Next Period Preview Card -->
         <div class="card next-period-card" id="next-period-card">
@@ -766,11 +916,6 @@
             <div class="next-period-note" id="next-period-note">Based on current trends — will update when next period opens</div>
         </div>
 
-        <div class="countdown" id="countdown">
-            <span>Next period in</span>
-            <span class="countdown-time" id="countdown-time">--:--</span>
-        </div>
-
     </div>
 
     <div class="card">
@@ -780,35 +925,13 @@
         </div>
     </div>
 
-    <div class="card">
-        <div class="card-label">Technical Signals</div>
-        <div class="signals">
-            <div class="signal">
-                <div class="signal-name">Momentum</div>
-                <div class="signal-value" id="sig-momentum">--</div>
-            </div>
-            <div class="signal">
-                <div class="signal-name">Volatility</div>
-                <div class="signal-value" id="sig-volatility">--</div>
-            </div>
-            <div class="signal">
-                <div class="signal-name">Trend</div>
-                <div class="signal-value" id="sig-trend">--</div>
-            </div>
-            <div class="signal">
-                <div class="signal-name">RSI Signal</div>
-                <div class="signal-value" id="sig-rsi">--</div>
-            </div>
-        </div>
-    </div>
-
     <div class="card" id="history-card">
         <div class="card-label" style="display:flex;justify-content:space-between;align-items:center;">
-            Prediction History
+            Period History
             <span id="clear-history-btn" style="font-size:11px;color:#b0b8c1;cursor:pointer;padding:2px 8px;border:1px solid #3d3d3d;border-radius:4px;" onclick="clearHistory()">Clear</span>
         </div>
-        <div class="history-list" id="prediction-history">
-            <div class="history-empty">No predictions yet. History will appear after the first period ends.</div>
+        <div class="history-list" id="period-history">
+            <div class="history-empty">No periods yet. History will appear after the first period ends.</div>
         </div>
         <div class="history-stats" id="history-stats"></div>
     </div>
@@ -830,6 +953,29 @@
 
     <script>
         // ═══════════════════════════════════════════════════════════════
+        // API KEY — read from localStorage (set by login gate) or ?key= param
+        // ═══════════════════════════════════════════════════════════════
+        (function() {
+            const params = new URLSearchParams(location.search);
+            if (params.get('key')) {
+                localStorage.setItem('dashKey', params.get('key'));
+                sessionStorage.setItem('dashKey', params.get('key'));
+                params.delete('key');
+                const clean = params.toString();
+                history.replaceState(null, '', location.pathname + (clean ? '?' + clean : ''));
+            }
+        })();
+        const _DASH_KEY = sessionStorage.getItem('dashKey') || localStorage.getItem('dashKey') || '';
+
+        // Helper: add auth header to all API fetch calls
+        function authFetch(url, opts) {
+            opts = opts || {};
+            opts.headers = opts.headers || {};
+            if (_DASH_KEY) opts.headers['x-api-key'] = _DASH_KEY;
+            return fetch(url, opts);
+        }
+
+        // ═══════════════════════════════════════════════════════════════
         // WEBSOCKET CONNECTION — Receives data from always-on server
         // ═══════════════════════════════════════════════════════════════
         let ws = null;
@@ -839,7 +985,7 @@
 
         function connectWebSocket() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = protocol + '//' + location.host;
+            const wsUrl = protocol + '//' + location.host + (_DASH_KEY ? '?apiKey=' + encodeURIComponent(_DASH_KEY) : '');
             console.log('Connecting to WebSocket:', wsUrl);
 
             ws = new WebSocket(wsUrl);
@@ -932,7 +1078,9 @@
         function clearHistory() {
             predictionLog = [];
             localStorage.removeItem('btcPredLog');
-            // Also clear server-side history
+            // Clear cached trade data so period history doesn't show stale trades
+            recentTradesCache = { timestamp: 0, trades: [] };
+            // Also clear server-side history + trade log
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'clearHistory' }));
             }
@@ -1167,103 +1315,296 @@
         }
         bootstrapBayesianFromHistory();
 
-        function renderPredictionHistory() {
-            const container = document.getElementById('prediction-history');
-            const statsEl = document.getElementById('history-stats');
-            const graded = predictionLog.filter(p => p.correct !== null);
+        // For backward compat — old callers still reference this
+        function renderPredictionHistory() { renderPeriodHistory(); }
 
-            if (graded.length === 0 && predictionLog.length <= 1) {
-                container.innerHTML = '<div class="history-empty">No predictions yet. History will appear after the first period ends.</div>';
-                statsEl.style.display = 'none';
+        function renderPeriodHistory() {
+            const container = document.getElementById('period-history');
+            const statsEl = document.getElementById('history-stats');
+            if (!container) return;
+
+            const graded = predictionLog.filter(p => p.correct !== null);
+            const trades = (serverData && serverData.tradingStatus && serverData.tradingStatus.recentTrades) || [];
+
+            // Group trades by periodKey
+            const tradesByPeriod = {};
+            for (const t of trades) {
+                const pk = t.periodKey || 'unknown';
+                if (!tradesByPeriod[pk]) tradesByPeriod[pk] = [];
+                tradesByPeriod[pk].push(t);
+            }
+
+            // Build combined period entries from predictions (include current open period)
+            const periods = [];
+            const seenKeys = new Set();
+            for (const p of predictionLog) {
+                const pk = p.periodKey;
+                seenKeys.add(pk);
+                periods.push({ prediction: p, trades: tradesByPeriod[pk] || [], timestamp: p.timestamp });
+            }
+
+            // Add trade-only periods (no prediction entry)
+            for (const pk of Object.keys(tradesByPeriod)) {
+                if (!seenKeys.has(pk) && pk !== 'unknown') {
+                    periods.push({ prediction: null, trades: tradesByPeriod[pk], timestamp: new Date(tradesByPeriod[pk][0].time).getTime() });
+                }
+            }
+
+            // Sort newest first
+            periods.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+            if (periods.length === 0) {
+                container.innerHTML = '<div class="history-empty">No periods yet. History will appear after the first period ends.</div>';
+                if (statsEl) statsEl.style.display = 'none';
                 return;
             }
 
+            // Aggregate stats
+            let totalWins = 0, totalLosses = 0, totalPnlCents = 0, predCorrect = 0, predTotal = 0;
+
             let html = '';
-            // Only show completed cycles (not the current open period)
-            const toShow = [...predictionLog].filter(p => p.correct !== null).reverse();
-            for (const p of toShow) {
-                const icon = p.correct === true ? '\u2713' : p.correct === false ? '\u2717' : '\u25CF';
-                const cls = p.correct === true ? 'correct' : p.correct === false ? 'wrong' : 'pending';
-                const betLabel = p.predictedDirection === 'up' ? 'Up' : 'Down';
-                const betCls = p.predictedDirection === 'up' ? 'bet-up' : 'bet-down';
-                // Compute prediction accuracy vs actual
-                const dollarOff = p.predictedPrice - p.actualPrice;
-                const pctOff = ((dollarOff) / p.actualPrice) * 100;
-                const absDollar = Math.abs(dollarOff);
-                const absPct = Math.abs(pctOff);
-                // Color: green <0.1%, yellow <0.3%, red >=0.3%
-                const offCls = absPct < 0.1 ? 'hi-off-good' : absPct < 0.3 ? 'hi-off-ok' : 'hi-off-bad';
-                const sign = dollarOff >= 0 ? '+' : '-';
+            for (const period of periods) {
+                const p = period.prediction;
+                const periodTrades = period.trades;
 
-                // Compute final vs strike
-                const strikeDiff = p.actualPrice - p.startPrice;
-                const strikePct = ((strikeDiff) / p.startPrice) * 100;
-                const absStrikeDiff = Math.abs(strikeDiff);
-                const absStrikePct = Math.abs(strikePct);
-                const strikeSign = strikeDiff >= 0 ? '+' : '-';
-                const strikeCls = strikeDiff >= 0 ? 'hi-off-good' : 'hi-off-bad';
-
-                // Convert to local time and show as 15-min cycle range
-                let displayTime = p.time;
-                if (p.timestamp) {
-                    const d = new Date(p.timestamp);
+                // Determine period time display
+                let displayTime = '';
+                const ts = period.timestamp;
+                if (ts) {
+                    const d = new Date(ts);
                     const mins = d.getMinutes();
                     const cycleStart = mins - (mins % 15);
                     const startD = new Date(d);
                     startD.setMinutes(cycleStart, 0, 0);
                     const endD = new Date(startD.getTime() + 15 * 60 * 1000);
+                    const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
                     const fmt = (dt) => {
                         let h = dt.getHours();
                         const m = dt.getMinutes().toString().padStart(2, '0');
                         const ap = h >= 12 ? 'PM' : 'AM';
                         h = h % 12 || 12;
-                        return h + ':' + m + ' ' + ap;
+                        return h + ':' + m + ap;
                     };
-                    displayTime = fmt(startD) + ' – ' + fmt(endD);
+                    displayTime = dateStr + ' ' + fmt(startD) + '\u2013' + fmt(endD);
                 }
 
-                html += `<div class="history-item">
-                    <div class="hi-top">
-                        <span class="hi-time">${displayTime}</span>
-                        <span class="hi-bet ${betCls}">${betLabel}</span>
-                        <span class="hi-result ${cls}">${icon}</span>
-                    </div>
-                    <div class="hi-prices">
-                        <div class="hi-price-cell">
-                            <span class="hi-label">Strike</span>
-                            <span class="hi-value">${formatPrice(p.startPrice)}</span>
-                        </div>
-                        <div class="hi-price-cell">
-                            <span class="hi-label">Predicted</span>
-                            <span class="hi-value hi-pred">${formatPrice(p.predictedPrice)}</span>
-                        </div>
-                        <div class="hi-price-cell">
-                            <span class="hi-label">Final</span>
-                            <span class="hi-value">${formatPrice(p.actualPrice)}</span>
-                        </div>
-                    </div>
-                    <div class="hi-diffs">
-                        <div class="hi-diff-cell">
-                            <span class="hi-diff-label">Pred vs Final</span>
-                            <span class="hi-diff-value ${offCls}">${sign}$${absDollar.toFixed(2)} (${sign}${absPct.toFixed(3)}%)</span>
-                        </div>
-                        <div class="hi-diff-cell">
-                            <span class="hi-diff-label">Final vs Strike</span>
-                            <span class="hi-diff-value ${strikeCls}">${strikeSign}$${absStrikeDiff.toFixed(2)} (${strikeSign}${absStrikePct.toFixed(3)}%)</span>
-                        </div>
-                    </div>
-                </div>`;
+                // Determine settlement from trades
+                const settlement = periodTrades.find(t => t.type === 'settle');
+                const buys = periodTrades.filter(t => t.type === 'buy' || t.type === 'dip_buy' || t.type === 'late_lock' || t.type === 'late_lock_add' || t.type === 're_entry');
+                const sells = periodTrades.filter(t => t.type === 'sell');
+                const errors = periodTrades.filter(t => t.type && (t.type.includes('error') || t.type.includes('failed') || t.type.includes('unfilled') || t.type.includes('phantom')));
+                const hasTrades = buys.length > 0 || sells.length > 0 || settlement;
+
+                // Determine outcome
+                let outcomeLabel, outcomeCls, periodCls;
+                if (settlement) {
+                    if (settlement.correct) {
+                        outcomeLabel = 'WIN'; outcomeCls = 'period-outcome-win'; periodCls = 'period-win';
+                        totalWins++;
+                    } else {
+                        outcomeLabel = 'LOSS'; outcomeCls = 'period-outcome-loss'; periodCls = 'period-loss';
+                        totalLosses++;
+                    }
+                    totalPnlCents += settlement.pnlCents || 0;
+                } else if (!hasTrades) {
+                    outcomeLabel = 'NO BET'; outcomeCls = 'period-outcome-nobet'; periodCls = 'period-no-bet';
+                } else {
+                    outcomeLabel = 'PENDING'; outcomeCls = 'period-outcome-pending'; periodCls = 'period-pending';
+                }
+
+                if (p && p.correct !== null) {
+                    predTotal++;
+                    if (p.correct) predCorrect++;
+                }
+
+                html += '<div class="period-item ' + periodCls + '">';
+                // Header: time + outcome badge
+                html += '<div class="period-header">' +
+                    '<span class="period-time">' + displayTime + '</span>' +
+                    '<span class="period-outcome ' + outcomeCls + '">' + outcomeLabel + '</span>' +
+                    '</div>';
+
+                // Prediction details (from prediction log OR inferred from trades)
+                if (p) {
+                    const dirLabel = p.predictedDirection === 'up' ? '\u25B2 UP' : '\u25BC DOWN';
+                    const dirCls = p.predictedDirection === 'up' ? 'period-dir-up' : 'period-dir-down';
+                    const resultIcon = p.correct === true ? ' \u2713' : p.correct === false ? ' \u2717' : '';
+                    const resultColor = p.correct === true ? '#3fb950' : p.correct === false ? '#f85149' : '#8b949e';
+
+                    html += '<div class="period-prediction">' +
+                        '<span class="period-dir-badge ' + dirCls + '">' + dirLabel + '</span>' +
+                        '<span style="font-size:14px;font-weight:700;color:' + resultColor + '">' + resultIcon + (p.correct === true ? ' Correct' : p.correct === false ? ' Wrong' : '') + '</span>' +
+                        '</div>';
+
+                    // Prices: Strike, Predicted, Final
+                    html += '<div class="period-prices">' +
+                        '<div class="period-price-cell"><span class="period-price-label">Strike</span><span class="period-price-value">' + (p.startPrice ? formatPrice(p.startPrice) : '--') + '</span></div>' +
+                        '<div class="period-price-cell"><span class="period-price-label">Predicted</span><span class="period-price-value pred">' + (p.predictedPrice ? formatPrice(p.predictedPrice) : '--') + '</span></div>' +
+                        '<div class="period-price-cell"><span class="period-price-label">Final</span><span class="period-price-value">' + (p.actualPrice ? formatPrice(p.actualPrice) : '--') + '</span></div>' +
+                        '</div>';
+
+                    // Accuracy line
+                    if (p.actualPrice) {
+                        const dollarOff = Math.abs(p.predictedPrice - p.actualPrice);
+                        const pctOff = Math.abs((p.predictedPrice - p.actualPrice) / p.actualPrice * 100);
+                        const offCls = pctOff < 0.1 ? 'hi-off-good' : pctOff < 0.3 ? 'hi-off-ok' : 'hi-off-bad';
+                        html += '<div class="period-accuracy">Prediction error: <span class="' + offCls + '" style="font-weight:600">\u00B1$' + dollarOff.toFixed(2) + ' (' + pctOff.toFixed(3) + '%)</span></div>';
+                    }
+                } else if (hasTrades) {
+                    // No prediction log entry — infer direction from trades
+                    const firstBuy = buys[0];
+                    if (firstBuy && firstBuy.direction) {
+                        const dir = firstBuy.direction.toLowerCase();
+                        const dirLabel = dir === 'up' ? '\u25B2 UP' : '\u25BC DOWN';
+                        const dirCls = dir === 'up' ? 'period-dir-up' : 'period-dir-down';
+                        const resultIcon = settlement ? (settlement.correct ? ' \u2713' : ' \u2717') : '';
+                        const resultColor = settlement ? (settlement.correct ? '#3fb950' : '#f85149') : '#8b949e';
+
+                        html += '<div class="period-prediction">' +
+                            '<span class="period-dir-badge ' + dirCls + '">' + dirLabel + '</span>' +
+                            '<span style="font-size:14px;font-weight:700;color:' + resultColor + '">' + resultIcon + (settlement ? (settlement.correct ? ' Correct' : ' Wrong') : '') + '</span>' +
+                            '</div>';
+                    }
+                }
+
+                // Trade activity section
+                if (hasTrades || errors.length > 0) {
+                    html += '<div class="period-trades">';
+                    html += '<div class="period-trades-title">Trade Activity</div>';
+
+                    // Render each trade in chronological order
+                    const allTrades = [...periodTrades].sort((a, b) => new Date(a.time) - new Date(b.time));
+                    for (const t of allTrades) {
+                        const time = new Date(t.time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+                        let typeBg, typeColor, typeLabel;
+
+                        if (t.type === 'settle') {
+                            typeBg = t.correct ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
+                            typeColor = t.correct ? '#3fb950' : '#f85149';
+                            typeLabel = t.correct ? 'WIN' : 'LOSS';
+                            if (t.badFlip) {
+                                typeLabel = 'BAD FLIP';
+                                typeBg = 'rgba(248,81,73,0.3)'; typeColor = '#ff6b6b';
+                            }
+                        } else if (t.type === 'buy') {
+                            if (t.strategy === 'confident_flip' || t.flipped) {
+                                typeBg = 'rgba(210,153,34,0.25)'; typeColor = '#e3b341'; typeLabel = 'FLIP';
+                            } else if (t.strategy === 'force_bet') {
+                                typeBg = 'rgba(136,87,255,0.2)'; typeColor = '#a371f7'; typeLabel = 'FORCE';
+                            } else if (t.strategy === 'press_bet') {
+                                typeBg = 'rgba(56,139,253,0.25)'; typeColor = '#79c0ff'; typeLabel = 'PRESS';
+                            } else {
+                                typeBg = 'rgba(56,139,253,0.2)'; typeColor = '#58a6ff'; typeLabel = 'BUY';
+                            }
+                        } else if (t.type === 'dip_buy') {
+                            typeBg = 'rgba(136,87,255,0.2)'; typeColor = '#a371f7'; typeLabel = 'DIP BUY';
+                        } else if (t.type === 'late_lock' || t.type === 'late_lock_add') {
+                            typeBg = 'rgba(63,185,80,0.25)'; typeColor = '#56d364'; typeLabel = 'LOCK';
+                        } else if (t.type === 're_entry') {
+                            typeBg = 'rgba(56,139,253,0.25)'; typeColor = '#79c0ff'; typeLabel = 'RE-ENTRY';
+                        } else if (t.type === 'sell') {
+                            typeBg = 'rgba(210,153,34,0.2)'; typeColor = '#d29922'; typeLabel = 'SELL';
+                        } else if (t.type.includes('error') || t.type.includes('failed')) {
+                            typeBg = 'rgba(248,81,73,0.15)'; typeColor = '#f85149'; typeLabel = 'ERROR';
+                        } else if (t.type.includes('unfilled') || t.type.includes('phantom')) {
+                            typeBg = 'rgba(210,153,34,0.15)'; typeColor = '#d29922'; typeLabel = t.type.toUpperCase().replace('BUY_', '');
+                        } else {
+                            typeBg = 'rgba(255,255,255,0.08)'; typeColor = '#8b949e'; typeLabel = t.type.toUpperCase();
+                        }
+
+                        html += '<div class="period-trade-entry">' +
+                            '<span class="period-trade-type" style="background:' + typeBg + ';color:' + typeColor + '">' + typeLabel + '</span>';
+
+                        // Trade details
+                        if (t.contracts) {
+                            const price = t.limitPrice || t.entryPrice || 0;
+                            const side = t.side ? t.side.toUpperCase() : '';
+                            html += '<span class="period-trade-info">' + time + ' \u00B7 ' + t.contracts + 'x ' + side + ' @ ' + price + '\u00A2</span>';
+                        } else {
+                            html += '<span class="period-trade-info">' + time + '</span>';
+                        }
+
+                        // Edge for buys
+                        if (t.edge) {
+                            html += '<span class="period-trade-info" style="color:#8b949e">Edge: ' + t.edge + '</span>';
+                        }
+
+                        // Flip detail: show original side
+                        if (t.flipped && t.originalSide) {
+                            html += '<span class="period-trade-info" style="color:#e3b341;font-size:9px">\u21C4 was ' + t.originalSide.toUpperCase() + '</span>';
+                        }
+
+                        // Bad flip warning on settlement
+                        if (t.type === 'settle' && t.badFlip) {
+                            html += '<span class="period-trade-info" style="color:#ff6b6b;font-size:9px;font-weight:600">\u26A0 Original ' + (t.originalSide || '').toUpperCase() + ' bet would have won</span>';
+                        }
+
+                        // P&L for settlements
+                        if (t.pnlCents !== undefined) {
+                            const pnlPos = t.pnlCents > 0;
+                            html += '<span class="period-trade-pnl" style="color:' + (pnlPos ? '#3fb950' : '#f85149') + '">' +
+                                (pnlPos ? '+' : '') + '$' + (t.pnlCents / 100).toFixed(2) + '</span>';
+                        }
+
+                        // Error detail
+                        if (t.error) {
+                            html += '<span class="period-trade-info" style="color:#f85149;font-size:9px">' + t.error + '</span>';
+                        }
+
+                        html += '</div>';
+                    }
+
+                    // P&L summary for the period
+                    if (settlement) {
+                        const pnl = settlement.pnlCents || 0;
+                        const pnlPos = pnl > 0;
+                        const totalCost = buys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
+                        const hadFlip = periodTrades.some(t => t.flipped || t.strategy === 'confident_flip');
+                        html += '<div class="period-pnl-summary">' +
+                            '<div>' +
+                                '<span class="period-pnl-label">Period P&L</span>' +
+                                (hadFlip ? '<span style="color:#e3b341;font-size:9px;margin-left:6px">\u21C4 FLIPPED</span>' : '') +
+                                (settlement.badFlip ? '<span style="color:#ff6b6b;font-size:9px;margin-left:4px">(bad flip)</span>' : '') +
+                            '</div>' +
+                            '<span class="period-pnl-value" style="color:' + (pnlPos ? '#3fb950' : '#f85149') + '">' +
+                                (pnlPos ? '+' : '') + '$' + (pnl / 100).toFixed(2) +
+                            '</span>' +
+                            '</div>';
+                    }
+
+                    html += '</div>';
+                } else if (p) {
+                    html += '<div class="period-no-trades">No bets placed this period</div>';
+                }
+
+                html += '</div>';
             }
             container.innerHTML = html;
 
-            if (graded.length > 0) {
-                const correct = graded.filter(p => p.correct).length;
-                const wrong = graded.length - correct;
-                const pct = Math.round((correct / graded.length) * 100);
-                statsEl.innerHTML = `<span class="stat-correct">${correct}</span> correct &middot; <span class="stat-wrong">${wrong}</span> wrong &middot; ${pct}% accuracy (last ${graded.length})`;
-                statsEl.style.display = 'block';
-            } else {
-                statsEl.style.display = 'none';
+            // Stats summary
+            if (statsEl) {
+                if (predTotal > 0 || totalWins > 0 || totalLosses > 0) {
+                    const predPct = predTotal > 0 ? Math.round((predCorrect / predTotal) * 100) : 0;
+                    const totalPnl = totalPnlCents / 100;
+                    const pnlColor = totalPnl >= 0 ? '#3fb950' : '#f85149';
+                    let statsHtml = '';
+                    if (predTotal > 0) {
+                        statsHtml += '<span class="stat-correct">' + predCorrect + '</span> correct &middot; ' +
+                            '<span class="stat-wrong">' + (predTotal - predCorrect) + '</span> wrong &middot; ' +
+                            predPct + '% accuracy';
+                    }
+                    if (totalWins > 0 || totalLosses > 0) {
+                        if (statsHtml) statsHtml += ' &middot; ';
+                        statsHtml += 'Bets: <span style="color:#3fb950;font-weight:700">' + totalWins + 'W</span>/' +
+                            '<span style="color:#f85149;font-weight:700">' + totalLosses + 'L</span>';
+                        statsHtml += ' &middot; P&L: <span style="color:' + pnlColor + ';font-weight:700">' +
+                            (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2) + '</span>';
+                    }
+                    statsEl.innerHTML = statsHtml;
+                    statsEl.style.display = 'block';
+                } else {
+                    statsEl.style.display = 'none';
+                }
             }
         }
 
@@ -1342,15 +1683,18 @@
 
             document.getElementById('kalshi-error-banner').style.display = 'none';
             const debugEl = document.getElementById('debug-strike');
-            if (debugEl && kStrike) debugEl.textContent = 'Strike: $' + kStrike.toFixed(2) + ' via server';
+            const strikeSource = serverData.strikeSource;
 
             let periodOpenPrice = null;
             if (kStrike && kStrike > 0) {
                 kalshiStrike = kStrike;
                 periodOpenPrice = kStrike;
                 dataSourceName = `BRTI~(${sources}) + Kalshi strike`;
+                if (debugEl) debugEl.textContent = 'Strike: $' + kStrike.toFixed(2) + ' via Kalshi API';
             } else {
+                kalshiStrike = null;
                 dataSourceName = `BRTI~(${sources})`;
+                if (debugEl) debugEl.textContent = 'Strike: API failed — no strike available';
             }
 
             return {
@@ -1485,8 +1829,11 @@
             const qPct = (bq.quality * 100).toFixed(0);
             const qColor = bq.quality >= 0.7 ? '#3fb950' : bq.quality >= 0.55 ? '#d29922' : '#f85149';
             const betSize = bq.betSize || 1.0;
-            const betSizeLabel = betSize >= 0.9 ? 'FULL' : betSize >= 0.6 ? 'REDUCED' : betSize >= 0.4 ? 'HALF' : 'SMALL';
-            const betSizeColor = betSize >= 0.9 ? '#3fb950' : betSize >= 0.6 ? '#d29922' : '#f85149';
+            const betSizeLabel = bq.convictionTier === 'LOCK' ? 'LOCK 3x' :
+                                 bq.convictionTier === 'HIGH' ? 'HIGH 2x' :
+                                 bq.convictionTier === 'ELEVATED' ? 'ELEV 1.5x' :
+                                 betSize >= 0.9 ? 'FULL' : betSize >= 0.6 ? 'REDUCED' : betSize >= 0.4 ? 'HALF' : 'SMALL';
+            const betSizeColor = bq.convictionTier ? '#a371f7' : betSize >= 0.9 ? '#3fb950' : betSize >= 0.6 ? '#d29922' : '#f85149';
 
             let qualityBar =
                 '<div class="prebuy-metrics" style="margin-top:4px">' +
@@ -1496,7 +1843,7 @@
                     (bq.choppiness && bq.choppiness.choppy ? '<span class="prebuy-metric" style="color:#d29922">Choppy</span>' : '') +
                     (bq.exhaustion && bq.exhaustion.exhaustion > 0.3 ? '<span class="prebuy-metric" style="color:#d29922">Exhausted</span>' : '') +
                 '</div>' +
-                (bq.betSizeReason && betSize < 0.9 ? '<div class="sell-signal-details" style="margin-top:2px;color:#b0b8c1">' + bq.betSizeReason + '</div>' : '');
+                (bq.betSizeReason && (betSize < 0.9 || bq.convictionTier) ? '<div class="sell-signal-details" style="margin-top:2px;color:' + (bq.convictionTier ? '#a371f7' : '#b0b8c1') + '">' + bq.betSizeReason + '</div>' : '');
 
             // Session risk banner
             const sr = serverData.sessionRisk || bq.sessionRisk;
@@ -1534,13 +1881,16 @@
         function renderTradingPanel() {
             const ts = serverData && serverData.tradingStatus ? serverData.tradingStatus : null;
             const panel = document.getElementById('trading-panel');
+            const panelWrapper = document.getElementById('trading-card-wrapper');
             if (!panel) return;
 
             if (!ts) {
                 panel.style.display = 'none';
+                if (panelWrapper) panelWrapper.style.display = 'none';
                 return;
             }
             panel.style.display = '';
+            if (panelWrapper) panelWrapper.style.display = '';
 
             // Environment toggle
             const currentEnv = serverData.kalshiEnvironment || 'demo';
@@ -1572,32 +1922,85 @@
                 badge.className = 'trading-mode-badge trading-mode-off';
             }
 
-            // Balance
+            // Balance — shows paper balance in paper mode, real Kalshi balance in live mode
             const balEl = document.getElementById('trading-balance');
+            const balLabel = document.getElementById('trading-balance-label');
+            const currentEnvLabel = currentEnv === 'production' ? 'Prod' : 'Demo';
+            if (balLabel) {
+                balLabel.textContent = ts.paperMode ? `Balance (${currentEnvLabel} Paper)` : `Balance (${currentEnvLabel} Live)`;
+            }
             if (ts.balanceCents !== null && ts.balanceCents !== undefined) {
                 const bal = ts.balanceCents / 100;
                 balEl.textContent = '$' + bal.toFixed(2);
-                balEl.style.color = '#e6edf3';
+                balEl.style.color = ts.paperMode ? '#d29922' : '#e6edf3';
             } else {
                 balEl.textContent = '--';
                 balEl.style.color = '#8b949e';
+            }
+            // Show/hide paper balance controls
+            const paperControls = document.getElementById('paper-balance-controls');
+            if (paperControls) {
+                paperControls.style.display = ts.paperMode ? '' : 'none';
             }
 
             // Stats
             const pnl = (ts.daily.pnlCents / 100);
             const pnlEl = document.getElementById('trading-pnl');
-            pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+            // Calculate P&L percentage based on starting balance (current balance minus today's P&L)
+            let pnlPct = '';
+            if (ts.balanceCents !== null && ts.balanceCents !== undefined) {
+                const startBalanceCents = ts.balanceCents - ts.daily.pnlCents;
+                if (startBalanceCents > 0) {
+                    const pctVal = (ts.daily.pnlCents / startBalanceCents) * 100;
+                    pnlPct = ' (' + (pctVal >= 0 ? '+' : '') + pctVal.toFixed(1) + '%)';
+                }
+            }
+            pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + pnlPct;
             pnlEl.style.color = pnl >= 0 ? '#3fb950' : '#f85149';
 
             document.getElementById('trading-count').textContent = ts.daily.tradeCount;
             document.getElementById('trading-wl').textContent = ts.daily.wins + '/' + ts.daily.losses;
 
+            // Auto-trader thought
+            const thoughtArea = document.getElementById('trader-thought-area');
+            if (thoughtArea && ts.thought) {
+                const t = ts.thought;
+                const ago = Math.round((Date.now() - t.timestamp) / 1000);
+                const agoStr = ago < 60 ? ago + 's ago' : Math.floor(ago / 60) + 'm ago';
+                let detailHtml = '';
+                if (t.detail) {
+                    const parts = [];
+                    if (t.detail.edge !== undefined) parts.push('Edge: ' + (t.detail.edge * 100).toFixed(1) + '%');
+                    if (t.detail.quality !== undefined) parts.push('Quality: ' + (t.detail.quality * 100).toFixed(0) + '%');
+                    if (t.detail.probability !== undefined) parts.push('Prob: ' + (t.detail.probability * 100).toFixed(0) + '%');
+                    if (t.detail.kellyHasEdge !== undefined) parts.push('Kelly: ' + (t.detail.kellyHasEdge ? 'yes' : 'no'));
+                    if (t.detail.sigmaDistance) parts.push(t.detail.sigmaDistance + '\u03C3 from strike');
+                    if (t.detail.minutesRemaining !== undefined) parts.push(parseFloat(t.detail.minutesRemaining).toFixed(1) + 'm left');
+                    if (t.detail.side) parts.push(t.detail.side.toUpperCase());
+                    if (t.detail.contracts) parts.push(t.detail.contracts + ' contracts');
+                    if (t.detail.waitForBetter) parts.push('Waiting for better entry');
+                    if (t.detail.factors) {
+                        const f = t.detail.factors;
+                        const failed = Object.entries(f).filter(([k, v]) => !v).map(([k]) => k);
+                        if (failed.length > 0) parts.push('Failed: ' + failed.join(', '));
+                    }
+                    if (parts.length > 0) detailHtml = '<div class="trader-thought-detail">' + parts.join(' \u00B7 ') + '</div>';
+                }
+                thoughtArea.innerHTML = '<div class="trader-thought thought-' + t.status + '">' +
+                    '<div class="trader-thought-label">Auto Trader \u00B7 ' + agoStr + '</div>' +
+                    '<div class="trader-thought-msg">' + t.message + '</div>' +
+                    detailHtml +
+                    '</div>';
+            }
+
             // Current position
             const posArea = document.getElementById('trading-position-area');
             if (ts.currentPosition) {
                 const p = ts.currentPosition;
-                const costCents = p.totalCostCents || (p.contracts * p.entryPrice);
-                const maxPayoutCents = (p.totalContracts || p.contracts) * 100;
+                const entryPrice = p.entryPrice || 0;
+                const contractCount = p.totalContracts || p.contracts || 0;
+                const costCents = p.totalCostCents || (contractCount * entryPrice);
+                const maxPayoutCents = contractCount * 100;
                 const maxProfitCents = maxPayoutCents - costCents;
                 const holdMin = Math.floor(p.holdingSeconds / 60);
                 const holdSec = p.holdingSeconds % 60;
@@ -1605,7 +2008,7 @@
                 posArea.innerHTML = '<div class="trading-position">' +
                     '<div class="trading-position-label">OPEN POSITION</div>' +
                     '<div class="trading-position-detail">' +
-                    p.contracts + 'x ' + p.side.toUpperCase() + ' @ ' + p.entryPrice + '\u00A2' +
+                    contractCount + 'x ' + p.side.toUpperCase() + ' @ ' + entryPrice + '\u00A2' +
                     ' &middot; ' + holdStr +
                     '</div>' +
                     '<div style="display:flex;gap:12px;margin-top:4px">' +
@@ -1618,121 +2021,37 @@
                 posArea.innerHTML = '';
             }
 
-            // Trade history
-            const recentArea = document.getElementById('trading-recent-area');
-            if (ts.recentTrades && ts.recentTrades.length > 0) {
-                let html = '<div class="trade-history-header" onclick="toggleTradeHistory()">' +
-                    '<span class="trading-recent-title" style="cursor:pointer">Trade History (' + ts.recentTrades.length + ')</span>' +
-                    '<span class="trade-history-toggle" id="trade-history-toggle">\u25BC</span>' +
-                    '</div>' +
-                    '<div class="trade-history-list" id="trade-history-list">';
-                for (const t of ts.recentTrades) {
-                    const time = new Date(t.time).toLocaleTimeString();
-                    const date = new Date(t.time).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-                    const isSettle = t.type === 'settle';
-                    const isBuy = t.type === 'buy';
-                    const isSell = t.type === 'sell';
-                    const isDipBuy = t.type === 'dip_buy';
-                    const isLateLock = t.type === 'late_lock' || t.type === 'late_lock_add';
-                    const isReentry = t.type === 're_entry';
-                    const isError = t.type.includes('error') || t.type.includes('failed');
+            // Re-render combined period history when trading data updates
+            renderPeriodHistory();
 
-                    // Type badge colors
-                    let typeBg, typeColor, typeLabel;
-                    if (isSettle) {
-                        typeBg = t.correct ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
-                        typeColor = t.correct ? '#3fb950' : '#f85149';
-                        typeLabel = t.correct ? 'WIN' : 'LOSS';
-                    } else if (isDipBuy) {
-                        typeBg = 'rgba(136,87,255,0.2)'; typeColor = '#a371f7'; typeLabel = 'DIP BUY';
-                    } else if (isLateLock) {
-                        typeBg = 'rgba(63,185,80,0.25)'; typeColor = '#56d364'; typeLabel = 'LOCK';
-                    } else if (isReentry) {
-                        typeBg = 'rgba(56,139,253,0.25)'; typeColor = '#79c0ff'; typeLabel = 'RE-ENTRY';
-                    } else if (isBuy) {
-                        typeBg = 'rgba(56,139,253,0.2)'; typeColor = '#58a6ff'; typeLabel = 'BUY';
-                    } else if (isSell) {
-                        typeBg = 'rgba(210,153,34,0.2)'; typeColor = '#d29922'; typeLabel = 'SELL';
-                    } else if (isError) {
-                        typeBg = 'rgba(248,81,73,0.15)'; typeColor = '#f85149'; typeLabel = 'ERROR';
-                    } else {
-                        typeBg = 'rgba(255,255,255,0.08)'; typeColor = '#8b949e'; typeLabel = t.type.toUpperCase();
-                    }
-
-                    // Cost and payout for buy/settle entries
-                    const costCents = (t.contracts && t.limitPrice) ? t.contracts * t.limitPrice : (t.contracts && t.entryPrice) ? t.contracts * t.entryPrice : 0;
-                    const maxPayoutCents = t.contracts ? t.contracts * 100 : 0;
-
-                    html += '<div class="trade-history-item">' +
-                        '<div class="trade-history-row">' +
-                            '<span class="trade-history-type" style="background:' + typeBg + ';color:' + typeColor + '">' + typeLabel + '</span>' +
-                            '<span class="trade-history-side">' + (t.side ? t.side.toUpperCase() : '') + '</span>' +
-                            '<span class="trade-history-dir" style="color:' + (t.direction === 'UP' ? '#3fb950' : t.direction === 'DOWN' ? '#f85149' : '#8b949e') + '">' +
-                                (t.direction ? (t.direction === 'UP' ? '\u25B2' : '\u25BC') + ' ' + t.direction : '') +
-                            '</span>' +
-                            '<span class="trade-history-time">' + date + ' ' + time + '</span>' +
-                        '</div>';
-
-                    // Details row
-                    if (t.contracts) {
-                        const price = t.limitPrice || t.entryPrice || 0;
-                        html += '<div class="trade-history-details">' +
-                            '<span>' + t.contracts + 'x @ ' + price + '\u00A2</span>';
-                        if (costCents > 0) {
-                            html += '<span>Cost: $' + (costCents / 100).toFixed(2) + '</span>';
-                        }
-                        if (isBuy && maxPayoutCents > 0) {
-                            html += '<span style="color:#3fb950">Max Payout: $' + (maxPayoutCents / 100).toFixed(2) + '</span>';
-                        }
-                        html += '</div>';
-                    }
-
-                    // P&L row for settled trades
-                    if (t.pnlCents !== undefined) {
-                        const pnlPositive = t.pnlCents > 0;
-                        html += '<div class="trade-history-pnl" style="color:' + (pnlPositive ? '#3fb950' : '#f85149') + '">' +
-                            'P&L: ' + (pnlPositive ? '+' : '') + '$' + (t.pnlCents / 100).toFixed(2) +
-                            (t.dailyPnlCents !== undefined ? ' &middot; Daily: ' + (t.dailyPnlCents >= 0 ? '+' : '') + '$' + (t.dailyPnlCents / 100).toFixed(2) : '') +
-                            '</div>';
-                    }
-
-                    // Edge/quality for buy entries
-                    if (t.edge || t.quality) {
-                        html += '<div class="trade-history-meta">';
-                        if (t.edge) html += '<span>Edge: ' + t.edge + '</span>';
-                        if (t.quality) html += '<span>Quality: ' + t.quality + '</span>';
-                        if (t.betSize) html += '<span>Size: ' + (parseFloat(t.betSize) * 100).toFixed(0) + '%</span>';
-                        html += '</div>';
-                    }
-
-                    // Strategy-specific details
-                    if (t.strategy) {
-                        html += '<div class="trade-history-meta" style="color:' + typeColor + '">';
-                        if (t.strategy === 'dip_buyer' && t.dipImprovement) html += '<span>Dip: ' + t.dipImprovement + ' cheaper</span>';
-                        if (t.strategy === 'dip_buyer' && t.existingContracts) html += '<span>Added to ' + t.existingContracts + ' existing</span>';
-                        if ((t.strategy === 'late_lock' || t.strategy === 'late_lock_add') && t.sigmaDistance) html += '<span>' + t.sigmaDistance + ' from strike</span>';
-                        if (t.expectedProfit) html += '<span>Expected: ' + t.expectedProfit + '</span>';
-                        if (t.strategy === 're_entry' && t.originalSellReason) html += '<span>After sell: ' + t.originalSellReason + '</span>';
-                        if (t.probForBet) html += '<span>Prob: ' + t.probForBet + '</span>';
-                        html += '</div>';
-                    }
-
-                    // Error info
-                    if (t.error) {
-                        html += '<div class="trade-history-error">' + t.error + '</div>';
-                    }
-
-                    // Ticker
-                    if (t.ticker) {
-                        html += '<div class="trade-history-ticker">' + t.ticker + '</div>';
-                    }
-
-                    html += '</div>';
+            // Force bet / Press bet button state
+            const forceBtn = document.getElementById('force-bet-btn');
+            const pressBtn = document.getElementById('press-bet-btn');
+            if (forceBtn && !forceBtn.disabled) {
+                if (ts.currentPosition) {
+                    forceBtn.textContent = 'POSITION OPEN';
+                    forceBtn.style.opacity = '0.4';
+                    forceBtn.style.pointerEvents = 'none';
+                } else {
+                    forceBtn.textContent = 'FORCE BET';
+                    forceBtn.style.opacity = '1';
+                    forceBtn.style.pointerEvents = 'auto';
                 }
-                html += '</div>';
-                recentArea.innerHTML = html;
-            } else {
-                recentArea.innerHTML = '';
+            }
+            if (pressBtn) {
+                if (ts.currentPosition && !pressBtn.disabled) {
+                    pressBtn.style.display = '';
+                } else if (!ts.currentPosition) {
+                    pressBtn.style.display = 'none';
+                }
+            }
+            const forceSellBtn = document.getElementById('force-sell-btn');
+            if (forceSellBtn) {
+                if (ts.currentPosition && !forceSellBtn.disabled) {
+                    forceSellBtn.style.display = '';
+                } else if (!ts.currentPosition) {
+                    forceSellBtn.style.display = 'none';
+                }
             }
 
             // Kill switch button state
@@ -1751,7 +2070,7 @@
                 const ts = serverData && serverData.tradingStatus;
                 const newPaperMode = ts ? !ts.paperMode : true;
                 if (!newPaperMode && !confirm('Switch to LIVE trading? Real money will be used.')) return;
-                await fetch('/api/trading/mode', {
+                await authFetch('/api/trading/mode', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ paperMode: newPaperMode })
@@ -1762,15 +2081,126 @@
         async function switchEnvironment(env) {
             try {
                 if (env === 'production' && !confirm('Switch to PRODUCTION? This uses real money on Kalshi.')) return;
-                const resp = await fetch('/api/trading/environment', {
+                const resp = await authFetch('/api/trading/environment', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ environment: env })
                 });
                 const result = await resp.json();
-                if (!resp.ok) { alert('Failed: ' + (result.error || 'unknown error')); return; }
-                if (!result.configured) alert('Warning: ' + env.toUpperCase() + ' credentials are not configured. Trading will not work.');
+                if (!resp.ok) { showToast(friendlyError(result.error), 'error'); return; }
+                if (!result.configured) showToast(env.toUpperCase() + ' credentials not configured — trading won\'t work.', 'error');
             } catch (e) { console.error('Environment switch failed:', e); }
+        }
+
+        function renderKalshiOrderbook() {
+            const card = document.getElementById('kalshi-orderbook-card');
+            if (!card) return;
+            const ob = serverData && serverData.kalshiOrderBook;
+            const ticker = serverData && serverData.kalshiTicker;
+            const obError = serverData && serverData.kalshiOrderBookError;
+            if (!ticker) {
+                card.style.display = 'none';
+                return;
+            }
+            card.style.display = '';
+            document.getElementById('kalshi-ob-ticker').textContent = ticker;
+            if (!ob) {
+                // Show error state
+                const errMsg = obError || 'Orderbook unavailable';
+                const env = (serverData && serverData.kalshiEnvironment) || '?';
+                document.getElementById('kalshi-ob-yes').innerHTML = '';
+                document.getElementById('kalshi-ob-no').innerHTML = '';
+                document.getElementById('kalshi-ob-spread').innerHTML =
+                    `<span style="color:#f0883e;">Orderbook fetch failed (${env}): ${errMsg}</span>`;
+                return;
+            }
+            document.getElementById('kalshi-ob-ticker').textContent = ticker;
+
+            const book = ob.orderbook_fp || ob.orderbook || ob;
+            // orderbook_fp has yes_dollars/no_dollars (prices as dollar strings "0.81")
+            // orderbook has yes/no (prices as cent integers 81)
+            const isDollarFormat = !!(book.yes_dollars || book.no_dollars);
+            const rawYesBids = book.yes_dollars || book.yes || [];
+            const rawNoBids = book.no_dollars || book.no || [];
+
+            // Convert price entry to cents, handling both formats
+            function toCents(val) {
+                const n = parseFloat(val);
+                if (isDollarFormat) return Math.round(n * 100);
+                return Math.round(n);
+            }
+
+            // Parse and sort bids by price descending (best/highest first)
+            function parseBids(raw) {
+                return raw.map(entry => ({
+                    priceCents: toCents(entry[0]),
+                    qty: parseInt(entry[1]) || Math.round(parseFloat(entry[1]) || 0)
+                })).sort((a, b) => b.priceCents - a.priceCents);
+            }
+
+            const yesBids = parseBids(rawYesBids);
+            const noBids = parseBids(rawNoBids);
+
+            // Render YES bids (best first)
+            const yesEl = document.getElementById('kalshi-ob-yes');
+            if (yesBids.length === 0) {
+                yesEl.innerHTML = '<div style="color:#484f58;text-align:center;padding:8px 0;">No bids</div>';
+            } else {
+                const rows = yesBids.slice(0, 8).map(b => {
+                    const barW = Math.min(100, b.qty * 2);
+                    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 4px;position:relative;">
+                        <div style="position:absolute;left:0;top:0;bottom:0;width:${barW}%;background:rgba(63,185,80,0.1);border-radius:2px;"></div>
+                        <span style="color:#3fb950;z-index:1;">${b.priceCents}¢</span>
+                        <span style="color:#8b949e;z-index:1;">${b.qty}</span>
+                    </div>`;
+                });
+                yesEl.innerHTML = rows.join('');
+            }
+
+            // Render NO bids (best first)
+            const noEl = document.getElementById('kalshi-ob-no');
+            if (noBids.length === 0) {
+                noEl.innerHTML = '<div style="color:#484f58;text-align:center;padding:8px 0;">No bids</div>';
+            } else {
+                const rows = noBids.slice(0, 8).map(b => {
+                    const barW = Math.min(100, b.qty * 2);
+                    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 4px;position:relative;">
+                        <div style="position:absolute;left:0;top:0;bottom:0;width:${barW}%;background:rgba(248,81,73,0.1);border-radius:2px;"></div>
+                        <span style="color:#f85149;z-index:1;">${b.priceCents}¢</span>
+                        <span style="color:#8b949e;z-index:1;">${b.qty}</span>
+                    </div>`;
+                });
+                noEl.innerHTML = rows.join('');
+            }
+
+            // Spread info using best (highest) bids
+            const spreadEl = document.getElementById('kalshi-ob-spread');
+            if (yesBids.length > 0 && noBids.length > 0) {
+                const bestYes = yesBids[0].priceCents;
+                const bestNo = noBids[0].priceCents;
+                const yesAsk = 100 - bestNo; // to buy YES, cross the NO bid
+                const noAsk = 100 - bestYes; // to buy NO, cross the YES bid
+                spreadEl.textContent = `YES: bid ${bestYes}¢ / ask ${yesAsk}¢  |  NO: bid ${bestNo}¢ / ask ${noAsk}¢  |  Spread: ${Math.abs(yesAsk - bestYes)}¢`;
+            } else {
+                spreadEl.textContent = yesBids.length + noBids.length > 0 ? 'Partial orderbook' : 'Empty orderbook';
+            }
+        }
+
+        async function adjustPaperBalance(action) {
+            const input = document.getElementById('paper-balance-input');
+            const amount = parseFloat(input.value);
+            if (!amount || amount <= 0) { showToast('Enter a valid amount', 'error'); return; }
+            try {
+                const resp = await authFetch('/api/trading/paper-balance', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action, amount })
+                });
+                const result = await resp.json();
+                if (!resp.ok) { showToast(friendlyError(result.error), 'error'); return; }
+                input.value = '';
+                showToast(`Paper balance ${action === 'set' ? 'set to' : 'increased by'} $${amount.toFixed(2)} → $${result.balanceDollars}`, 'success');
+            } catch (e) { console.error('Paper balance update failed:', e); }
         }
 
         function toggleTradeHistory() {
@@ -1786,11 +2216,152 @@
             }
         }
 
+        async function forceBet() {
+            const ts = serverData && serverData.tradingStatus;
+            if (ts && ts.currentPosition) {
+                showToast('Already have a position for this period.', 'error');
+                return;
+            }
+            const pred = serverData && serverData.prediction;
+            const dir = pred && pred.updatedPrediction
+                ? (pred.updatedPrediction.predictedPrice >= (serverData.kalshiStrike || 0) ? 'UP' : 'DOWN')
+                : pred && pred.originalPrediction
+                ? (pred.originalPrediction.predictedPrice >= (serverData.kalshiStrike || 0) ? 'UP' : 'DOWN')
+                : '??';
+            if (!confirm('Force a ' + dir + ' bet for this period?')) return;
+            const btn = document.getElementById('force-bet-btn');
+            btn.textContent = 'PLACING...';
+            btn.disabled = true;
+            try {
+                const resp = await authFetch('/api/trading/force-bet', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const result = await resp.json();
+                if (result.ok) {
+                    btn.textContent = result.direction + ' ' + result.contracts + 'x @ ' + result.entryPrice + '\u00A2';
+                    btn.style.background = 'rgba(63,185,80,0.2)';
+                    btn.style.color = '#3fb950';
+                    btn.style.borderColor = 'rgba(63,185,80,0.4)';
+                    setTimeout(() => {
+                        btn.textContent = 'FORCE BET';
+                        btn.style.background = 'rgba(136,87,255,0.15)';
+                        btn.style.color = '#a371f7';
+                        btn.style.borderColor = 'rgba(136,87,255,0.4)';
+                        btn.disabled = false;
+                    }, 5000);
+                } else {
+                    showToast(friendlyError(result.reason || result.error), 'error');
+                    btn.textContent = 'FORCE BET';
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                showToast(friendlyError(e.message), 'error');
+                btn.textContent = 'FORCE BET';
+                btn.disabled = false;
+            }
+        }
+
+        async function pressBet() {
+            const ts = serverData && serverData.tradingStatus;
+            if (!ts || !ts.currentPosition) {
+                showToast('No open position to press.', 'error');
+                return;
+            }
+            const p = ts.currentPosition;
+            const currentCount = p.totalContracts || p.contracts;
+            if (!confirm('Add more contracts to your ' + p.side.toUpperCase() + ' position? (currently ' + currentCount + 'x @ ' + p.entryPrice + '\u00A2)')) return;
+            const btn = document.getElementById('press-bet-btn');
+            btn.textContent = 'PRESSING...';
+            btn.disabled = true;
+            try {
+                const resp = await authFetch('/api/trading/press-bet', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const result = await resp.json();
+                if (result.ok) {
+                    btn.textContent = '+' + result.contracts + 'x @ ' + result.entryPrice + '\u00A2 = ' + result.totalContracts + 'x';
+                    btn.style.background = 'rgba(63,185,80,0.2)';
+                    btn.style.color = '#3fb950';
+                    btn.style.borderColor = 'rgba(63,185,80,0.4)';
+                    // Refresh trading status so UI shows updated position immediately
+                    try {
+                        const statusResp = await authFetch('/api/trading/status');
+                        const status = await statusResp.json();
+                        if (serverData) serverData.tradingStatus = status;
+                    } catch(e) { /* next WS broadcast will catch up */ }
+                    setTimeout(() => {
+                        btn.textContent = 'PRESS BET';
+                        btn.style.background = 'rgba(56,139,253,0.15)';
+                        btn.style.color = '#58a6ff';
+                        btn.style.borderColor = 'rgba(56,139,253,0.4)';
+                        btn.disabled = false;
+                    }, 5000);
+                } else {
+                    showToast(friendlyError(result.reason), 'error');
+                    btn.textContent = 'PRESS BET';
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                showToast(friendlyError(e.message), 'error');
+                btn.textContent = 'PRESS BET';
+                btn.disabled = false;
+            }
+        }
+
+        async function forceSellPosition() {
+            const ts = serverData && serverData.tradingStatus;
+            if (!ts || !ts.currentPosition) {
+                showToast('No open position to sell.', 'error');
+                return;
+            }
+            const p = ts.currentPosition;
+            const currentCount = p.totalContracts || p.contracts;
+            if (!confirm('FORCE SELL ' + currentCount + 'x ' + p.side.toUpperCase() + ' position immediately?')) return;
+            const btn = document.getElementById('force-sell-btn');
+            btn.textContent = 'SELLING...';
+            btn.disabled = true;
+            try {
+                const resp = await authFetch('/api/trading/force-sell', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const result = await resp.json();
+                if (result.ok) {
+                    showToast('Position sold: ' + result.contracts + 'x ' + result.side.toUpperCase() + (result.partial ? ' (partial)' : ''), 'success');
+                    btn.textContent = 'SOLD';
+                    btn.style.background = 'rgba(63,185,80,0.2)';
+                    btn.style.color = '#3fb950';
+                    btn.style.borderColor = 'rgba(63,185,80,0.4)';
+                    setTimeout(() => {
+                        btn.textContent = 'FORCE SELL';
+                        btn.style.background = 'rgba(248,81,73,0.15)';
+                        btn.style.color = '#f85149';
+                        btn.style.borderColor = 'rgba(248,81,73,0.4)';
+                        btn.disabled = false;
+                        btn.style.display = 'none';
+                    }, 3000);
+                } else {
+                    showToast(friendlyError(result.reason), 'error');
+                    btn.textContent = 'FORCE SELL';
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                showToast(friendlyError(e.message), 'error');
+                btn.textContent = 'FORCE SELL';
+                btn.disabled = false;
+            }
+        }
+
         async function toggleKillSwitch() {
             try {
                 const ts = serverData && serverData.tradingStatus;
                 const activate = ts ? !ts.killSwitch : true;
-                await fetch('/api/trading/kill-switch', {
+                await authFetch('/api/trading/kill-switch', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ active: activate })
@@ -2109,8 +2680,8 @@
         function updateUI(data, periodEnd) {
             // Current price (always live)
             document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
-            // Use Kalshi strike as the authoritative strike price; fall back to periodStartPrice
-            const displayStrike = kalshiStrike || periodStartPrice;
+            // Use ONLY the Kalshi API strike — no fallback to periodStartPrice
+            const displayStrike = kalshiStrike;
             // Show current price vs strike (how far above/below the strike)
             const changeEl = document.getElementById('price-change-24h');
             if (displayStrike !== null) {
@@ -2119,10 +2690,11 @@
                 changeEl.textContent = `${direction} ${formatPrice(Math.abs(strikeDelta))} vs strike`;
                 changeEl.style.color = strikeDelta >= 0 ? '#3fb950' : '#f85149';
             } else {
-                changeEl.textContent = '';
+                changeEl.textContent = 'Strike unavailable (API failed)';
+                changeEl.style.color = '#f0c040';
             }
 
-            // Period open price — always show latest Kalshi strike when available
+            // Period open price — only show if we have a real API strike
             if (displayStrike !== null) {
                 document.getElementById('period-start-price').textContent = formatPrice(displayStrike);
                 const deltaDollar = data.currentPrice - displayStrike;
@@ -2132,10 +2704,11 @@
                 deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
                 document.getElementById('period-label').textContent = 'Kalshi strike';
             } else {
-                // No Kalshi strike available
-                document.getElementById('period-start-price').textContent = 'Waiting\u2026';
-                document.getElementById('period-delta').textContent = '';
-                document.getElementById('period-label').textContent = 'Strike';
+                // No Kalshi strike — show API failed clearly
+                document.getElementById('period-start-price').textContent = 'API Failed';
+                document.getElementById('period-delta').textContent = 'Strike not available from Kalshi API';
+                document.getElementById('period-delta').style.color = '#f0c040';
+                document.getElementById('period-label').textContent = 'Kalshi strike';
             }
 
             // Target time (period end)
@@ -2187,27 +2760,13 @@
                 document.getElementById('updated-row').style.display = 'none';
             }
 
-            // Technical signals (use latest prediction)
-            const activePred = updatedPrediction || originalPrediction;
-            if (activePred) {
-                const sigClasses = {
-                    Bullish: 'bullish', Bearish: 'bearish', Neutral: 'neutral',
-                    Overbought: 'bearish', Oversold: 'bullish',
-                    High: 'bearish', Medium: 'neutral', Low: 'bullish'
-                };
-                for (const [key, val] of Object.entries(activePred.signals)) {
-                    const el = document.getElementById('sig-' + key);
-                    el.textContent = val;
-                    el.className = 'signal-value ' + (sigClasses[val] || 'neutral');
-                }
-            }
-
             // Trading advisor signals
             renderPreBuySignal('prebuy-signal-badge');
             renderSellSignal('sell-signal-badge');
 
             // Auto-trading panel
             renderTradingPanel();
+            renderKalshiOrderbook();
 
             // Wallet rendering removed
 
@@ -2320,8 +2879,6 @@
             document.getElementById('bet-badge').textContent = '';
             document.getElementById('bet-badge').className = 'bet-badge';
             document.getElementById('countdown-time').textContent = '0:00';
-            document.getElementById('sell-signal-badge').innerHTML = '';
-            document.getElementById('prebuy-signal-badge').innerHTML = '';
             document.getElementById('status-bar').innerHTML =
                 '<span class="spinner-inline"></span> Ticker completed, refreshing\u2026';
         }
@@ -2570,6 +3127,99 @@
             }
         });
 
+        // ── Friendly error messages & toast notifications ─────────────
+        function friendlyError(raw) {
+            if (!raw) return 'Something went wrong. Please try again.';
+            const s = String(raw);
+            if (s.includes('→ 503')) return 'Kalshi is temporarily unavailable (503). Try again in a moment.';
+            if (s.includes('→ 429')) return 'Too many requests — Kalshi is rate-limiting. Wait a few seconds.';
+            if (s.includes('→ 401') || s.includes('→ 403')) return 'Authentication error. Check your API keys.';
+            if (s.includes('→ 400')) return 'Bad request — the order parameters may be invalid.';
+            if (s.includes('→ 404')) return 'Market not found. The contract may have expired.';
+            if (s.includes('→ 5')) return 'Kalshi server error. Try again shortly.';
+            if (s.includes('timed out')) return 'Request timed out. Kalshi may be slow — try again.';
+            if (s.includes('Insufficient balance')) return 'Not enough balance to place this order.';
+            if (s.includes('No open position')) return 'No open position to press.';
+            if (s.includes('not configured')) return 'Kalshi API keys not configured.';
+            if (s.includes('No fills')) return 'Order got no fills after multiple attempts. The price may have moved.';
+            if (s.includes('canceled') || s.includes('rejected')) return 'Order was rejected by Kalshi. Price may have moved too far.';
+            if (s.includes('exhausted all attempts')) return 'Could not fill order after multiple tries. Try again.';
+            return s;
+        }
+
+        function showToast(message, type) {
+            const existing = document.getElementById('app-toast');
+            if (existing) existing.remove();
+            const toast = document.createElement('div');
+            toast.id = 'app-toast';
+            const bg = type === 'error' ? 'rgba(248,81,73,0.95)' : type === 'success' ? 'rgba(63,185,80,0.95)' : 'rgba(56,139,253,0.95)';
+            toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:10000;padding:12px 20px;border-radius:10px;font-size:14px;font-weight:600;color:#fff;background:' + bg + ';box-shadow:0 4px 20px rgba(0,0,0,0.5);max-width:90vw;text-align:center;animation:toastIn 0.3s ease;';
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => { toast.style.opacity = '0'; toast.style.transition = 'opacity 0.3s'; setTimeout(() => toast.remove(), 300); }, 4000);
+        }
+
+        // ── Config Panel ──────────────────────────────────────────────
+        function toggleConfigPanel() {
+            const panel = document.getElementById('config-panel');
+            if (panel.style.display === 'none') {
+                panel.style.display = '';
+                populateConfigFields();
+            } else {
+                panel.style.display = 'none';
+            }
+        }
+
+        function populateConfigFields() {
+            const ts = serverData && serverData.tradingStatus;
+            if (!ts || !ts.config) return;
+            const c = ts.config;
+            document.getElementById('cfg-baseContracts').value = c.baseContracts || '';
+            document.getElementById('cfg-maxPositionContracts').value = c.maxPositionContracts || '';
+            document.getElementById('cfg-convictionMaxContracts').value = c.convictionMaxContracts || '';
+            document.getElementById('cfg-maxDailyLossCents').value = c.maxDailyLossCents ? (c.maxDailyLossCents / 100).toFixed(0) : '';
+            document.getElementById('cfg-maxDailyTrades').value = c.maxDailyTrades || '';
+        }
+
+        async function saveConfig() {
+            const btn = document.getElementById('cfg-save-btn');
+            const body = {};
+            const base = parseInt(document.getElementById('cfg-baseContracts').value);
+            const maxPos = parseInt(document.getElementById('cfg-maxPositionContracts').value);
+            const convMax = parseInt(document.getElementById('cfg-convictionMaxContracts').value);
+            const dailyLoss = parseFloat(document.getElementById('cfg-maxDailyLossCents').value);
+            const maxTrades = parseInt(document.getElementById('cfg-maxDailyTrades').value);
+            if (base > 0) body.baseContracts = base;
+            if (maxPos > 0) body.maxPositionContracts = maxPos;
+            if (convMax > 0) body.convictionMaxContracts = convMax;
+            if (dailyLoss > 0) body.maxDailyLossCents = Math.round(dailyLoss * 100);
+            if (maxTrades > 0) body.maxDailyTrades = maxTrades;
+
+            btn.textContent = 'Saving...';
+            btn.disabled = true;
+            try {
+                const resp = await authFetch('/api/trading/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const result = await resp.json();
+                if (result.ok) {
+                    btn.textContent = 'Saved!';
+                    btn.style.color = '#3fb950';
+                    setTimeout(() => { btn.textContent = 'Save Settings'; btn.disabled = false; btn.style.color = '#3fb950'; }, 2000);
+                } else {
+                    btn.textContent = 'Error';
+                    btn.style.color = '#f85149';
+                    setTimeout(() => { btn.textContent = 'Save Settings'; btn.disabled = false; btn.style.color = '#3fb950'; }, 2000);
+                }
+            } catch (e) {
+                btn.textContent = 'Error';
+                btn.style.color = '#f85149';
+                setTimeout(() => { btn.textContent = 'Save Settings'; btn.disabled = false; btn.style.color = '#3fb950'; }, 2000);
+            }
+        }
+
         // ── Notifications ────────────────────────────────────────────
         let notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true';
 
@@ -2589,7 +3239,7 @@
 
         async function toggleNotifications() {
             if (!('Notification' in window)) {
-                alert('Your browser does not support notifications.');
+                showToast('Your browser does not support notifications.', 'error');
                 return;
             }
             if (!notificationsEnabled) {
@@ -2598,7 +3248,7 @@
                     notificationsEnabled = true;
                     localStorage.setItem('notificationsEnabled', 'true');
                 } else {
-                    alert('Notification permission denied. Please enable it in your browser settings.');
+                    showToast('Notification permission denied. Enable in browser settings.', 'error');
                 }
             } else {
                 notificationsEnabled = false;
@@ -2652,20 +3302,39 @@
             }
 
             if (title) {
-                const n = new Notification(icon + ' ' + title, {
-                    body: body,
-                    tag: 'trade-' + trade.time,
-                    renotify: true,
-                    requireInteraction: false,
-                });
-                // Auto-close after 10s
-                setTimeout(() => n.close(), 10000);
+                // Use service worker notifications (works on mobile + background tabs)
+                if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+                    navigator.serviceWorker.ready.then(reg => {
+                        reg.showNotification(icon + ' ' + title, {
+                            body: body,
+                            tag: 'trade-' + trade.time,
+                            renotify: true,
+                            requireInteraction: false,
+                            vibrate: [200, 100, 200],
+                        });
+                    }).catch(() => {
+                        // Fallback to page notification
+                        try { new Notification(icon + ' ' + title, { body, tag: 'trade-' + trade.time }); } catch(e) {}
+                    });
+                } else {
+                    // No service worker — use page notification (desktop)
+                    try {
+                        const n = new Notification(icon + ' ' + title, {
+                            body: body,
+                            tag: 'trade-' + trade.time,
+                            renotify: true,
+                        });
+                        setTimeout(() => n.close(), 10000);
+                    } catch(e) { console.error('Notification failed:', e); }
+                }
             }
         }
 
-        // Register service worker for notification click handling
+        // Register service worker for notification support (especially mobile)
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js').catch(() => {});
+            navigator.serviceWorker.register('/sw.js').then(reg => {
+                console.log('Service worker registered:', reg.scope);
+            }).catch(e => console.warn('Service worker registration failed:', e));
         }
 
         // ── Boot ──────────────────────────────────────────────────────
@@ -2676,6 +3345,76 @@
         startCountdown();
         startLiveRefresh();
         startFastUITicker();
+    </script>
+    </div><!-- end dashboard-content -->
+
+    <script>
+        // ═══════════════════════════════════════════════════════════════
+        // LOGIN GATE — validates key against /api/health, remembers device
+        // ═══════════════════════════════════════════════════════════════
+        function attemptLogin() {
+            var pw = document.getElementById('login-password').value.trim();
+            if (!pw) return;
+            var btn = document.getElementById('login-btn');
+            btn.textContent = 'Checking...';
+            btn.disabled = true;
+            fetch('/api/health', { headers: { 'x-api-key': pw } })
+                .then(function(r) {
+                    if (r.ok) {
+                        localStorage.setItem('dashKey', pw);
+                        sessionStorage.setItem('dashKey', pw);
+                        unlockDashboard();
+                    } else {
+                        document.getElementById('login-error').style.display = 'block';
+                        btn.textContent = 'Unlock';
+                        btn.disabled = false;
+                    }
+                })
+                .catch(function() {
+                    document.getElementById('login-error').textContent = 'Connection error';
+                    document.getElementById('login-error').style.display = 'block';
+                    btn.textContent = 'Unlock';
+                    btn.disabled = false;
+                });
+        }
+
+        function unlockDashboard() {
+            document.getElementById('login-gate').classList.add('hidden');
+            document.getElementById('dashboard-content').classList.add('visible');
+        }
+
+        // Allow Enter key to submit
+        document.getElementById('login-password').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') attemptLogin();
+        });
+
+        // On page load: check if we already have a saved key
+        (function() {
+            var saved = localStorage.getItem('dashKey');
+            if (saved) {
+                // Optimistically unlock immediately — no flash
+                sessionStorage.setItem('dashKey', saved);
+                unlockDashboard();
+                // Validate in background; if key was changed/revoked, lock again
+                fetch('/api/health', { headers: { 'x-api-key': saved } })
+                    .then(function(r) {
+                        if (!r.ok) {
+                            localStorage.removeItem('dashKey');
+                            sessionStorage.removeItem('dashKey');
+                            document.getElementById('login-gate').classList.remove('hidden');
+                            document.getElementById('dashboard-content').classList.remove('visible');
+                        }
+                    })
+                    .catch(function() { /* keep unlocked — network hiccup, key was valid last time */ });
+            } else {
+                // No saved key — check if server even requires auth
+                fetch('/api/health')
+                    .then(function(r) {
+                        if (r.ok) unlockDashboard(); // no auth required
+                    })
+                    .catch(function() { /* show login */ });
+            }
+        })();
     </script>
 </body>
 </html>

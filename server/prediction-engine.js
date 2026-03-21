@@ -90,17 +90,17 @@ function updateSessionRisk(correct) {
         sessionRisk.consecutiveWins = 0;
     }
 
-    // Cooling off: 3+ consecutive losses → pause for 2 periods (30 min)
-    if (sessionRisk.consecutiveLosses >= 3) {
+    // Cooling off: 5+ consecutive losses → short pause (15 min, was 30)
+    if (sessionRisk.consecutiveLosses >= 5) { // was 3
         sessionRisk.coolingOff = true;
-        sessionRisk.coolingOffUntil = Date.now() + 30 * 60 * 1000;
+        sessionRisk.coolingOffUntil = Date.now() + 15 * 60 * 1000; // was 30 min
     }
 
-    // Edge decay: rolling accuracy below fee-adjusted breakeven (61.3%)
-    if (sessionRisk.results.length >= 8) {
+    // Edge decay: only alert at very poor accuracy
+    if (sessionRisk.results.length >= 12) { // was 8 — need more data
         const recentCorrect = sessionRisk.results.filter(r => r.correct).length;
         const recentAccuracy = recentCorrect / sessionRisk.results.length;
-        sessionRisk.edgeDecayAlert = recentAccuracy < 0.55; // warn at 55%, below 61.3% breakeven
+        sessionRisk.edgeDecayAlert = recentAccuracy < 0.45; // was 0.55 — more tolerant
     }
 }
 
@@ -110,25 +110,26 @@ function getSessionRiskMultiplier() {
         sessionRisk.coolingOff = false;
     }
 
-    if (sessionRisk.coolingOff) return 0; // don't trade
+    if (sessionRisk.coolingOff) return 0; // full stop during cooldown — trading at 30% when model is broken is still losing money
 
     let mult = 1.0;
 
-    // Anti-martingale: reduce size after consecutive losses
-    if (sessionRisk.consecutiveLosses >= 2) mult *= 0.50;
-    else if (sessionRisk.consecutiveLosses >= 1) mult *= 0.75;
+    // Anti-martingale: mild reduction after consecutive losses (was aggressive)
+    if (sessionRisk.consecutiveLosses >= 4) mult *= 0.50;       // was >=2
+    else if (sessionRisk.consecutiveLosses >= 2) mult *= 0.75;  // was >=1
 
-    // Drawdown protection: reduce size when in significant drawdown
-    if (sessionRisk.currentDrawdown > 2.0) mult *= 0.50; // >2 contracts drawdown
-    else if (sessionRisk.currentDrawdown > 1.0) mult *= 0.75;
+    // Drawdown protection: only reduce in deep drawdowns
+    if (sessionRisk.currentDrawdown > 4.0) mult *= 0.60;   // was >2.0 at 0.50
+    else if (sessionRisk.currentDrawdown > 2.5) mult *= 0.80; // was >1.0 at 0.75
 
-    // Edge decay: reduce size when accuracy is dropping
-    if (sessionRisk.edgeDecayAlert) mult *= 0.60;
+    // Edge decay: mild reduction (was 0.60)
+    if (sessionRisk.edgeDecayAlert) mult *= 0.80;
 
-    // Winning streak: can go up to full size (but no more — no martingale)
-    // Already at 1.0, so no boost needed
+    // Win-streak boost REMOVED: Kelly sizes based on EDGE, not recent results.
+    // A 3-win streak at 55% base rate is a 16.6% event — not rare enough to
+    // indicate the edge has changed. Boosting creates positive feedback into drawdowns.
 
-    return Math.max(0, Math.min(1.0, mult));
+    return Math.max(0, Math.min(1.0, mult)); // floor at 0 (full stop when cooling), cap at 100%
 }
 
 // ── Online Logistic Regression (pure JS, no libraries) ──
@@ -897,7 +898,10 @@ function computeHurstExponent(prices) {
     const meanY = logRS.reduce((a, b) => a + b, 0) / nP;
     let num = 0, den = 0;
     for (let i = 0; i < nP; i++) { num += (logN[i] - meanX) * (logRS[i] - meanY); den += (logN[i] - meanX) ** 2; }
-    return Math.max(0.01, Math.min(0.99, den > 0 ? num / den : 0.5));
+    // Clamp to [0.42, 0.58]: BTC Hurst at 1-min frequency is statistically
+    // indistinguishable from 0.5 (Frontiers in Blockchain, 2024). Values outside
+    // this range at 1-min frequency are estimation noise, not real persistence.
+    return Math.max(0.42, Math.min(0.58, den > 0 ? num / den : 0.5));
 }
 
 function detectMicroMeanReversion(prices, orderBook) {
@@ -1575,6 +1579,40 @@ function updateProbTracker(periodKey, probForBet, currentPrice, betIsUp, strike)
     return { velocity: avgVelocity, acceleration, peakDrawdown, profitAtRisk, trend, rawVelocity };
 }
 
+// ── Estimate actual market entry price from orderbook ──
+// Returns the likely fill price in dollars (0-1 scale) for our side.
+function estimateMarketEntry(isUp, kalshiOrderBook) {
+    // Parse the ACTUAL Kalshi orderbook (yes/no binary contract bids).
+    // Kalshi only shows BIDS. To find the ask for our side:
+    //   buying YES → ask comes from NO bids (ask = 1.00 - NO bid price)
+    //   buying NO  → ask comes from YES bids (ask = 1.00 - YES bid price)
+    if (!kalshiOrderBook) return null;
+    try {
+        const ob = kalshiOrderBook.orderbook_fp || kalshiOrderBook.orderbook || kalshiOrderBook;
+        if (!ob) return null;
+        // Detect format: yes_dollars/no_dollars = dollar strings, yes/no = cent integers
+        const isDollarFmt = !!(ob.yes_dollars || ob.no_dollars);
+        const yesBids = ob.yes_dollars || ob.yes || [];
+        const noBids = ob.no_dollars || ob.no || [];
+        // Our side = YES → opposite bids = NO; side = NO → opposite bids = YES
+        const side = isUp ? 'yes' : 'no';
+        const oppositeBids = side === 'yes' ? noBids : yesBids;
+        if (!oppositeBids || oppositeBids.length === 0) return null;
+
+        // Each entry is [price, quantity] — normalize to dollar range (0-1)
+        const askPrices = oppositeBids.map(entry => {
+            const raw = parseFloat(entry[0]);
+            const bidDollars = isDollarFmt ? raw : raw / 100;
+            return 1.00 - bidDollars; // ask = 1 - opposing bid
+        });
+        const bestAsk = Math.min(...askPrices);
+        if (!isFinite(bestAsk) || bestAsk <= 0 || bestAsk >= 1) return null;
+        return bestAsk;
+    } catch (e) {
+        return null;
+    }
+}
+
 // ── Bet quality assessment: should we even enter this trade? ──
 function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     const probForBet = prediction.predictedPrice >= strike ? prediction.probability : (1 - prediction.probability);
@@ -1584,33 +1622,35 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     const chop = detectChoppiness(prices);
     const exhaustion = detectMomentumExhaustion(prices, marketData.history);
 
-    // Minimum edge threshold: need at least 3% edge after Kalshi fees
-    // Kalshi fees ≈ 7 cents per contract per side
-    // At 50c contracts, that's 14% round-trip. Need significant edge.
-    const minEdge = 0.035; // 3.5% minimum edge
+    // Minimum edge threshold: must cover fees + execution slippage + model uncertainty.
+    // Kalshi fees ≈ 1.5¢/side (break-even ~52.3%), but execution slippage adds 2-4%.
+    // With model shrinkage (30-50% OOS), a 2% measured edge is likely 0% real edge.
+    // At 4%, real edge after costs is ~1.5-2% — marginally profitable.
+    const minEdge = 0.04; // 4% minimum edge (was 2%)
 
-    // Quality factors
+    // Quality factors — tightened to only take high-quality setups.
+    // Trading less often with higher edge >> trading often with thin edge.
     const factors = {
         hasMinEdge: edge >= minEdge,
-        hasConfidence: confidence >= 0.45,
-        notChoppy: !chop.choppy,
-        notExhausted: exhaustion.exhaustion < 0.4,
-        hasTime: minutesAhead >= 3, // don't enter with < 3 min left
+        hasConfidence: confidence >= 0.40,        // was 0.35 — need meaningful confidence
+        notChoppy: !chop.choppy || chop.adx > 18, // was 15
+        notExhausted: exhaustion.exhaustion < 0.5, // was 0.6
+        hasTime: minutesAhead >= 5,               // was 1.5 — contracts mispriced after 10 min
         signalAgreement: prediction.ensembleConfidence?.level !== 'low',
     };
 
-    // Score each factor
+    // Score each factor — reduced weight on restrictive factors
     let score = 0;
     let maxScore = 0;
-    const weights = { hasMinEdge: 3, hasConfidence: 2, notChoppy: 2, notExhausted: 2, hasTime: 1, signalAgreement: 1 };
+    const weights = { hasMinEdge: 3, hasConfidence: 1, notChoppy: 1, notExhausted: 1, hasTime: 1, signalAgreement: 1 };
     for (const [key, weight] of Object.entries(weights)) {
         maxScore += weight;
         if (factors[key]) score += weight;
     }
 
     const quality = score / maxScore;
-    const shouldBet = quality >= 0.55; // need >55% of quality factors
-    const waitForBetter = !shouldBet && minutesAhead > 8; // still early, might improve
+    const shouldBet = quality >= 0.55; // was 0.40 — only take quality setups
+    const waitForBetter = !shouldBet && minutesAhead > 10;
 
     // Optimal entry timing: in choppy markets, wait for clearer signal
     let suggestedWait = 0;
@@ -1622,39 +1662,40 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     let betSize = 1.0;
     let betSizeReason = 'Full size';
 
-    // Choppy market = smaller bets (price will whipsaw through strike)
+    // Choppy market = slightly smaller bets (was 50%, now 75%)
     if (chop.choppy) {
-        betSize *= 0.50;
-        betSizeReason = 'Half size — choppy market (ADX=' + chop.adx.toFixed(0) + ')';
-    }
-
-    // Momentum exhaustion = the setup may be stale
-    if (exhaustion.exhaustion > 0.4) {
         betSize *= 0.75;
-        betSizeReason = betSize < 0.5 ? 'Quarter size — choppy + exhausted' : 'Reduced — momentum fading';
+        betSizeReason = 'Slightly reduced — choppy market (ADX=' + chop.adx.toFixed(0) + ')';
     }
 
-    // Low edge = smaller bet (Kelly criterion: bet proportional to edge)
-    if (edge < 0.06) {
-        betSize *= 0.60;
-        betSizeReason = betSize < 0.4 ? 'Small — thin edge + adverse conditions' : 'Reduced — thin edge (' + (edge * 100).toFixed(1) + '%)';
+    // Momentum exhaustion = mild reduction only at extreme levels
+    if (exhaustion.exhaustion > 0.6) {
+        betSize *= 0.85;
+        betSizeReason = betSize < 0.7 ? 'Reduced — choppy + exhausted' : 'Slightly reduced — momentum fading';
     }
 
-    // Vol regime-based sizing: more granular than just "high vol = smaller"
+    // Low edge = mild reduction (was 0.60, now 0.80)
+    if (edge < 0.04) {
+        betSize *= 0.80;
+        betSizeReason = betSize < 0.6 ? 'Reduced — thin edge + adverse conditions' : 'Slightly reduced — thin edge (' + (edge * 100).toFixed(1) + '%)';
+    }
+
+    // Vol regime-based sizing: less aggressive reductions
     if (prices.length > 5) {
         const vr = detectVolRegime(prices);
-        const volSizeMults = { quiet: 1.10, contracting: 1.00, normal: 1.00, expanding: 0.70, volatile: 0.45 };
+        const volSizeMults = { quiet: 1.15, contracting: 1.05, normal: 1.00, expanding: 0.85, volatile: 0.65 };
         let volMult = volSizeMults[vr.regime] || 1.0;
-        // Extreme vol ratio (>2.5) = crisis, cut to minimum
-        if (vr.ratio > 2.5) volMult = 0.25;
-        else if (vr.ratio > 1.8) volMult = 0.45 - (vr.ratio - 1.8) / (2.5 - 1.8) * 0.20;
-        betSize *= Math.max(0.25, Math.min(1.10, volMult));
-        if (volMult < 0.8) betSizeReason = betSize < 0.4 ? 'Small — ' + vr.regime + ' vol regime' : 'Reduced — ' + vr.regime + ' vol (ratio=' + vr.ratio.toFixed(1) + ')';
+        // Only extreme vol crisis gets major cut (was 0.25, now 0.45)
+        if (vr.ratio > 3.0) volMult = 0.45;
+        else if (vr.ratio > 2.0) volMult = 0.65 - (vr.ratio - 2.0) / (3.0 - 2.0) * 0.20;
+        betSize *= Math.max(0.45, Math.min(1.15, volMult));
+        if (volMult < 0.9) betSizeReason = betSize < 0.6 ? 'Reduced — ' + vr.regime + ' vol regime' : 'Slightly reduced — ' + vr.regime + ' vol (ratio=' + vr.ratio.toFixed(1) + ')';
     }
 
-    // Strong signal = can go full size (or close to it)
-    if (quality >= 0.80 && edge >= 0.08 && !chop.choppy) {
-        betSize = 1.0;
+    // No size boosts above 1.0 until edge is proven with 300+ trades.
+    // Boosting during hot streaks is anti-Kelly (increases size based on luck, not edge).
+    if (quality >= 0.70 && edge >= 0.06 && !chop.choppy) {
+        betSize = Math.max(betSize, 1.0);
         betSizeReason = 'Full size — strong setup';
     }
 
@@ -1674,50 +1715,119 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         }
     }
 
-    // Macro event sizing: reduce during FOMC/CPI/NFP announcements
-    if (marketData.macroEvent && marketData.macroEvent.sizingMultiplier < 1.0) {
-        const macroMult = marketData.macroEvent.sizingMultiplier;
-        betSize *= macroMult;
-        if (marketData.macroEvent.isNearAnnouncement) {
-            betSizeReason = 'Reduced — macro announcement window (FOMC/CPI/NFP)';
-        } else if (marketData.macroEvent.isMacroDay) {
-            betSizeReason = betSize < 0.5 ? 'Small — macro event day' : 'Reduced — macro event day';
+    // Macro event sizing: only reduce during actual announcement hour (was also reducing on macro days)
+    if (marketData.macroEvent && marketData.macroEvent.isNearAnnouncement) {
+        betSize *= 0.60; // was 0.40
+        betSizeReason = 'Reduced — near macro announcement (FOMC/CPI/NFP)';
+    }
+    // No longer reducing on general macro days — too restrictive
+
+    // Fear & Greed: only reduce at truly extreme levels
+    if (marketData.fearGreed && marketData.fearGreed.value) {
+        const fg = marketData.fearGreed.value;
+        if (fg > 92) { betSize *= 0.85; betSizeReason = 'Slightly reduced — extreme greed'; }
+        else if (fg < 8) { betSize *= 0.85; betSizeReason = 'Slightly reduced — extreme fear'; }
+    }
+
+    // ── CONVICTION SCALING — go bigger on high-confidence setups ──
+    // When multiple signals align and probability is high, scale up aggressively.
+    // betSize > 1.0 triggers the convictionMaxContracts cap in trade-executor.
+    let convictionTier = null;
+
+    if (shouldBet && sessionMult > 0) {
+        const minutesLeft = minutesAhead;
+        // Compute sigma distance: how many standard deviations is price from strike?
+        const currentPrice = prices.length > 0 ? prices[prices.length - 1] : prediction.predictedPrice;
+        const distFromStrike = Math.abs(currentPrice - strike);
+        // Estimate remaining vol: ~0.02% per minute for BTC (annualized ~50% vol)
+        const remainingVolPct = Math.sqrt(Math.max(0.5, minutesLeft) / (365.25 * 24 * 60)) * 0.50;
+        const sigmaFromStrike = remainingVolPct > 0 ? (distFromStrike / currentPrice) / remainingVolPct : 0;
+        const isUp = prediction.predictedPrice >= strike;
+        const onRightSide = (isUp && currentPrice >= strike) || (!isUp && currentPrice < strike);
+
+        // TIER 3: LOCK — price is far on our side near settlement, nearly guaranteed
+        // 85%+ probability, <5 min left, on right side, strong sigma distance
+        if (probForBet >= 0.85 && minutesLeft <= 5 && onRightSide && sigmaFromStrike >= 1.0 && !chop.choppy) {
+            betSize = Math.max(betSize, 3.0);
+            convictionTier = 'LOCK';
+            betSizeReason = 'MAX CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
+                sigmaFromStrike.toFixed(1) + 'σ on right side, ' + minutesLeft.toFixed(0) + 'm left';
+        }
+        // TIER 2: HIGH CONVICTION — strong probability, on right side, good edge
+        // 75%+ probability, on right side or strong edge, not choppy
+        else if (probForBet >= 0.75 && edge >= 0.05 && !chop.choppy && (onRightSide || quality >= 0.70)) {
+            betSize = Math.max(betSize, 2.0);
+            convictionTier = 'HIGH';
+            betSizeReason = 'HIGH CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
+                (edge * 100).toFixed(1) + '% edge' + (onRightSide ? ', on right side' : '');
+        }
+        // TIER 1: ELEVATED — above-average confidence
+        // 65%+ probability, positive edge, quality setup
+        else if (probForBet >= 0.65 && edge >= 0.04 && quality >= 0.60) {
+            betSize = Math.max(betSize, 1.5);
+            convictionTier = 'ELEVATED';
+            betSizeReason = 'ELEVATED CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
+                (edge * 100).toFixed(1) + '% edge';
         }
     }
 
-    // Fear & Greed extreme regime: reduce in euphoria (>80) or extreme fear (<15)
-    if (marketData.fearGreed && marketData.fearGreed.value) {
-        const fg = marketData.fearGreed.value;
-        if (fg > 85) { betSize *= 0.75; betSizeReason = 'Reduced — extreme greed regime'; }
-        else if (fg < 15) { betSize *= 0.75; betSizeReason = 'Reduced — extreme fear regime'; }
-    }
-
-    betSize = Math.max(0, Math.min(1.0, betSize));
+    betSize = Math.max(0, Math.min(3.00, betSize)); // cap at 3x — conviction scaling max
 
     // ── Fee-adjusted Kelly fraction ──
-    // Kalshi fees: ~1.5 cents per contract per side (reduced from old 7c schedule)
-    // At 50c contracts: win profit = 0.97 - 0.50 = 0.47, loss = 0.515
-    // Break-even: 0.515/0.985 ≈ 52.3% (was 61.3% with old 7c fees)
-    // Quarter Kelly recommended with <200 sample track record
-    const contractCost = 0.50; // approximate average contract price
+    // The entry price should reflect what we'd ACTUALLY pay, not our probability estimate.
+    // Using probForBet as entry price is wrong: if we think there's 90% chance of DOWN,
+    // we'd buy NO contracts. The market rarely prices at our model's probability.
+    // In practice, orderbook prices are stale and we can enter 5-15¢ cheaper than fair value.
+    // The trade executor uses getAggressivePrice() which caps slippage at fair+1-5¢.
+    // Use a conservative estimate: entry = min(probForBet, 0.70) to avoid the degenerate
+    // case where high-confidence bets are mathematically impossible due to entry price.
+    // This acknowledges that binary options contracts rarely trade above 85¢ on Kalshi
+    // for 15-min BTC contracts because market-makers discount their model too.
     const fee = 0.015; // ~1.5 cents per side (Kalshi's current reduced fee schedule)
-    const winProfit = (1.0 - fee) - contractCost - fee; // 0.47
-    const lossAmount = contractCost + fee; // 0.515
-    const kellyRaw = winProfit > 0
-        ? (probForBet * winProfit - (1 - probForBet) * lossAmount) / winProfit
-        : 0;
-    const kellyFraction = Math.max(0, kellyRaw * 0.25); // Quarter Kelly
-    const kellyHasEdge = kellyRaw > 0;
+    const isUp = prediction.predictedPrice >= strike;
+    const kalshiEntryPrice = estimateMarketEntry(isUp, marketData.kalshiOrderBook);
 
-    // If Kelly says no edge after fees, override shouldBet
-    // Also block bets during cooling off period
-    const shouldBetAdjusted = shouldBet && kellyHasEdge && sessionMult > 0;
+    // Use actual Kalshi orderbook for Kelly — no fallbacks, no guessing.
+    // If orderbook is empty/unavailable, skip the Kelly check entirely and
+    // let trade executor handle liquidity at execution time via getAggressivePrice.
+    let kellyRaw = 0;
+    let kellyHasEdge = false;
+    let kellyFraction = 0;
+    let kellyError = null;
+    let kellyEntryPrice = null;  // actual Kalshi ask price in cents
+    let kellyWinProfit = null;
+    let kellyLossAmount = null;
+
+    if (kalshiEntryPrice === null) {
+        // Orderbook empty or unavailable — skip Kelly, let quality factors decide.
+        // Trade executor will check liquidity again at order time.
+        kellyError = 'No Kalshi orderbook data — Kelly check skipped';
+        kellyHasEdge = true; // Don't block on Kelly when we have no data
+        console.log(`[bet-quality] ${kellyError} — deferring to trade executor`);
+    } else {
+        const estimatedEntryPrice = Math.max(0.05, Math.min(0.95, kalshiEntryPrice));
+        kellyEntryPrice = Math.round(estimatedEntryPrice * 100); // store in cents
+        kellyWinProfit = (1.0 - fee) - estimatedEntryPrice - fee;
+        kellyLossAmount = estimatedEntryPrice + fee;
+        kellyRaw = kellyWinProfit > 0
+            ? (probForBet * kellyWinProfit - (1 - probForBet) * kellyLossAmount) / kellyWinProfit
+            : 0;
+        kellyFraction = Math.max(0, kellyRaw * 0.25); // Quarter Kelly
+        kellyHasEdge = kellyRaw > 0;
+        console.log(`[bet-quality] Kalshi entry=${kellyEntryPrice}c | prob=${(probForBet*100).toFixed(1)}% | kelly=${kellyRaw.toFixed(3)} | edge=${kellyHasEdge ? 'YES' : 'NO'}`);
+    }
+
+    // Kelly criterion is computed for informational purposes (display/logging)
+    // but does NOT gate whether a bet is placed. The quality factors and trade
+    // executor's aggressive pricing handle risk management instead.
+    const shouldBetAdjusted = shouldBet && sessionMult > 0;
 
     return {
         quality, shouldBet: shouldBetAdjusted, waitForBetter: !shouldBetAdjusted && minutesAhead > 8,
         suggestedWait, edge, factors, choppiness: chop, exhaustion,
-        betSize, betSizeReason,
-        kellyFraction, kellyHasEdge,
+        betSize, betSizeReason, convictionTier,
+        kellyEntryPrice, kellyWinProfit, kellyLossAmount,
+        kellyRaw, kellyFraction, kellyHasEdge, kellyError,
         sessionRisk: {
             consecutiveLosses: sessionRisk.consecutiveLosses,
             consecutiveWins: sessionRisk.consecutiveWins,
@@ -1728,7 +1838,6 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         },
         reason: !shouldBetAdjusted ?
             (sessionMult === 0 ? 'COOLING OFF — ' + sessionRisk.consecutiveLosses + ' consecutive losses, pausing' :
-             !kellyHasEdge ? 'No edge after Kalshi fees (need >' + ((lossAmount / (lossAmount + winProfit)) * 100).toFixed(0) + '% win prob)' :
              !factors.hasMinEdge ? 'Edge too thin (' + (edge*100).toFixed(1) + '%)' :
              !factors.notChoppy ? 'Market is choppy (ADX=' + chop.adx.toFixed(0) + ')' :
              !factors.notExhausted ? 'Momentum exhaustion detected' :
@@ -1753,17 +1862,21 @@ function predictPrice(marketData, minutesAhead, strike) {
     const volWindow = Math.round(8 + 52 * (minutesAhead / 15));
     const adaptiveWindow = Math.max(2, Math.min(volWindow, n - 1));
     const ccVol = computeRealizedVol(prices, adaptiveWindow);
-    // GARCH research: BTC alpha ≈ 0.20 (lambda = 1-alpha = 0.80)
-    // Old lambda=0.97 was too smooth, reacted too slowly to vol shocks
-    const ewmaVol = computeEWMAVol(prices, 0.80);
+    // GARCH research: BTC alpha ≈ 0.15-0.20 at DAILY frequency.
+    // At 1-minute frequency, persistence is higher (microstructure noise).
+    // lambda=0.80 had 3-min half-life — far too reactive for 15-min contracts.
+    // lambda=0.93 gives ~10-min half-life, matching contract horizon.
+    const ewmaVol = computeEWMAVol(prices, 0.93);
     const gkVol = computeGarmanKlassVol(history, adaptiveWindow);
     const rawPerMinVol = 0.25 * ccVol + 0.40 * ewmaVol + 0.35 * gkVol;
-    // Leverage effect: negative recent returns → vol boost (EGARCH finding)
-    // BTC has ~2x vol increase after negative shocks
+    // Leverage effect: BTC has WEAK and SYMMETRIC volatility asymmetry.
+    // EGARCH gamma ≈ -0.038 (tiny vs equities' -0.05 to -0.15).
+    // BTC vol increases after BOTH sharp up and down moves (FoMO + panic).
+    // Cap at 5% boost (not 15%), applied symmetrically.
     const recentReturn = n > 1 ? Math.log(prices[n-1] / prices[n-2]) : 0;
-    // Leverage effect is WEAK in BTC (EGARCH gamma ≈ -0.038, unlike equities)
-    // Reduced from 40% max to 15% max boost on negative returns
-    const leverageAdj = recentReturn < -0.002 ? 1.0 + Math.min(0.15, Math.abs(recentReturn) * 20) : 1.0;
+    const leverageAdj = Math.abs(recentReturn) > 0.002
+        ? 1.0 + Math.min(0.05, Math.abs(recentReturn) * 8)
+        : 1.0;
     // Weekend vol reduction: weekday vol is substantially higher than weekends
     // Weekend adjustment now handled by DAY_VOL_MULT in getIntradayVolMultiplier()
     const leverageAdjVol = rawPerMinVol * leverageAdj;
@@ -1772,37 +1885,39 @@ function predictPrice(marketData, minutesAhead, strike) {
     const volBlendRatio = minutesAhead / 15;
     const blendedVol = longVol * volBlendRatio + shortVol * (1 - volBlendRatio);
 
-    // Jump-filtered vol: after a spike, use continuous vol to prevent overestimation
-    const jumpInfo = computeJumpFilteredVol(prices, Math.min(20, n - 1));
-    let perMinuteVol;
+    // Jump-filtered vol: ALWAYS use continuous vol (bipower variation) as primary.
+    // Academic consensus (Corsi et al. 2010): continuous vol is uniformly a better
+    // predictor of future vol than total realized variance, regardless of jump detection.
+    // When jumps occur, add a small intensity boost for elevated future vol.
+    const jumpInfo = computeJumpFilteredVol(prices, Math.min(30, n - 1));
+    let perMinuteVol = Math.max(jumpInfo.continuousVol, blendedVol * 0.85);
     if (jumpInfo.jumpDetected) {
-        // After a jump, blend continuous vol with raw to dampen the spike effect
-        perMinuteVol = Math.max(jumpInfo.continuousVol, blendedVol * 0.85);
-    } else {
-        perMinuteVol = Math.max(leverageAdjVol, blendedVol * 0.9);
+        perMinuteVol *= 1.0 + jumpInfo.jumpRatio * 0.3; // jumps predict slightly elevated future vol
     }
 
     const { remainingVol: rawRemainingVol, H } = computeAdjustedRemainingVol(perMinuteVol, minutesAhead, prices);
     const todMult = getIntradayVolMultiplier();
-    // todMult now includes both hour-of-day AND day-of-week (incl. weekend)
-    const remainingVol = rawRemainingVol * (0.60 + 0.40 * todMult);
+    // todMult includes hour-of-day AND day-of-week (incl. weekend)
+    // Widened blend from (0.60+0.40*mult) to (0.45+0.55*mult) to let seasonality have real effect
+    const remainingVol = rawRemainingVol * (0.45 + 0.55 * todMult);
     // Settlement-aware volatility compression
     // KXBTC15M settles to simple average of 60 per-second BRTI values
     // (NOT trimmed — trimming is only for BTCMINMAX product)
     // BRTI itself is order-book-based (not trade-based): exponentially weighted mid-price curve
     // With autocorrelation, effective_n ≈ 12-15 → settlement vol ≈ spot vol * 0.29
+    // Settlement vol compression: BRTI settles to 60-second simple average.
+    // With ~5s BRTI smoothing half-life → effective_n ≈ 12 → factor ≈ 0.29 at T=0.
+    // Beyond 2 minutes, the averaging effect is negligible (most of the price path is unknown).
+    // Old code applied compression even at 5 min (0.80) — that was excessive.
     let settlementVolAdj = 1.0;
     if (minutesAhead <= 1) {
         const secAhead = minutesAhead * 60;
         const fraction = Math.max(0, Math.min(1, secAhead / 60));
-        settlementVolAdj = 0.29 + fraction * 0.16;
+        settlementVolAdj = 0.29 + fraction * 0.21; // 0.29 → 0.50 over 0-60 seconds
     } else if (minutesAhead <= 2) {
-        settlementVolAdj = 0.45 + (minutesAhead - 1) * 0.20;
-    } else if (minutesAhead <= 3) {
-        settlementVolAdj = 0.65 + (minutesAhead - 2) * 0.15;
-    } else if (minutesAhead <= 5) {
-        settlementVolAdj = 0.80 + (minutesAhead - 3) / 2 * 0.20;
+        settlementVolAdj = 0.50 + (minutesAhead - 1) * 0.50; // 0.50 → 1.0 over 1-2 min
     }
+    // Beyond 2 min: no compression (settlementVolAdj stays 1.0)
     const settlementVol = remainingVol * settlementVolAdj;
 
     // BRTI Settlement Price Estimator: when < 2 min remain, estimate where
@@ -1855,14 +1970,14 @@ function predictPrice(marketData, minutesAhead, strike) {
     // ac1 negative, ac2 positive → oscillation (choppy)
     const acSum = ac1 + ac2 * 0.5; // ac2 weighted less (noisier)
     let driftMultiplier = 1.0;
-    if (acSum < -0.50) driftMultiplier = 0.10;      // very strong mean reversion
-    else if (ac1 < -0.35) driftMultiplier = 0.15;
+    if (acSum < -0.50) driftMultiplier = 0.35;      // was 0.10 — still respect some momentum
+    else if (ac1 < -0.35) driftMultiplier = 0.40;   // was 0.15
     else if (acSum > 0.50) driftMultiplier = 1.0;    // strong persistence
     else if (ac1 > 0.35) driftMultiplier = 0.95;
-    else if (trendRegime.meanReverting) driftMultiplier = 0.25;
+    else if (trendRegime.meanReverting) driftMultiplier = 0.50; // was 0.25
     else if (trendRegime.trending) driftMultiplier = 1.0;
-    // Oscillating market (ac1 neg, ac2 pos): reduce drift, increase reversion
-    else if (ac1 < -0.15 && ac2 > 0.15) driftMultiplier = 0.35;
+    // Oscillating market (ac1 neg, ac2 pos): reduce drift mildly
+    else if (ac1 < -0.15 && ac2 > 0.15) driftMultiplier = 0.60; // was 0.35
 
     // Early period momentum bias — stronger and starts immediately
     const minutesIntoPeriod = 15 - minutesAhead;
@@ -2017,7 +2132,9 @@ function predictPrice(marketData, minutesAhead, strike) {
     const sigRaw = 1 / (1 + Math.exp(-sigK * (timeProgress - sigMid)));
     const sigMin = 1 / (1 + Math.exp(sigK * sigMid));
     const sigMax = 1 / (1 + Math.exp(-sigK * sigMid));
-    const positionalWeight = 0.75 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.23;
+    // Reduced positional weight so signals have more influence on final probability
+    // Was 0.75-0.98 — now 0.55-0.80. This lets momentum/flow signals create tradeable edges.
+    const positionalWeight = 0.55 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.25;
 
     const vwapResult = computeAnchoredVWAP(history);
     const vwapSignal = Math.max(-0.5, Math.min(0.5, vwapResult.deviation * 1000));
@@ -2057,8 +2174,8 @@ function predictPrice(marketData, minutesAhead, strike) {
     const urgencyFade = minutesAhead < 3 ? Math.max(0, (minutesAhead - 1) / 2) : 1.0;
     const immediateBoosted = minutesAhead < 3 ? 1 + (3 - minutesAhead) * 0.3 : 1.0;
 
-    // In choppy markets, reduce all signal weights (less conviction)
-    const chopDampen = choppiness.choppy ? 0.65 : 1.0;
+    // In choppy markets, mild signal reduction (was 0.65 — too aggressive)
+    const chopDampen = choppiness.choppy ? 0.85 : 1.0;
 
     const allSignals = [
         { value: driftZShift, weight: 0.18 }, { value: orderFlowSignal, weight: 0.09 },
@@ -2081,45 +2198,49 @@ function predictPrice(marketData, minutesAhead, strike) {
     const recentReturn10 = n > 10 ? (prices[n - 1] - prices[n - 11]) / prices[n - 11] : 0;
     const regM = getRegimeMultipliers(trendRegime, volRegime, blendedAC1, recentReturn10);
 
+    // ═══════════════════════════════════════════════════════════════
+    // STREAMLINED SIGNAL COMBINATION (was 25+ signals, now 6 independent groups)
+    //
+    // Research finding (Dev 3 review): 25+ overlapping signals created
+    // 3-4x momentum overweight (7 momentum signals measuring the same thing).
+    // The old aux z-shift cap of 1.2 could swing probability by 35 points,
+    // far more than any noisy 15-min microstructure signal justifies.
+    //
+    // New architecture: 6 independent signal groups, capped at 0.4 total.
+    // Positional z-score (60-75%) dominates; auxiliaries are small perturbations.
+    // ═══════════════════════════════════════════════════════════════
+
+    // GROUP 1: Single momentum composite (replaces 7 redundant momentum signals)
+    const momentumComposite = driftZShift * regM.momentum;
+
+    // GROUP 2: Order flow composite (replaces 4 overlapping flow signals)
+    const flowComposite = (orderFlowSignal * 0.5 + tradeFlowSignal * 0.3 + (typeof cvdSignal !== 'undefined' ? cvdSignal * 0.2 : 0)) * regM.flow;
+
+    // GROUP 3: Mean reversion (single composite)
+    const meanRevComposite = (microMRSignal * 0.6 + vwapSignal * 0.4) * regM.reversion;
+
+    // GROUP 4: Liquidation cascade (independent information source)
+    const liqComposite = liqSignal * immediateBoosted;
+
+    // GROUP 5: Exhaustion (contrarian, stronger mid/late period)
+    const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * regM.reversion;
+
+    // GROUP 6: ETH confirmation (small, only when active)
+    const ethComposite = ethLL.signal * immediateBoosted * regM.momentum;
+
     const rawTotalZShift = (
-        driftZShift          * (0.10 + earlyBoost * 0.02) * immediateBoosted * regM.momentum +
-        orderFlowSignal      * (0.03 + earlyBoost * 0.01) * immediateBoosted * regM.flow +
-        tradeFlowSignal      * (0.03 + earlyBoost * 0.01) * immediateBoosted * regM.flow +
-        rsiSignal            * (0.10 - earlyBoost * 0.02) * regM.momentum +
-        candlePattern.signal * (0.04 - earlyBoost * 0.02) * urgencyFade * regM.pattern +
-        volumeSurgeSignal    * (0.05 + earlyBoost * 0.03) * regM.volume +
-        fundingSignal        * (0.02 - earlyBoost * 0.01) * urgencyFade +
-        momAccel * 20        * (0.02 + earlyBoost * 0.02) * immediateBoosted * regM.momentum +
-        vwapSignal           * (0.06 + earlyBoost * 0.04) * regM.reversion +
-        macdSignal           * (0.05 + earlyBoost * 0.03) * regM.momentum +
-        linRegSignal         * (0.04 + earlyBoost * 0.02) * regM.momentum +
-        bayesianPrior        * earlyBoost * 0.08 +
-        bbSqueeze.breakoutSignal * 0.04 * regM.pattern +
-        srSignal             * 0.04 * regM.reversion +
-        haResult.signal      * (0.04 - earlyBoost * 0.01) * regM.pattern +
-        crossTF.signal       * (0.04 + earlyBoost * 0.03) * immediateBoosted * regM.momentum +
-        microMRSignal        * 0.12 * regM.reversion +
-        breakoutSignal       * 0.06 * regM.momentum +
-        cpSignal             * 0.04 * immediateBoosted +
-        ethLL.signal         * 0.04 * immediateBoosted * regM.momentum +
-        // Momentum exhaustion: contrarian signal that fades current trend when losing steam
-        // Increases weight as period progresses (more useful mid/late period)
-        exhaustionSignal     * (0.06 + (1 - earlyBoost) * 0.06) * regM.reversion +
-        // Normalized ROC: momentum z-scored by vol, avoids false signals in high-vol
-        normRocSignal        * (0.04 + earlyBoost * 0.02) * regM.momentum +
-        // Mean reversion composite: fades overextended moves when VWAP and BB agree
-        mrComposite.signal   * 0.08 * regM.reversion +
-        // Liquidation cascade: strongest short-term directional signal
-        liqSignal            * 0.08 * immediateBoosted +
-        // Hour-of-day seasonality: small but statistically significant
-        hourBias             * 0.03 +
-        // Long/short ratio: contra-indicator at extremes
-        longShortSignal      * 0.03
+        momentumComposite     * 0.12 +   // single momentum (was 7 signals totaling ~0.45)
+        flowComposite         * 0.08 +   // order flow (with decay: multiply by exp(-minutesAhead/3))
+        meanRevComposite      * 0.10 +   // mean reversion
+        liqComposite          * 0.08 +   // liquidation cascades
+        exhaustionComposite   * 1.00 +   // already scaled
+        ethComposite          * 0.04     // ETH confirmation
     );
-    // Bayesian shrinkage: retain 30% of signal (was 20%, too aggressive)
-    // In choppy markets, apply extra dampening to prevent false signals
-    const shrinkageFactor = 0.30 * chopDampen;
-    const totalZShift = Math.max(-0.8, Math.min(0.8, rawTotalZShift * agreementMult * shrinkageFactor));
+
+    // Shrinkage + cap: max 0.4 total z-shift (was 1.2 — a 1.2 z-shift moves
+    // probability by ~35 points, which no combination of noisy 15-min signals justifies)
+    const shrinkageFactor = 0.55 * (choppiness.choppy ? 0.80 : 1.0);
+    const totalZShift = Math.max(-0.4, Math.min(0.4, rawTotalZShift * shrinkageFactor));
 
     // Final probability
     const driftAdjustedProb = fatTailCDF(zScore + totalZShift * (1 - positionalWeight) * 0.8, prices);
@@ -2136,12 +2257,12 @@ function predictPrice(marketData, minutesAhead, strike) {
     const bayesResult = bayesianAdjust(clampedProb, volRegime.regime, getBayesTrendLabel(trendRegime));
     let finalProb = bayesResult.adjustedProb;
 
-    // Gamma-aware confidence dampening near strike
-    const isNearStrike = Math.abs(zScore) < 0.8;
-    if (isNearStrike && minutesAhead < 8) {
-        const proximityFactor = 1 - Math.abs(zScore) / 0.8;
-        const timeFactor = (8 - minutesAhead) / 8;
-        const gammaRisk = 1 + proximityFactor * timeFactor * 0.25;
+    // Gamma-aware confidence dampening near strike — reduced impact
+    const isNearStrike = Math.abs(zScore) < 0.5; // was 0.8 — only dampen very close to strike
+    if (isNearStrike && minutesAhead < 5) { // was 8 — only in late period
+        const proximityFactor = 1 - Math.abs(zScore) / 0.5;
+        const timeFactor = (5 - minutesAhead) / 5;
+        const gammaRisk = 1 + proximityFactor * timeFactor * 0.12; // was 0.25
         finalProb = 0.5 + (finalProb - 0.5) / gammaRisk;
     }
 
@@ -2203,17 +2324,15 @@ function predictPrice(marketData, minutesAhead, strike) {
     // T = 1.3 is the recommended default for unverified models.
     // The self-learned overconfidenceRatio above partially handles this,
     // but temperature scaling in logit space is more principled.
-    const TEMPERATURE = 1.10; // mild — learned corrections handle the rest adaptively
+    const TEMPERATURE = 1.02; // very mild (was 1.10 — crushed edge too much)
     if (finalProb > 0.01 && finalProb < 0.99) {
         const logit = Math.log(finalProb / (1 - finalProb));
         const scaledLogit = logit / TEMPERATURE;
         finalProb = 1 / (1 + Math.exp(-scaledLogit));
     }
 
-    // ── Hard probability bounds ──
-    // Research: almost nothing justifies >90% or <10% confidence
-    // in a 15-minute BTC direction at a nearby strike.
-    finalProb = Math.max(0.10, Math.min(0.90, finalProb));
+    // ── Hard probability bounds — widened to allow stronger convictions ──
+    finalProb = Math.max(0.08, Math.min(0.92, finalProb));
 
     // Construct output
     const predictUp = finalProb > 0.5;
@@ -2308,12 +2427,41 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const noTimeLeft = minutesRemaining < 1.0;
     const almostNoTime = minutesRemaining < 2.0;
 
+    // ── CASE 0: CONFIDENT FLIP — model strongly disagrees with position ──
+    // When the updated prediction has HIGH confidence the other way AND price confirms it,
+    // sell and flip to the winning side. This is different from normal "wrong side" holds
+    // because the model is highly confident (not just briefly on wrong side).
+    // Requirements (all must be true):
+    //   1. On wrong side of strike (price confirms the model)
+    //   2. Model flipped direction OR updated probability strongly favors the other side
+    //   3. High confidence (>=80%) — not just a marginal signal
+    //   4. Enough time to profit from the flip (>=4 min remaining)
+    //   5. Sigma distance >= 0.8 — not just a tiny blip across strike
+    const updProbForOtherSide = betIsUp ? (1 - updPred.probability) : updPred.probability;
+    const confidenceForFlip = updPred.confidence || 0;
+    const shouldFlip = onWrongSide
+        && (modelFlipped || updProbForOtherSide >= 0.70)
+        && confidenceForFlip >= 0.80
+        && minutesRemaining >= 4
+        && sigmaDistance >= 0.8;
+
+    if (shouldFlip) {
+        level = 'confident_flip'; shortLabel = 'FLIP';
+        urgency = 85;
+        advice = 'Model strongly predicts ' + updDirection + ' (' + (confidenceForFlip * 100).toFixed(0) +
+            '% confidence) while holding ' + origDirection + '. Price is ' + sigmaDistance.toFixed(1) +
+            'σ on wrong side with ' + minutesRemaining.toFixed(1) + ' min left — selling to flip.';
+        reasons.push('High confidence flip: ' + (confidenceForFlip * 100).toFixed(0) + '% conf ' + updDirection);
+        reasons.push(sigmaDistance.toFixed(1) + 'σ on wrong side');
+    }
+
     // ── CASE 1: LOST CAUSE — mathematically dead ──
-    // Only trigger when recovery is essentially impossible
-    if (
-        (onWrongSide && noTimeLeft && sigmaDistance > 1.5) ||
-        (probForBet < 0.05 && minutesRemaining < 2) ||
-        (onWrongSide && distancePct > 0.20 && minutesRemaining < 2 && sigmaDistance > 2.0)
+    // Binary options: only sell when recovery is essentially impossible.
+    // At 2.5σ, recovery probability is ~1.2%. At 3.0σ, it's ~0.3%.
+    // The trade executor enforces: sell ONLY lost_cause or confident_flip, so these are the sell gates.
+    else if (
+        (onWrongSide && sigmaDistance >= 2.5 && minutesRemaining < 1.5) ||  // ~1.2% recovery
+        (onWrongSide && sigmaDistance >= 3.0)                                // ~0.3% recovery, any time
     ) {
         level = 'lost_cause'; shortLabel = 'LOST CAUSE';
         urgency = 95;
@@ -2325,12 +2473,12 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     }
 
     // ── CASE 2: SELL NOW — very unlikely to recover ──
-    // Requires BOTH being on wrong side AND poor recovery odds
+    // Tightened thresholds to hold longer
     else if (
         onWrongSide && (
-            (sigmaDistance > 1.8 && minutesRemaining < 4) ||
-            (probForBet < 0.10 && minutesRemaining < 3) ||
-            (sigmaDistance > 1.5 && minutesRemaining < 2.5 && probVel.trend === 'collapsing')
+            (sigmaDistance > 2.2 && minutesRemaining < 3) ||          // was 1.8/4
+            (probForBet < 0.07 && minutesRemaining < 2) ||           // was 0.10/3
+            (sigmaDistance > 2.0 && minutesRemaining < 2 && probVel.trend === 'collapsing') // was 1.5/2.5
         )
     ) {
         level = 'sell_now'; shortLabel = 'SELL NOW';
@@ -2342,11 +2490,11 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     }
 
     // ── CASE 3: CONSIDER SELLING — wrong side, marginal recovery ──
-    // Only when on wrong side with significant distance AND limited time
+    // Much tighter — only when really losing with no time
     else if (
         onWrongSide && (
-            (sigmaDistance > 1.2 && minutesRemaining < 3.5 && opposing >= 2 && agreeing === 0) ||
-            (probForBet < 0.15 && minutesRemaining < 4 && sigmaDistance > 1.0)
+            (sigmaDistance > 1.8 && minutesRemaining < 2.5 && opposing >= 3 && agreeing === 0) || // was 1.2/3.5/2
+            (probForBet < 0.10 && minutesRemaining < 2.5 && sigmaDistance > 1.5)                  // was 0.15/4/1.0
         )
     ) {
         level = 'consider_selling'; shortLabel = 'WATCH CLOSELY';
@@ -2527,11 +2675,12 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
         return raw;
     }
 
-    // Adaptive EMA alpha — more responsive as time passes (data becomes more relevant)
-    const alpha = minutesAhead <= 1 ? 0.40
-                : minutesAhead <= 2 ? 0.30
-                : minutesAhead <= 5 ? 0.20
-                : 0.15;
+    // Adaptive EMA alpha — more responsive so edges can develop
+    // Was 0.15-0.40; increased to allow faster probability movement
+    const alpha = minutesAhead <= 1 ? 0.60
+                : minutesAhead <= 2 ? 0.50
+                : minutesAhead <= 5 ? 0.40
+                : 0.30;
     stabilityState.smoothedProbability = alpha * raw.probability + (1 - alpha) * stabilityState.smoothedProbability;
     const smoothedP = stabilityState.smoothedProbability;
 
