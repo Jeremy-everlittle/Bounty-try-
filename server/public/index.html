@@ -1564,7 +1564,7 @@
 
                         // Error detail
                         if (t.error) {
-                            html += '<span class="period-trade-info" style="color:#f85149;font-size:9px">' + t.error + '</span>';
+                            html += '<span class="period-trade-info" style="color:#f85149;font-size:9px">' + escapeHtml(t.error) + '</span>';
                         }
 
                         html += '</div>';
@@ -1861,7 +1861,7 @@
                     (bq.choppiness && bq.choppiness.choppy ? '<span class="prebuy-metric" style="color:#d29922">Choppy</span>' : '') +
                     (bq.exhaustion && bq.exhaustion.exhaustion > 0.3 ? '<span class="prebuy-metric" style="color:#d29922">Exhausted</span>' : '') +
                 '</div>' +
-                (bq.betSizeReason && (betSize < 0.9 || bq.convictionTier) ? '<div class="sell-signal-details" style="margin-top:2px;color:' + (bq.convictionTier ? '#a371f7' : '#b0b8c1') + '">' + bq.betSizeReason + '</div>' : '');
+                (bq.betSizeReason && (betSize < 0.9 || bq.convictionTier) ? '<div class="sell-signal-details" style="margin-top:2px;color:' + (bq.convictionTier ? '#a371f7' : '#b0b8c1') + '">' + escapeHtml(bq.betSizeReason) + '</div>' : '');
 
             // Session risk banner
             const sr = serverData.sessionRisk || bq.sessionRisk;
@@ -2006,7 +2006,7 @@
                 }
                 thoughtArea.innerHTML = '<div class="trader-thought thought-' + t.status + '">' +
                     '<div class="trader-thought-label">Auto Trader \u00B7 ' + agoStr + '</div>' +
-                    '<div class="trader-thought-msg">' + t.message + '</div>' +
+                    '<div class="trader-thought-msg">' + escapeHtml(t.message) + '</div>' +
                     detailHtml +
                     '</div>';
             }
@@ -2468,11 +2468,11 @@
                         '<span class="sell-signal-label">' + signal.shortLabel + '</span>' +
                         '<span class="sell-signal-urgency" style="color:' + probColor + '">' + probPct + '% win</span>' +
                     '</div>' +
-                    '<div class="sell-signal-advice">' + signal.advice + '</div>' +
+                    '<div class="sell-signal-advice">' + escapeHtml(signal.advice) + '</div>' +
                     recoveryLine + velocityLine + exhaustionLine + peakLine +
                     (signal.reasons.length > 0 && signal.level !== 'hold' && signal.level !== 'winning' && signal.level !== 'strong_hold'
-                        ? '<div class="sell-signal-reason">' + signal.reasons[0] + '</div>' +
-                          (signal.reasons.length > 1 ? '<div class="sell-signal-details">' + signal.reasons.slice(1).join(' &middot; ') + '</div>' : '')
+                        ? '<div class="sell-signal-reason">' + escapeHtml(signal.reasons[0]) + '</div>' +
+                          (signal.reasons.length > 1 ? '<div class="sell-signal-details">' + signal.reasons.slice(1).map(escapeHtml).join(' &middot; ') + '</div>' : '')
                         : '') +
                 '</div>';
         }
@@ -3151,6 +3151,11 @@
         });
 
         // ── Friendly error messages & toast notifications ─────────────
+        function escapeHtml(str) {
+            if (!str) return '';
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
         function friendlyError(raw) {
             if (!raw) return 'Something went wrong. Please try again.';
             const s = String(raw);

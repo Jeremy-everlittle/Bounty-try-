@@ -252,7 +252,12 @@ function parseOrderFills(order) {
     const filled = parseFloat(order.fill_count_fp) || order.fill_count || 0;
     const remaining = parseFloat(order.remaining_count_fp) || order.remaining_count || 0;
     const initial = parseFloat(order.initial_count_fp) || order.initial_count || order.count || 0;
-    return { filled: Math.round(filled), remaining: Math.round(remaining), initial: Math.round(initial) };
+    // Extract average fill price (cents) for accurate P&L
+    const avgPriceFp = parseFloat(order.avg_price_fp);
+    const avgPriceLegacy = order.avg_price;
+    const avgPrice = !isNaN(avgPriceFp) ? Math.round(avgPriceFp * 100) :
+                     (avgPriceLegacy != null ? avgPriceLegacy : null);
+    return { filled: Math.round(filled), remaining: Math.round(remaining), initial: Math.round(initial), avgPrice };
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -1073,6 +1078,10 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const cappedContracts = await capContractsByBalance(contracts, limitPrice);
     if (cappedContracts <= 0) return;
 
+    // Mark period as entered BEFORE placing order to prevent race condition
+    // where a second call passes the enteredPeriods check while we're awaiting
+    enteredPeriods[periodKey] = { side, ticker: kalshiTicker, entryTime: Date.now() };
+
     // Snapshot balance before order for verification
     let balanceBefore = 0;
     try { balanceBefore = (await trading.getBalance()).balance; } catch (e) { /* continue */ }
@@ -1110,6 +1119,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             console.log(`[trade-executor] Order ${order.order_id} got 0 fills — no position taken`);
             logTrade('buy_unfilled', { ...tradeInfo, orderId: order.order_id, finalStatus: order.status });
             markFillFailed(periodKey);
+            delete enteredPeriods[periodKey]; // Allow retry since nothing filled
             return;
         }
 
@@ -1119,6 +1129,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         if (filledContracts === 0) {
             logTrade('buy_phantom', { ...tradeInfo, orderId: order.order_id, claimedFills: fills.filled, orderStatus: order.status });
             markFillFailed(periodKey);
+            delete enteredPeriods[periodKey]; // Allow retry since phantom fill
             return;
         }
 
@@ -1137,8 +1148,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             totalCostCents: filledContracts * limitPrice,
             totalContracts: filledContracts,
         };
-        // Mark this period as entered to prevent duplicate entries
-        enteredPeriods[periodKey] = { side, ticker: kalshiTicker, entryTime: Date.now() };
+        // enteredPeriods already marked before order placement
         syncZeroCount = 0; // reset sync counter on new entry
         logTrade('buy', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: cappedContracts });
         dailyStats.tradeCount++;
@@ -1153,6 +1163,9 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         // On 409 (conflict/insufficient funds), don't retry this period
         if (err.status === 409) {
             currentPosition = { ticker: kalshiTicker, side, contracts: 0, entryPrice: 0, orderId: 'blocked-409', periodKey, entryTime: Date.now() };
+        } else {
+            // Order failed entirely — allow retry
+            delete enteredPeriods[periodKey];
         }
     } finally {
         orderInFlight = false;
@@ -1349,7 +1362,14 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         if (filledContracts < currentPosition.contracts) {
             console.log(`[trade-executor] Partial sell: ${filledContracts}/${currentPosition.contracts} — reducing position`);
             currentPosition.contracts -= filledContracts;
-            logTrade('sell_partial', { ...tradeInfo, orderId: order.order_id, filledContracts, remaining: currentPosition.contracts });
+            if (currentPosition.totalContracts) {
+                currentPosition.totalContracts -= filledContracts;
+            }
+            // Credit partial sell proceeds back to paper balance
+            const partialProceeds = filledContracts * (fills.avgPrice || currentPosition.entryPrice);
+            const env = kalshiAuth.getEnvironment();
+            paperBalances[env] = (paperBalances[env] || 0) + partialProceeds;
+            logTrade('sell_partial', { ...tradeInfo, orderId: order.order_id, filledContracts, remaining: currentPosition.contracts, proceeds: partialProceeds });
             dailyStats.tradeCount++;
             return;
         }
@@ -1609,12 +1629,23 @@ function onPeriodEnd(gradeResult) {
     soldThisPeriod = null; // reset for new period
     flippedThisPeriod = false; // reset flip limit for new period
     syncZeroCount = 0;
+    // Reset period exposure tracking for new period
+    periodTotalCostCents = 0;
+    periodCostKey = null;
     // Clean up old period entries (keep last 5 for safety)
     const periodKeys = Object.keys(enteredPeriods);
     if (periodKeys.length > 5) {
         const sorted = periodKeys.sort();
         for (let i = 0; i < sorted.length - 5; i++) {
             delete enteredPeriods[sorted[i]];
+        }
+    }
+    // Clean up old fill failure tracking (keep only current/recent periods)
+    const ffKeys = Object.keys(fillFailedPeriods);
+    if (ffKeys.length > 5) {
+        const ffSorted = ffKeys.sort();
+        for (let i = 0; i < ffSorted.length - 5; i++) {
+            delete fillFailedPeriods[ffSorted[i]];
         }
     }
 }

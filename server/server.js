@@ -1312,10 +1312,20 @@ async function fetchAllData() {
 // ═══════════════════════════════════════════════════════════════
 
 function broadcast(data) {
-    const msg = JSON.stringify(data);
+    let msg;
+    try {
+        msg = JSON.stringify(data);
+    } catch (e) {
+        console.error('[broadcast] JSON.stringify failed:', e.message);
+        return;
+    }
     for (const client of wss.clients) {
         if (client.readyState === 1) { // WebSocket.OPEN
-            client.send(msg);
+            try {
+                client.send(msg);
+            } catch (e) {
+                console.error('[broadcast] send failed:', e.message);
+            }
         }
     }
 }
@@ -1981,7 +1991,11 @@ server.listen(PORT, () => {
 
     // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
     async function fetchLoop() {
-        await fetchAllData();
+        try {
+            await fetchAllData();
+        } catch (e) {
+            console.error('[server] fetchLoop error (will retry next cycle):', e.message);
+        }
         setTimeout(fetchLoop, 5000);
     }
     fetchLoop();
