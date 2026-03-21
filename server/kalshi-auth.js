@@ -10,7 +10,7 @@
 //   KALSHI_API_KEY           — Production API Key ID
 //   KALSHI_PRIVATE_KEY       — Production RSA private key PEM (newlines as \n)
 //   OR KALSHI_PRIVATE_KEY_PATH — path to production .pem file
-//   KALSHI_BASE_URL          — Production API URL (default: https://trading-api.kalshi.com)
+//   KALSHI_BASE_URL          — Production API URL (default: https://api.elections.kalshi.com)
 //
 // Demo env vars:
 //   KALSHI_DEMO_API_KEY      — Demo API Key ID

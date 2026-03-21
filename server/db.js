@@ -725,7 +725,7 @@ async function savePredictionSnapshot(snap) {
             // Signals & regime
             snap.signals ? JSON.stringify(snap.signals) : null,
             snap.regimeInfo ? JSON.stringify(snap.regimeInfo) : null,
-            snap.ensembleConfidence || null,
+            typeof snap.ensembleConfidence === 'object' ? (snap.ensembleConfidence?.stddev ?? null) : (snap.ensembleConfidence || null),
             snap.exhaustionScore || null,
             snap.exhaustionType || null,
             snap.choppinessAdx || null,
