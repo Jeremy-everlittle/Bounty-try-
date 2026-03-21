@@ -1337,11 +1337,10 @@
                 tradesByPeriod[pk].push(t);
             }
 
-            // Build combined period entries from predictions
+            // Build combined period entries from predictions (include current open period)
             const periods = [];
             const seenKeys = new Set();
             for (const p of predictionLog) {
-                if (p.correct === null) continue; // skip ungraded (current open period)
                 const pk = p.periodKey;
                 seenKeys.add(pk);
                 periods.push({ prediction: p, trades: tradesByPeriod[pk] || [], timestamp: p.timestamp });
@@ -1428,7 +1427,7 @@
                     '<span class="period-outcome ' + outcomeCls + '">' + outcomeLabel + '</span>' +
                     '</div>';
 
-                // Prediction details (if we have a prediction)
+                // Prediction details (from prediction log OR inferred from trades)
                 if (p) {
                     const dirLabel = p.predictedDirection === 'up' ? '\u25B2 UP' : '\u25BC DOWN';
                     const dirCls = p.predictedDirection === 'up' ? 'period-dir-up' : 'period-dir-down';
@@ -1454,6 +1453,21 @@
                         const offCls = pctOff < 0.1 ? 'hi-off-good' : pctOff < 0.3 ? 'hi-off-ok' : 'hi-off-bad';
                         html += '<div class="period-accuracy">Prediction error: <span class="' + offCls + '" style="font-weight:600">\u00B1$' + dollarOff.toFixed(2) + ' (' + pctOff.toFixed(3) + '%)</span></div>';
                     }
+                } else if (hasTrades) {
+                    // No prediction log entry — infer direction from trades
+                    const firstBuy = buys[0];
+                    if (firstBuy && firstBuy.direction) {
+                        const dir = firstBuy.direction.toLowerCase();
+                        const dirLabel = dir === 'up' ? '\u25B2 UP' : '\u25BC DOWN';
+                        const dirCls = dir === 'up' ? 'period-dir-up' : 'period-dir-down';
+                        const resultIcon = settlement ? (settlement.correct ? ' \u2713' : ' \u2717') : '';
+                        const resultColor = settlement ? (settlement.correct ? '#3fb950' : '#f85149') : '#8b949e';
+
+                        html += '<div class="period-prediction">' +
+                            '<span class="period-dir-badge ' + dirCls + '">' + dirLabel + '</span>' +
+                            '<span style="font-size:14px;font-weight:700;color:' + resultColor + '">' + resultIcon + (settlement ? (settlement.correct ? ' Correct' : ' Wrong') : '') + '</span>' +
+                            '</div>';
+                    }
                 }
 
                 // Trade activity section
@@ -1471,8 +1485,14 @@
                             typeBg = t.correct ? 'rgba(63,185,80,0.2)' : 'rgba(248,81,73,0.2)';
                             typeColor = t.correct ? '#3fb950' : '#f85149';
                             typeLabel = t.correct ? 'WIN' : 'LOSS';
+                            if (t.badFlip) {
+                                typeLabel = 'BAD FLIP';
+                                typeBg = 'rgba(248,81,73,0.3)'; typeColor = '#ff6b6b';
+                            }
                         } else if (t.type === 'buy') {
-                            if (t.strategy === 'force_bet') {
+                            if (t.strategy === 'confident_flip' || t.flipped) {
+                                typeBg = 'rgba(210,153,34,0.25)'; typeColor = '#e3b341'; typeLabel = 'FLIP';
+                            } else if (t.strategy === 'force_bet') {
                                 typeBg = 'rgba(136,87,255,0.2)'; typeColor = '#a371f7'; typeLabel = 'FORCE';
                             } else if (t.strategy === 'press_bet') {
                                 typeBg = 'rgba(56,139,253,0.25)'; typeColor = '#79c0ff'; typeLabel = 'PRESS';
@@ -1512,6 +1532,16 @@
                             html += '<span class="period-trade-info" style="color:#8b949e">Edge: ' + t.edge + '</span>';
                         }
 
+                        // Flip detail: show original side
+                        if (t.flipped && t.originalSide) {
+                            html += '<span class="period-trade-info" style="color:#e3b341;font-size:9px">\u21C4 was ' + t.originalSide.toUpperCase() + '</span>';
+                        }
+
+                        // Bad flip warning on settlement
+                        if (t.type === 'settle' && t.badFlip) {
+                            html += '<span class="period-trade-info" style="color:#ff6b6b;font-size:9px;font-weight:600">\u26A0 Original ' + (t.originalSide || '').toUpperCase() + ' bet would have won</span>';
+                        }
+
                         // P&L for settlements
                         if (t.pnlCents !== undefined) {
                             const pnlPos = t.pnlCents > 0;
@@ -1532,9 +1562,12 @@
                         const pnl = settlement.pnlCents || 0;
                         const pnlPos = pnl > 0;
                         const totalCost = buys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
+                        const hadFlip = periodTrades.some(t => t.flipped || t.strategy === 'confident_flip');
                         html += '<div class="period-pnl-summary">' +
                             '<div>' +
                                 '<span class="period-pnl-label">Period P&L</span>' +
+                                (hadFlip ? '<span style="color:#e3b341;font-size:9px;margin-left:6px">\u21C4 FLIPPED</span>' : '') +
+                                (settlement.badFlip ? '<span style="color:#ff6b6b;font-size:9px;margin-left:4px">(bad flip)</span>' : '') +
                             '</div>' +
                             '<span class="period-pnl-value" style="color:' + (pnlPos ? '#3fb950' : '#f85149') + '">' +
                                 (pnlPos ? '+' : '') + '$' + (pnl / 100).toFixed(2) +

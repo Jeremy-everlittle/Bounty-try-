@@ -94,6 +94,7 @@ function persistPosition() {
 }
 let killSwitch = false;
 let soldThisPeriod = null;    // Track sold positions for re-entry: { periodKey, side, ticker, soldAt, reason }
+let flippedThisPeriod = false; // Track if we already flipped this cycle (limit to 1 flip)
 let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
 let cachedBalance = null;     // { balanceCents, lastFetched }
 const BALANCE_CACHE_MS = 30000; // refresh balance every 30s
@@ -792,21 +793,34 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const periodEnd = (Math.floor(mins / 15) + 1) * 15;
     const minutesRemaining = Math.max(0.5, periodEnd - mins - (now.getSeconds() / 60));
 
+    // ── EARLY PERIOD WAIT ──
+    // In the first 3 minutes of a cycle, the model has very little data.
+    // Unless conviction is STRONG or LOCK, wait for the picture to develop.
+    const isLockTier = betQuality.convictionTier === 'LOCK';
+    const isStrongOrLock = isLockTier || betQuality.convictionTier === 'STRONG';
+    if (minutesRemaining > 12 && !isStrongOrLock) {
+        const minsIn = 15 - minutesRemaining;
+        const msg = `Too early in cycle (${minsIn.toFixed(1)}m in) — waiting for price direction to establish`;
+        console.log(`[trade-executor] ${msg}`);
+        setThought('waiting', msg);
+        decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
+        return;
+    }
+
     // ── ENTRY PRICE PROTECTION ──
     // Hard cap: never pay more than 85¢ for standard entries.
     // Above 85¢, risk/reward is terrible — risking 85¢+ to make at most 15¢.
     // Exception: LOCK conviction tier (last ~5 min, near-guaranteed) can go up to 95¢.
-    const isLockTier = betQuality.convictionTier === 'LOCK';
     const MAX_ENTRY_PRICE = isLockTier ? 95 : 85;
 
-    // Early period protection: in the first 2 minutes of a period, the model
-    // has minimal data and price direction hasn't established. Require cheaper
+    // Early period protection: in the first 5 minutes of a period, require cheaper
     // entries to compensate for the higher uncertainty.
     // LOCK bets bypass early period limits (they only trigger with <5 min left anyway).
     const earlyPeriodMaxPrice = isLockTier ? MAX_ENTRY_PRICE
-                              : minutesRemaining > 13 ? 70  // first ~2 min: max 70¢
-                              : minutesRemaining > 11 ? 78  // 2-4 min: max 78¢
-                              : MAX_ENTRY_PRICE;             // after 4 min: standard 85¢ cap
+                              : minutesRemaining > 13 ? 65  // first ~2 min: max 65¢ (if STRONG)
+                              : minutesRemaining > 11 ? 72  // 2-4 min: max 72¢
+                              : minutesRemaining > 10 ? 78  // 4-5 min: max 78¢
+                              : MAX_ENTRY_PRICE;             // after 5 min: standard 85¢ cap
 
     const convictionLabel = betQuality.convictionTier ? ` [${betQuality.convictionTier}]` : '';
     setThought('buying', `Placing ${isUp ? 'UP' : 'DOWN'} bet${convictionLabel}`, {
@@ -1132,8 +1146,8 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         };
         currentPosition = null;
 
-        // ── FLIP: immediately enter the opposite side ──
-        if (isConfidentFlip && updatedPrediction && soldTicker && soldPeriodKey) {
+        // ── FLIP: immediately enter the opposite side (max 1 flip per cycle) ──
+        if (isConfidentFlip && !flippedThisPeriod && updatedPrediction && soldTicker && soldPeriodKey) {
             const flipSide = soldSide === 'yes' ? 'no' : 'yes';
             console.log(`[trade-executor] CONFIDENT FLIP: sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()}`);
             const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
@@ -1148,13 +1162,16 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                         entryPrice: flipPrice, orderId: 'flip-paper-' + Date.now(),
                         periodKey: soldPeriodKey, entryTime: Date.now(),
                         totalCostCents: flipCost, totalContracts: flipContracts,
+                        flipped: true, originalSide: soldSide,
                     };
                     enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
+                    flippedThisPeriod = true;
                     logTrade('buy', {
                         ticker: soldTicker, side: flipSide, action: 'buy',
                         contracts: flipContracts, limitPrice: flipPrice,
                         periodKey: soldPeriodKey, direction: flipSide === 'yes' ? 'UP' : 'DOWN',
                         strategy: 'confident_flip', fillStatus: 'paper-flip',
+                        flipped: true, originalSide: soldSide,
                     });
                     dailyStats.tradeCount++;
                     setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipContracts}x @ ${flipPrice}c`, {
@@ -1163,6 +1180,9 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                     console.log(`[trade-executor] PAPER FLIP: ${flipContracts}x ${flipSide.toUpperCase()} @ ${flipPrice}c`);
                 }
             }
+        } else if (isConfidentFlip && flippedThisPeriod) {
+            console.log(`[trade-executor] FLIP BLOCKED: already flipped once this cycle — not flipping again`);
+            setThought('skip', 'Flip blocked — already flipped once this cycle');
         }
         return;
     }
@@ -1226,8 +1246,8 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         };
         currentPosition = null;
 
-        // ── FLIP: immediately enter the opposite side (live) ──
-        if (isConfidentFlip && updatedPrediction && soldTicker && soldPeriodKey) {
+        // ── FLIP: immediately enter the opposite side (live, max 1 flip per cycle) ──
+        if (isConfidentFlip && !flippedThisPeriod && updatedPrediction && soldTicker && soldPeriodKey) {
             const flipSide = soldSide === 'yes' ? 'no' : 'yes';
             console.log(`[trade-executor] CONFIDENT FLIP (live): sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()}`);
             const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
@@ -1253,13 +1273,16 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                                 entryPrice: avgPrice, orderId: flipOrder.order_id,
                                 periodKey: soldPeriodKey, entryTime: Date.now(),
                                 totalCostCents: flipCost, totalContracts: flipFills.filled,
+                                flipped: true, originalSide: soldSide,
                             };
                             enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
+                            flippedThisPeriod = true;
                             logTrade('buy', {
                                 ticker: soldTicker, side: flipSide, action: 'buy',
                                 contracts: flipFills.filled, limitPrice: avgPrice,
                                 periodKey: soldPeriodKey, direction: flipSide === 'yes' ? 'UP' : 'DOWN',
                                 strategy: 'confident_flip', orderId: flipOrder.order_id,
+                                flipped: true, originalSide: soldSide,
                             });
                             dailyStats.tradeCount++;
                             setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipFills.filled}x @ ${avgPrice}c`, {
@@ -1273,6 +1296,9 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                     }
                 }
             }
+        } else if (isConfidentFlip && flippedThisPeriod) {
+            console.log(`[trade-executor] FLIP BLOCKED (live): already flipped once this cycle — not flipping again`);
+            setThought('skip', 'Flip blocked — already flipped once this cycle');
         }
 
     } catch (err) {
@@ -1318,6 +1344,7 @@ function onPeriodEnd(gradeResult) {
             settlementPrice: gradeResult.settlementPrice,
         });
         soldThisPeriod = null;
+        flippedThisPeriod = false;
         syncZeroCount = 0;
         return;
     }
@@ -1375,6 +1402,17 @@ function onPeriodEnd(gradeResult) {
         console.log(`[trade-executor] Paper balance after settle: $${(paperBalances[env]/100).toFixed(2)} (${env})`);
     }
 
+    // Detect bad flips: position was flipped but the original side would have won
+    let badFlip = false;
+    if (currentPosition.flipped && currentPosition.originalSide && gradeResult && gradeResult.actualDirection) {
+        const originalWouldHaveWon = (currentPosition.originalSide === 'yes' && gradeResult.actualDirection === 'up') ||
+                                      (currentPosition.originalSide === 'no' && gradeResult.actualDirection === 'down');
+        badFlip = originalWouldHaveWon;
+        if (badFlip) {
+            console.warn(`[trade-executor] BAD FLIP: original ${currentPosition.originalSide.toUpperCase()} would have WON but we flipped to ${currentPosition.side.toUpperCase()} and ${positionWon ? 'won' : 'LOST'}`);
+        }
+    }
+
     logTrade('settle', {
         ticker: currentPosition.ticker,
         side: currentPosition.side,
@@ -1385,9 +1423,12 @@ function onPeriodEnd(gradeResult) {
         pnlCents: pnl,
         dailyPnlCents: dailyStats.pnlCents,
         periodKey: currentPosition.periodKey,
+        flipped: currentPosition.flipped || false,
+        originalSide: currentPosition.originalSide || null,
+        badFlip,
     });
 
-    setThought('settled', `${positionWon ? 'WON' : 'LOST'}: ${pnl > 0 ? '+' : ''}$${(pnl / 100).toFixed(2)}`, { pnlCents: pnl, positionWon });
+    setThought('settled', `${positionWon ? 'WON' : 'LOST'}: ${pnl > 0 ? '+' : ''}$${(pnl / 100).toFixed(2)}${badFlip ? ' (BAD FLIP)' : ''}`, { pnlCents: pnl, positionWon, badFlip });
     console.log(`[trade-executor] Period settled: ${positionWon ? 'WIN' : 'LOSS'} | P&L: ${pnl > 0 ? '+' : ''}${(pnl / 100).toFixed(2)} | Daily: ${dailyStats.pnlCents > 0 ? '+' : ''}$${(dailyStats.pnlCents / 100).toFixed(2)}`);
 
     decisionLog.logSettlement({
@@ -1421,6 +1462,7 @@ function onPeriodEnd(gradeResult) {
 
     currentPosition = null;
     soldThisPeriod = null; // reset for new period
+    flippedThisPeriod = false; // reset flip limit for new period
     syncZeroCount = 0;
     // Clean up old period entries (keep last 5 for safety)
     const periodKeys = Object.keys(enteredPeriods);
