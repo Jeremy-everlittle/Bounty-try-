@@ -2083,6 +2083,7 @@ function getPaperBalances() {
 
 function resetState() {
     currentPosition = null;
+    cachedBalance = null;  // Clear cached balance so it's re-fetched for the new environment
     dailyStats.date = new Date().toISOString().slice(0, 10);
     dailyStats.pnlCents = 0;
     dailyStats.tradeCount = 0;
