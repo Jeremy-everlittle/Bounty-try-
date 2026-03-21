@@ -1411,6 +1411,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                 const targetContracts = Math.max(baseSizing, recoverySizing);
                 const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
                 if (flipContracts > 0) {
+                    orderInFlight = true;
                     try {
                         const flipResult = await trading.placeOrder({
                             ticker: soldTicker, side: flipSide, action: 'buy', count: flipContracts,
@@ -1455,6 +1456,8 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                     } catch (flipErr) {
                         console.error(`[trade-executor] Flip buy failed:`, flipErr.message);
                         logTrade('flip_error', { ticker: soldTicker, side: flipSide, error: flipErr.message });
+                    } finally {
+                        orderInFlight = false;
                     }
                 }
             }
@@ -2337,8 +2340,10 @@ async function syncPositionWithKalshi() {
             console.log(`[trade-executor] Position sync: Kalshi reports 0 for ${currentPosition.ticker} (zero count: ${syncZeroCount}/3)`);
             if (syncZeroCount >= 3 && positionAge > 120000) {
                 console.log(`[trade-executor] Position sync: confirmed 0 contracts after ${syncZeroCount} checks — clearing position`);
+                const clearedPeriodKey = currentPosition.periodKey;
                 currentPosition = null;
                 syncZeroCount = 0;
+                if (clearedPeriodKey) delete enteredPeriods[clearedPeriodKey]; // Allow re-entry
                 persistPosition();
             }
         }
@@ -2348,8 +2353,10 @@ async function syncPositionWithKalshi() {
             syncZeroCount++;
             if (syncZeroCount >= 3) {
                 console.log(`[trade-executor] Position sync: 404 for ${currentPosition?.ticker} after ${syncZeroCount} checks — clearing position`);
+                const clearedPeriodKey = currentPosition?.periodKey;
                 currentPosition = null;
                 syncZeroCount = 0;
+                if (clearedPeriodKey) delete enteredPeriods[clearedPeriodKey]; // Allow re-entry
                 persistPosition();
             }
         }
