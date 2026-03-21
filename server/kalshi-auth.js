@@ -56,9 +56,9 @@ function getBaseUrl() {
     if (_currentEnv === 'demo') {
         return process.env.KALSHI_DEMO_BASE_URL || 'https://demo-api.kalshi.co';
     }
-    // Production: trading-api.kalshi.com is the current correct URL.
-    // The old api.elections.kalshi.com also works but is the market-data URL.
-    return process.env.KALSHI_BASE_URL || 'https://trading-api.kalshi.com';
+    // Production: api.elections.kalshi.com is the current correct URL.
+    // The old trading-api.kalshi.com has been deprecated (returns 401 with migration notice).
+    return process.env.KALSHI_BASE_URL || 'https://api.elections.kalshi.com';
 }
 
 function getApiKeyId() {
