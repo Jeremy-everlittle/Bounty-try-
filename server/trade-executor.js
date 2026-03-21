@@ -1418,7 +1418,12 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                 // Use the LARGER of: base sizing or loss-recovery sizing
                 const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
                 const recoverySizing = getFlipRecoveryContracts(liveSellLossCents, flipPrice, filledContracts);
-                const targetContracts = Math.max(baseSizing, recoverySizing);
+                const dynamicMaxFlip = getMaxContractsForRisk(flipPrice, 0.15);
+                const targetContracts = Math.min(Math.max(baseSizing, recoverySizing), dynamicMaxFlip);
+                const flipCost = targetContracts * flipPrice;
+                if (!checkPeriodExposure(soldPeriodKey, flipCost)) {
+                    console.log(`[trade-executor] Flip blocked: period exposure cap exceeded`);
+                } else {
                 const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
                 if (flipContracts > 0) {
                     orderInFlight = true;
@@ -1471,6 +1476,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                     }
                 }
             }
+            } // close period exposure check else
         } else if (isConfidentFlip && flippedThisPeriod) {
             console.log(`[trade-executor] FLIP BLOCKED (live): already flipped once this cycle — not flipping again`);
             setThought('skip', 'Flip blocked — already flipped once this cycle');
