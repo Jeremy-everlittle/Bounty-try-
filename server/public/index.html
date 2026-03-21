@@ -3373,6 +3373,11 @@
             }).catch(e => console.warn('Service worker registration failed:', e));
         }
 
+        // ── Cleanup on page unload ────────────────────────────────────
+        window.addEventListener('beforeunload', () => {
+            if (ws) try { ws.close(); } catch(e) {}
+        });
+
         // ── Boot ──────────────────────────────────────────────────────
         updateNotifButton();
         connectWebSocket(); // Connect to always-on server
