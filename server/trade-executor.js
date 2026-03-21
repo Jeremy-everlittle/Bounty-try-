@@ -75,7 +75,7 @@ const config = {
     paperMode: (process.env.PAPER_MODE || 'true').toLowerCase() === 'true',
     baseContracts: parseInt(process.env.BASE_CONTRACTS || '10', 10), // percentage of balance to bet (e.g. 10 = 10%)
     maxPositionContracts: parseInt(process.env.MAX_POSITION_CONTRACTS || '50', 10),
-    convictionMaxContracts: parseInt(process.env.CONVICTION_MAX_CONTRACTS || '150', 10), // higher cap for high-conviction bets
+    convictionMaxContracts: parseInt(process.env.CONVICTION_MAX_CONTRACTS || '50', 10), // hard safety cap for high-conviction bets
     maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '10000', 10),   // $100
     maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '200', 10),
 };
@@ -181,6 +181,16 @@ function getBaseContractCount(entryPriceCents) {
     const contracts = Math.floor(betAmountCents / price);
     console.log(`[trade-executor] Base sizing: ${config.baseContracts}% of $${(balanceCents/100).toFixed(2)} = $${(betAmountCents/100).toFixed(2)} / ${price}c = ${contracts} contracts`);
     return Math.max(1, contracts);
+}
+
+// ── Bankroll-relative max contract sizing ──
+// Computes max contracts based on a percentage of bankroll, preventing
+// catastrophically oversized positions regardless of static config caps.
+function getMaxContractsForRisk(entryPriceCents, maxRiskPct) {
+    const env = getEnvironment();
+    const balanceCents = config.paperMode ? (paperBalances[env] || 5000) : (cachedBalance?.balanceCents || 5000);
+    const maxRiskCents = balanceCents * maxRiskPct;
+    return Math.max(1, Math.floor(maxRiskCents / entryPriceCents));
 }
 
 // ── Loss-recovery flip sizing ──
@@ -926,7 +936,10 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     // ── Dynamic contract sizing: baseContracts% of balance ÷ entry price ──
     const baseCount = getBaseContractCount(limitPrice);
     const isHighConviction = betQuality.betSize > 1.0;
-    const positionCap = isHighConviction ? config.convictionMaxContracts : config.maxPositionContracts;
+    const dynamicMaxEntry = getMaxContractsForRisk(limitPrice, 0.15); // max 15% of bankroll
+    const positionCap = isHighConviction
+        ? Math.min(dynamicMaxEntry, config.convictionMaxContracts)
+        : Math.min(dynamicMaxEntry, config.maxPositionContracts);
     const contracts = Math.max(1, Math.min(
         positionCap,
         Math.round(betQuality.betSize * baseCount)
@@ -1582,7 +1595,8 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
 
     // How many more contracts can we add?
     const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
-    const dipCap = probForBet >= 0.75 ? config.convictionMaxContracts : config.maxPositionContracts;
+    const dynamicMaxDip = getMaxContractsForRisk(currentLimitPrice, 0.15);
+    const dipCap = probForBet >= 0.75 ? Math.min(dynamicMaxDip, config.convictionMaxContracts) : Math.min(dynamicMaxDip, config.maxPositionContracts);
     const maxAdd = dipCap - currentContracts;
     if (maxAdd <= 0) return; // already at max
 
@@ -1740,7 +1754,9 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
         if (currentPosition.side === lockSide) {
             // Already on the right side — add up to max
             const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
-            const addContracts = config.convictionMaxContracts - currentContracts; // late-lock = high conviction
+            const dynamicMax = getMaxContractsForRisk(limitPrice, 0.15); // max 15% of bankroll
+            const cappedMax = Math.min(dynamicMax, config.convictionMaxContracts);
+            const addContracts = cappedMax - currentContracts; // late-lock = high conviction
             if (addContracts <= 0) return; // already maxed out
             // Respect fill failure cooldowns
             const addCheck = await canTrade(periodKey);
@@ -1758,7 +1774,8 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     const check = await canTrade(periodKey);
     if (!check.ok) return;
 
-    const contracts = config.convictionMaxContracts; // late-lock = high conviction, go big
+    const dynamicMaxFresh = getMaxContractsForRisk(limitPrice, 0.15); // max 15% of bankroll
+    const contracts = Math.min(dynamicMaxFresh, config.convictionMaxContracts); // late-lock = high conviction, go big
     await executeLockEntry(lockSide, contracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock');
 }
 
@@ -1928,7 +1945,8 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
 
     // Re-enter at near-full size (was 60%, now 85%) — use conviction cap if high conviction
     const limitPrice = Math.max(5, Math.min(95, Math.round(probForBet * 100)));
-    const reEntryCap = bq.betSize > 1.0 ? config.convictionMaxContracts : config.maxPositionContracts;
+    const dynamicMaxReentry = getMaxContractsForRisk(limitPrice, 0.15);
+    const reEntryCap = bq.betSize > 1.0 ? Math.min(dynamicMaxReentry, config.convictionMaxContracts) : Math.min(dynamicMaxReentry, config.maxPositionContracts);
     const contracts = Math.max(1, Math.min(
         reEntryCap,
         Math.round(bq.betSize * getBaseContractCount(limitPrice) * 0.85)
@@ -2040,15 +2058,20 @@ function setKillSwitch(active) {
     killSwitch = active;
     console.log(`[trade-executor] Kill switch ${active ? 'ACTIVATED' : 'deactivated'}`);
     if (active && currentPosition && !config.paperMode) {
-        // Try to sell the current position immediately
-        trading.placeOrder({
-            ticker: currentPosition.ticker,
-            side: currentPosition.side,
-            action: 'sell',
-            count: currentPosition.contracts,
-            yesPrice: currentPosition.side === 'yes' ? 1 : undefined,
-            noPrice: currentPosition.side === 'no' ? 1 : undefined,
-            timeInForce: 'fill_or_kill',
+        // Try to sell the current position immediately at market bid (not 1 cent)
+        const emergencyPos = currentPosition; // capture before async
+        getMarketSellPrice(emergencyPos.ticker, emergencyPos.side, 0).then(marketBid => {
+            const emergencySellPrice = marketBid || 1;
+            console.log(`[trade-executor] Emergency sell: using price ${emergencySellPrice}c (market bid: ${marketBid || 'unavailable'})`);
+            return trading.placeOrder({
+                ticker: emergencyPos.ticker,
+                side: emergencyPos.side,
+                action: 'sell',
+                count: emergencyPos.contracts,
+                yesPrice: emergencyPos.side === 'yes' ? emergencySellPrice : undefined,
+                noPrice: emergencyPos.side === 'no' ? emergencySellPrice : undefined,
+                timeInForce: 'fill_or_kill',
+            });
         }).then(() => {
             console.log('[trade-executor] Emergency sell executed');
             currentPosition = null;
