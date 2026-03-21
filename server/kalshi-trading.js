@@ -45,6 +45,23 @@ async function kalshiFetch(method, path, body = null, timeout = 10000) {
         try { data = JSON.parse(text); } catch { data = text; }
 
         if (!res.ok) {
+            // Handle rate limiting with backoff
+            if (res.status === 429) {
+                const retryAfter = parseInt(res.headers.get('Retry-After') || '5', 10);
+                const waitMs = Math.min(retryAfter * 1000, 60000);
+                console.warn(`[kalshi-trading] Rate limited (429) on ${method} ${path} — waiting ${retryAfter}s`);
+                await new Promise(r => setTimeout(r, waitMs));
+                // Retry once after waiting
+                const retryRes = await fetch(url, opts);
+                const retryText = await retryRes.text();
+                let retryData;
+                try { retryData = JSON.parse(retryText); } catch { retryData = retryText; }
+                if (retryRes.ok) return retryData;
+                const retryErr = new Error(`Kalshi API ${method} ${path} → ${retryRes.status} (after 429 retry)`);
+                retryErr.status = retryRes.status;
+                retryErr.response = retryData;
+                throw retryErr;
+            }
             const err = new Error(`Kalshi API ${method} ${path} → ${res.status}`);
             err.status = res.status;
             err.response = data;
