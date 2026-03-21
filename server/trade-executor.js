@@ -338,8 +338,8 @@ async function verifyPositionOnKalshi(ticker, side) {
             if (pos.ticker === ticker) {
                 // Kalshi returns yes_count/no_count or market_exposure
                 const count = side === 'yes'
-                    ? (pos.yes_count || parseInt(pos.yes_count_fp) || 0)
-                    : (pos.no_count || parseInt(pos.no_count_fp) || 0);
+                    ? (pos.yes_count || parseInt(pos.yes_count_fp, 10) || 0)
+                    : (pos.no_count || parseInt(pos.no_count_fp, 10) || 0);
                 console.log(`[trade-executor] Kalshi position check: ${ticker} ${side} = ${count} contracts`);
                 return count;
             }
