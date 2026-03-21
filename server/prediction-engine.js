@@ -1454,7 +1454,7 @@ function detectMomentumExhaustion(prices, history) {
 // ── Detect choppy/range-bound market (ADX-like) ──
 function detectChoppiness(prices) {
     const n = prices.length;
-    if (n < 15) return { choppy: false, adx: 50, choppiness: 0.5 };
+    if (n < 15) return { choppy: false, adx: 50, choppiness: 0.5, plusDI: 0, minusDI: 0, trending: false };
 
     // Simplified ADX: directional movement index
     const lookback = Math.min(14, n - 1);
@@ -2437,8 +2437,8 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const probVel = updateProbTracker(periodKey, probForBet, currentPrice, betIsUp, strike);
 
     // Get momentum exhaustion and choppiness from updated prediction
-    const exhaustion = updPred._exhaustion || { exhaustion: 0, type: 'none' };
-    const choppiness = updPred._choppiness || { choppy: false, adx: 50 };
+    const exhaustion = updPred._exhaustion || { exhaustion: 0, type: 'none', roc: 0, acceleration: 0 };
+    const choppiness = updPred._choppiness || { choppy: false, adx: 50, choppiness: 0.5, plusDI: 0, minusDI: 0, trending: false };
 
     // Remaining vol estimate for recovery analysis
     const remainingVol = updPred._remainingVol || 0.002;
