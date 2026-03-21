@@ -142,7 +142,7 @@ async function fetchBRTIApprox() {
 // This is the same endpoint that was working before — it returns full market
 // detail including yes_sub_title with the real strike price.
 // Demo API (demo-api.kalshi.co) is ONLY used by kalshi-trading.js for bets & funds.
-const KALSHI_MARKET_API = 'https://api.elections.kalshi.com/trade-api/v2';
+const KALSHI_MARKET_API = 'https://api.kalshi.com/trade-api/v2';
 
 async function fetchKalshiData() {
     try {
