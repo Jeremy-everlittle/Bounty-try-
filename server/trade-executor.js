@@ -463,6 +463,31 @@ async function canTrade(periodKey) {
     return { ok: true };
 }
 
+// Check if adding proposedCost would exceed period exposure cap (15% of bankroll)
+function checkPeriodExposure(periodKey, proposedCost) {
+    // Reset tracking when period changes
+    if (periodCostKey !== periodKey) {
+        periodTotalCostCents = 0;
+        periodCostKey = periodKey;
+    }
+    const env = getEnvironment();
+    const balanceCents = config.paperMode ? (paperBalances[env] || 5000) : (cachedBalance?.balanceCents || 5000);
+    const maxPeriodExposure = balanceCents * 0.15; // max 15% of bankroll per period
+    if (periodTotalCostCents + proposedCost > maxPeriodExposure) {
+        console.log(`[trade-executor] Period exposure cap reached: ${periodTotalCostCents}c + ${proposedCost}c > ${maxPeriodExposure.toFixed(0)}c (15% of $${(balanceCents/100).toFixed(2)})`);
+        return false;
+    }
+    return true;
+}
+
+function trackPeriodCost(periodKey, cost) {
+    if (periodCostKey !== periodKey) {
+        periodTotalCostCents = 0;
+        periodCostKey = periodKey;
+    }
+    periodTotalCostCents += cost;
+}
+
 function markFillFailed(periodKey) {
     if (!fillFailedPeriods[periodKey]) {
         fillFailedPeriods[periodKey] = { count: 0, lastAttempt: 0 };
@@ -961,6 +986,13 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         positionCap,
         Math.round(betQuality.betSize * baseCount)
     ));
+
+    // ── Per-period exposure cap: don't exceed 15% of bankroll per period ──
+    const proposedCost = contracts * limitPrice;
+    if (!checkPeriodExposure(periodKey, proposedCost)) {
+        setThought('skip', 'Period exposure cap reached (15% of bankroll)');
+        return;
+    }
 
     // ── DB: log bet decision ──
     db.saveDecisionLog({
