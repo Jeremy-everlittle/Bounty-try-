@@ -1385,6 +1385,8 @@ class OnlineRLS {
                 this.P[i * d + j] = avg;
                 this.P[j * d + i] = avg;
             }
+            // Tikhonov regularization: prevent ill-conditioning
+            this.P[i * d + i] = Math.max(this.P[i * d + i], 1e-6);
         }
 
         // Track accuracy
