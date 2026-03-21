@@ -381,6 +381,8 @@ const state = {
     kalshiTicker: null,
     kalshiMarket: null,
     orderBook: null,
+    kalshiOrderBook: null,
+    kalshiOrderBookError: null,
     recentTrades: null,
     fundingRate: null,
     ethPrice: null,
@@ -509,6 +511,23 @@ async function fetchAllData() {
         state.periodKey = getPeriodKey();
         state.lastUpdate = new Date().toISOString();
         state.error = null;
+
+        // ── Kalshi Orderbook ──
+        if (state.kalshiTicker) {
+            try {
+                const kalshiTrading = require('./kalshi-trading');
+                state.kalshiOrderBook = await kalshiTrading.getOrderbook(state.kalshiTicker);
+                state.kalshiOrderBookError = null;
+            } catch (e) {
+                state.kalshiOrderBookError = e.message;
+                // Fallback: try public API
+                try {
+                    const publicUrl = `https://api.elections.kalshi.com/trade-api/v2/orderbook/${state.kalshiTicker}`;
+                    const resp = await fetchJSON(publicUrl);
+                    if (resp) { state.kalshiOrderBook = resp; state.kalshiOrderBookError = null; }
+                } catch (e2) {}
+            }
+        }
 
         // ═══════════════════════════════════════════════════════
         // SERVER-SIDE PREDICTION ENGINE
@@ -729,7 +748,9 @@ async function fetchAllData() {
             fearGreed: state.fearGreed,
             macroEvent: state.macroEvent,
             tradingStatus: tradeExecutor.getStatus(),
-            kalshiEnvironment: kalshiAuth.getEnvironment()
+            kalshiEnvironment: kalshiAuth.getEnvironment(),
+            kalshiOrderBook: state.kalshiOrderBook || null,
+            kalshiOrderBookError: state.kalshiOrderBookError || null
         });
 
         console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | Env=${kalshiAuth.getEnvironment()} | ${wss.clients.size} clients`);

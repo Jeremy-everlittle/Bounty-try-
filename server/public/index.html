@@ -846,6 +846,25 @@
 
         <!-- Wallet removed - will be re-added later -->
 
+        <!-- Kalshi Orderbook Card -->
+        <div class="card" id="kalshi-orderbook-card" style="display:none;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <span style="font-size:13px;font-weight:700;color:#e6edf3;letter-spacing:1px;text-transform:uppercase;">Kalshi Orderbook</span>
+                <span id="kalshi-ob-ticker" style="font-size:11px;color:#8b949e;font-family:monospace;"></span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                <div>
+                    <div style="font-size:10px;font-weight:700;color:#3fb950;text-transform:uppercase;margin-bottom:4px;text-align:center;">YES Bids</div>
+                    <div id="kalshi-ob-yes" style="font-size:11px;font-family:monospace;"></div>
+                </div>
+                <div>
+                    <div style="font-size:10px;font-weight:700;color:#f85149;text-transform:uppercase;margin-bottom:4px;text-align:center;">NO Bids</div>
+                    <div id="kalshi-ob-no" style="font-size:11px;font-family:monospace;"></div>
+                </div>
+            </div>
+            <div id="kalshi-ob-spread" style="margin-top:6px;font-size:11px;color:#8b949e;text-align:center;"></div>
+        </div>
+
         <!-- Next Period Preview Card -->
         <div class="card next-period-card" id="next-period-card">
             <div class="next-period-header">
@@ -2009,6 +2028,78 @@
             }
         }
 
+        function renderKalshiOrderbook() {
+            const card = document.getElementById('kalshi-orderbook-card');
+            if (!card) return;
+            const ob = serverData && serverData.kalshiOrderBook;
+            const ticker = serverData && serverData.kalshiTicker;
+            const obError = serverData && serverData.kalshiOrderBookError;
+            if (!ticker) { card.style.display = 'none'; return; }
+            card.style.display = '';
+            document.getElementById('kalshi-ob-ticker').textContent = ticker;
+            if (!ob) {
+                const errMsg = obError || 'Orderbook unavailable';
+                const env = (serverData && serverData.kalshiEnvironment) || '?';
+                document.getElementById('kalshi-ob-yes').innerHTML = '';
+                document.getElementById('kalshi-ob-no').innerHTML = '';
+                document.getElementById('kalshi-ob-spread').innerHTML =
+                    `<span style="color:#f0883e;">Orderbook fetch failed (${env}): ${errMsg}</span>`;
+                return;
+            }
+            const book = ob.orderbook_fp || ob.orderbook || ob;
+            const isDollarFormat = !!(book.yes_dollars || book.no_dollars);
+            const rawYesBids = book.yes_dollars || book.yes || [];
+            const rawNoBids = book.no_dollars || book.no || [];
+            function toCents(val) {
+                const n = parseFloat(val);
+                return isDollarFormat ? Math.round(n * 100) : Math.round(n);
+            }
+            function parseBids(raw) {
+                return raw.map(entry => ({
+                    priceCents: toCents(entry[0]),
+                    qty: parseInt(entry[1]) || Math.round(parseFloat(entry[1]) || 0)
+                })).sort((a, b) => b.priceCents - a.priceCents);
+            }
+            const yesBids = parseBids(rawYesBids);
+            const noBids = parseBids(rawNoBids);
+            const yesEl = document.getElementById('kalshi-ob-yes');
+            if (yesBids.length === 0) {
+                yesEl.innerHTML = '<div style="color:#484f58;text-align:center;padding:8px 0;">No bids</div>';
+            } else {
+                yesEl.innerHTML = yesBids.slice(0, 8).map(b => {
+                    const barW = Math.min(100, b.qty * 2);
+                    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 4px;position:relative;">
+                        <div style="position:absolute;left:0;top:0;bottom:0;width:${barW}%;background:rgba(63,185,80,0.1);border-radius:2px;"></div>
+                        <span style="color:#3fb950;z-index:1;">${b.priceCents}\u00A2</span>
+                        <span style="color:#8b949e;z-index:1;">${b.qty}</span>
+                    </div>`;
+                }).join('');
+            }
+            const noEl = document.getElementById('kalshi-ob-no');
+            if (noBids.length === 0) {
+                noEl.innerHTML = '<div style="color:#484f58;text-align:center;padding:8px 0;">No bids</div>';
+            } else {
+                noEl.innerHTML = noBids.slice(0, 8).map(b => {
+                    const barW = Math.min(100, b.qty * 2);
+                    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 4px;position:relative;">
+                        <div style="position:absolute;left:0;top:0;bottom:0;width:${barW}%;background:rgba(248,81,73,0.1);border-radius:2px;"></div>
+                        <span style="color:#f85149;z-index:1;">${b.priceCents}\u00A2</span>
+                        <span style="color:#8b949e;z-index:1;">${b.qty}</span>
+                    </div>`;
+                }).join('');
+            }
+            const spreadEl = document.getElementById('kalshi-ob-spread');
+            if (yesBids.length > 0 && noBids.length > 0) {
+                const bestYes = yesBids[0].priceCents;
+                const bestNo = noBids[0].priceCents;
+                const yesAsk = 100 - bestNo;
+                const noAsk = 100 - bestYes;
+                spreadEl.textContent = `YES: bid ${bestYes}\u00A2 / ask ${yesAsk}\u00A2  |  NO: bid ${bestNo}\u00A2 / ask ${noAsk}\u00A2  |  Spread: ${Math.abs(yesAsk - bestYes)}\u00A2`;
+            } else {
+                spreadEl.textContent = yesBids.length + noBids.length > 0 ? 'Partial orderbook' : 'Empty orderbook';
+            }
+        }
+
         async function forceBet() {
             const ts = serverData && serverData.tradingStatus;
             if (ts && ts.currentPosition) {
@@ -2574,6 +2665,7 @@
 
             // Auto-trading panel
             renderTradingPanel();
+            renderKalshiOrderbook();
 
             // Wallet rendering removed
 
