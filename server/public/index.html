@@ -128,6 +128,12 @@
             max-width: 400px;
             margin-bottom: 16px;
         }
+        #current-card {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
 
         .card-label {
             font-size: 12px;
@@ -648,9 +654,17 @@
     </div>
 
     <div class="card" id="current-card">
-        <div class="card-label"><span class="live-dot"></span> Current Price</div>
-        <div class="price" id="current-price">--</div>
-        <div class="price-sub" id="price-change-24h"></div>
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+            <div>
+                <div class="card-label"><span class="live-dot"></span> Current Price</div>
+                <div class="price" id="current-price">--</div>
+                <div class="price-sub" id="price-change-24h"></div>
+            </div>
+            <div class="countdown" id="countdown" style="margin-top:0;flex-direction:column;align-items:flex-end;gap:2px;">
+                <span style="font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;">Next period in</span>
+                <span class="countdown-time" id="countdown-time" style="font-size:18px;">--:--</span>
+            </div>
+        </div>
         <div class="period-info" id="period-start-row">
             <span class="period-label" id="period-label">Period open (strike)</span>
             <span class="period-value" id="period-start-price">--</span>
@@ -764,11 +778,6 @@
             </div>
             <div class="next-period-signals" id="next-period-signals"></div>
             <div class="next-period-note" id="next-period-note">Based on current trends — will update when next period opens</div>
-        </div>
-
-        <div class="countdown" id="countdown">
-            <span>Next period in</span>
-            <span class="countdown-time" id="countdown-time">--:--</span>
         </div>
 
     </div>
