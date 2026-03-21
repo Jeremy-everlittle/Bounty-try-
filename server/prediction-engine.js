@@ -1524,7 +1524,7 @@ function updateProbTracker(periodKey, probForBet, currentPrice, betIsUp, strike)
     }
 
     const h = probTracker.history;
-    if (h.length < 3) return { velocity: 0, acceleration: 0, peakDrawdown: 0, profitAtRisk: 0, trend: 'stable' };
+    if (h.length < 3) return { velocity: 0, acceleration: 0, peakDrawdown: 0, profitAtRisk: 0, trend: 'stable', rawVelocity: 0 };
 
     // Probability velocity (EMA-smoothed first derivative)
     const dt = (h[h.length-1].timestamp - h[h.length-2].timestamp) / 1000; // seconds
@@ -2039,7 +2039,7 @@ function predictPrice(marketData, minutesAhead, strike) {
     const adjustedRemainingVol = remainingVol * microVolAdjust;
     const driftWithEarlyBias = minutesIntoPeriod <= 3 ? rawDrift * 0.75 + earlyMomentumSignal * 0.25 : rawDrift;
     const adjustedDrift = driftWithEarlyBias * driftMultiplier;
-    const driftZShift = adjustedRemainingVol > 0 ? adjustedDrift / adjustedRemainingVol : 0;
+    const driftZShift = adjustedRemainingVol > 0 && isFinite(adjustedDrift) ? adjustedDrift / adjustedRemainingVol : 0;
 
     // SIGNAL 5: RSI — research shows RSI works as MOMENTUM indicator for BTC,
     // not mean-reversion. High RSI = bullish continuation; low RSI = bearish.
@@ -2417,7 +2417,7 @@ function predictPrice(marketData, minutesAhead, strike) {
 // ═══════════════════════════════════════════════════════════════
 
 function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemaining) {
-    if (!origPred || !updPred || strike === null) return null;
+    if (!origPred || !updPred || strike === null || strike === 0) return null;
     const reasons = [];
     const betIsUp = origPred.predictedPrice >= strike;
     const betDirection = betIsUp ? 'UP' : 'DOWN';
