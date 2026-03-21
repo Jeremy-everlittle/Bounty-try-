@@ -1439,13 +1439,20 @@ function onPeriodEnd(gradeResult) {
     const avgEntryPrice = contracts > 0 ? Math.round(totalCost / contracts) : currentPosition.entryPrice;
 
     // P&L: if position won, payout is 100c per contract - total cost. If lost, lose total cost.
+    // IMPORTANT: If this position was a flip, subtract the loss from selling the original
+    // position. e.g., if we sold 6x NO @ 0¢ (loss: 432¢) then flipped to 50x YES @ 91¢
+    // and won (+450¢), the true P&L is 450 - 432 = +18¢, not +450¢.
+    const flipLoss = currentPosition.flipLossCents || 0;
     let pnl;
     if (positionWon) {
-        pnl = (contracts * 100) - totalCost; // total payout minus total cost
+        pnl = (contracts * 100) - totalCost - flipLoss; // payout minus cost minus sell loss from flip
         dailyStats.wins++;
     } else {
-        pnl = -totalCost; // lose everything paid
+        pnl = -totalCost - flipLoss; // lose everything paid plus the flip sell loss
         dailyStats.losses++;
+    }
+    if (flipLoss > 0) {
+        console.log(`[trade-executor] P&L includes flip sell loss: -${(flipLoss/100).toFixed(2)} (settlement ${positionWon ? 'profit' : 'loss'}: ${((positionWon ? (contracts * 100) - totalCost : -totalCost) / 100).toFixed(2)}, net: ${(pnl/100).toFixed(2)})`);
     }
     dailyStats.pnlCents += pnl;
 
@@ -1479,6 +1486,7 @@ function onPeriodEnd(gradeResult) {
         correct: positionWon,
         predictionCorrect,
         pnlCents: pnl,
+        flipLossCents: flipLoss > 0 ? flipLoss : undefined,
         dailyPnlCents: dailyStats.pnlCents,
         periodKey: currentPosition.periodKey,
         flipped: currentPosition.flipped || false,

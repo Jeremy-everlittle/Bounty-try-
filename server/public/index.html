@@ -1557,14 +1557,16 @@
                     // P&L summary for the period
                     if (settlement) {
                         const pnl = settlement.pnlCents || 0;
-                        const pnlPos = pnl > 0;
+                        const pnlPos = pnl >= 0;
                         const totalCost = buys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
                         const hadFlip = periodTrades.some(t => t.flipped || t.strategy === 'confident_flip');
+                        const flipLoss = settlement.flipLossCents || 0;
                         html += '<div class="period-pnl-summary">' +
                             '<div>' +
                                 '<span class="period-pnl-label">Period P&L</span>' +
                                 (hadFlip ? '<span style="color:#e3b341;font-size:9px;margin-left:6px">\u21C4 FLIPPED</span>' : '') +
                                 (settlement.badFlip ? '<span style="color:#ff6b6b;font-size:9px;margin-left:4px">(bad flip)</span>' : '') +
+                                (flipLoss > 0 ? '<span style="color:#8b949e;font-size:9px;margin-left:4px">(incl -$' + (flipLoss / 100).toFixed(2) + ' sell loss)</span>' : '') +
                             '</div>' +
                             '<span class="period-pnl-value" style="color:' + (pnlPos ? '#3fb950' : '#f85149') + '">' +
                                 (pnlPos ? '+' : '') + '$' + (pnl / 100).toFixed(2) +
