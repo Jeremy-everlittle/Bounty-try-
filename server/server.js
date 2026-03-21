@@ -1272,6 +1272,7 @@ async function fetchAllData() {
             history: state.history,
             lastUpdate: state.lastUpdate,
             periodKey: state.periodKey,
+            staleData: state._staleData || false,
             // Prediction data (from server!)
             prediction: store.getCurrentPeriod(),
             predictionLog: store.getPredictionLog(),

@@ -940,6 +940,7 @@
     </div>
 
     <div class="status-bar" id="status-bar"></div>
+    <div id="stale-data-warning" style="display:none;background:#b8860b;color:#fff;text-align:center;padding:6px 12px;font-size:13px;font-weight:600">STALE DATA — BTC price feed interrupted. Trading paused.</div>
     <div class="kalshi-error-banner" id="kalshi-error-banner">
         <div class="error-msg" id="kalshi-error-msg">Kalshi strike not available</div>
         <button class="refresh-btn" onclick="manualRefresh()">Refresh Kalshi</button>
@@ -2699,6 +2700,11 @@
         }
 
         function updateUI(data, periodEnd) {
+            // Stale data warning
+            const staleEl = document.getElementById('stale-data-warning');
+            if (staleEl) {
+                staleEl.style.display = serverData.staleData ? 'block' : 'none';
+            }
             // Current price (always live)
             document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
             // Use ONLY the Kalshi API strike — no fallback to periodStartPrice
