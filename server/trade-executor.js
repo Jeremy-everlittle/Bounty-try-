@@ -975,6 +975,21 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         return;
     }
 
+    // ── Spread awareness: don't enter if spread exceeds edge ──
+    {
+        const spreadAsk = await getMarketPrice(kalshiTicker, side, minutesRemaining);
+        const spreadBid = await getMarketSellPrice(kalshiTicker, side, minutesRemaining);
+        if (spreadAsk && spreadBid) {
+            const spreadCents = spreadAsk - spreadBid;
+            const edgeCents = Math.round(betQuality.edge * 100);
+            if (spreadCents > edgeCents * 2 && !isLockTier) {
+                console.log(`[trade-executor] Spread ${spreadCents}c > 2x edge ${edgeCents}c — skipping entry`);
+                setThought('skip', `Spread ${spreadCents}c too wide for ${edgeCents}c edge`);
+                return;
+            }
+        }
+    }
+
     // ── Dynamic contract sizing: baseContracts% of balance ÷ entry price ──
     const baseCount = getBaseContractCount(limitPrice);
     const isHighConviction = betQuality.betSize > 1.0;
@@ -1050,6 +1065,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         logTrade('buy', tradeInfo);
         decisionLog.logTradeExecution({ ...tradeInfo, strategy: 'initial', currentPrice: prediction.predictedPrice, strike, probability: (probForBet * 100).toFixed(1) + '%' });
         dailyStats.tradeCount++;
+        trackPeriodCost(periodKey, costCents);
         return;
     }
 
@@ -1126,6 +1142,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         syncZeroCount = 0; // reset sync counter on new entry
         logTrade('buy', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: cappedContracts });
         dailyStats.tradeCount++;
+        trackPeriodCost(periodKey, filledContracts * limitPrice);
         console.log(`[trade-executor] LIVE BUY: ${filledContracts}x ${side.toUpperCase()} on ${kalshiTicker} — order ${order.order_id} (${order.status})`);
 
     } catch (err) {
