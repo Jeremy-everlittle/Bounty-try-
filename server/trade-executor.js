@@ -607,8 +607,12 @@ function parseOrderbookAsk(resp, side, ticker, minutesRemaining) {
     const askPrices = oppositeBids.map(entry => {
         const raw = parseFloat(entry[0]);
         const bidDollars = isDollarFmt ? raw : raw / 100;
-        return Math.round((1.00 - bidDollars) * 100);
-    });
+        const ask = Math.round((1.00 - bidDollars) * 100);
+        // Reject inverted/corrupted bids producing invalid ask prices
+        if (!isFinite(ask) || ask < 1 || ask > 99) return null;
+        return ask;
+    }).filter(x => x !== null);
+    if (askPrices.length === 0) return null;
     return Math.min(...askPrices);
 }
 
