@@ -839,7 +839,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const earlyPeriodMaxPrice = isLockTier ? MAX_ENTRY_PRICE
                               : minutesRemaining > 13 ? 65  // first ~2 min: max 65¢ (if STRONG)
                               : minutesRemaining > 11 ? 72  // 2-4 min: max 72¢
-                              : minutesRemaining > 10 ? 78  // 4-5 min: max 78¢
+                              : minutesRemaining > 10 ? 82  // 4-5 min: max 82¢ (was 78¢ — too tight)
                               : MAX_ENTRY_PRICE;             // after 5 min: standard 85¢ cap
 
     const convictionLabel = betQuality.convictionTier ? ` [${betQuality.convictionTier}]` : '';
@@ -868,10 +868,20 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     // If the model says 95%+ but we cap at 70-85¢, we'd be posting below market
     // and unlikely to fill anyway. Only skip if the market is genuinely expensive.
     if (rawTheoreticalPrice > effectiveMaxEntry + 10) {
-        const msg = `Entry price too high (${rawTheoreticalPrice}c, max=${effectiveMaxEntry}c with ${minutesRemaining.toFixed(1)}m left) — risk/reward unfavorable`;
-        console.log(`[trade-executor] ${msg}`);
-        setThought('skip', msg);
-        return;
+        // Before skipping, check the actual market ask — if the market ask is within
+        // our max, we can still place a limit order that might fill. The model's high
+        // theoretical price just means we have strong conviction, not that the market
+        // ask is necessarily expensive.
+        const actualAsk = await getMarketPrice(kalshiTicker, side, minutesRemaining);
+        if (actualAsk !== null && actualAsk <= effectiveMaxEntry) {
+            console.log(`[trade-executor] Model price high (${rawTheoreticalPrice}c) but market ask ${actualAsk}c is within max ${effectiveMaxEntry}c — proceeding with entry`);
+        } else {
+            const askInfo = actualAsk !== null ? `, market ask=${actualAsk}c` : '';
+            const msg = `Entry price too high (${rawTheoreticalPrice}c, max=${effectiveMaxEntry}c with ${minutesRemaining.toFixed(1)}m left${askInfo}) — risk/reward unfavorable`;
+            console.log(`[trade-executor] ${msg}`);
+            setThought('skip', msg);
+            return;
+        }
     }
 
     // Fetch orderbook once, use for both market ask (display) and limit price (execution)
@@ -1698,12 +1708,20 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     // We cap at 95¢ to ensure at least 5¢ profit per contract
     const winProb = Math.min(0.99, 0.5 + 0.5 * erf(sigmaDistance / Math.SQRT2));
     const maxLockPrice = Math.min(95, Math.max(85, Math.round(winProb * 100)));
-    // Use orderbook to find actual best price — may be much cheaper than our max
-    const limitPrice = await getAggressivePrice(kalshiTicker, lockSide, maxLockPrice, minutesRemaining);
-    if (limitPrice === null) {
+
+    // FIX: Get the actual market ask price from the orderbook first.
+    // Previously we passed maxLockPrice as "theoreticalPrice" to getAggressivePrice,
+    // which then added slippage on top — meaning we'd cross the full spread to 95¢
+    // even when the market mid was at 89-93¢. Now we use the real market ask and
+    // cap it at maxLockPrice instead.
+    const marketAsk = await getMarketPrice(kalshiTicker, lockSide, minutesRemaining);
+    if (marketAsk === null) {
         console.log(`[trade-executor] Late-lock: no liquidity on orderbook — skipping, will retry next cycle`);
         return;
     }
+    // Use the market ask, but never pay more than our calculated max
+    const limitPrice = Math.min(marketAsk, maxLockPrice);
+    console.log(`[trade-executor] Late-lock pricing: market ask=${marketAsk}c, maxLock=${maxLockPrice}c → limit=${limitPrice}c (sigma=${sigmaDistance.toFixed(2)})`);
     const profitPerContract = 100 - limitPrice;
 
     // Skip if profit margin is too thin (< 3¢ per contract after fees)
