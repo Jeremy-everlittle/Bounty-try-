@@ -192,6 +192,7 @@ function getMaxContractsForRisk(entryPriceCents, maxRiskPct) {
     const env = getEnvironment();
     const balanceCents = config.paperMode ? (paperBalances[env] || 5000) : (cachedBalance?.balanceCents || 5000);
     const maxRiskCents = balanceCents * maxRiskPct;
+    if (entryPriceCents <= 0) return 1;
     return Math.max(1, Math.floor(maxRiskCents / entryPriceCents));
 }
 
@@ -726,6 +727,7 @@ async function capContractsByBalance(contracts, pricePerContract) {
     if (config.paperMode) {
         const env = getEnvironment();
         const availableCents = paperBalances[env] || 0;
+        if (pricePerContract <= 0) return 0;
         const maxAffordable = Math.floor(availableCents / pricePerContract);
         if (maxAffordable <= 0) {
             console.log(`[trade-executor] Paper: can't afford any contracts: balance=${availableCents}c, price=${pricePerContract}c`);
@@ -740,6 +742,7 @@ async function capContractsByBalance(contracts, pricePerContract) {
     try {
         const balanceResp = await trading.getBalance();
         const availableCents = balanceResp.balance;
+        if (pricePerContract <= 0) return 0;
         const maxAffordable = Math.floor(availableCents / pricePerContract);
         if (maxAffordable <= 0) {
             console.log(`[trade-executor] Can't afford any contracts: balance=${availableCents}c, price=${pricePerContract}c`);

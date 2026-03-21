@@ -377,7 +377,7 @@ class ExponentialWeightedEnsemble {
         }
 
         // Final normalization to ensure sum = 1
-        const finalSum = weights.reduce((a, b) => a + b, 0);
+        const finalSum = weights.reduce((a, b) => a + b, 0) || 1;
         for (let i = 0; i < this.numSignals; i++) {
             weights[i] /= finalSum;
         }
