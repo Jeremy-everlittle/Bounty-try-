@@ -192,6 +192,7 @@ function getMaxContractsForRisk(entryPriceCents, maxRiskPct) {
     const env = getEnvironment();
     const balanceCents = config.paperMode ? (paperBalances[env] || 5000) : (cachedBalance?.balanceCents || 5000);
     const maxRiskCents = balanceCents * maxRiskPct;
+    if (entryPriceCents <= 0) return 1;
     return Math.max(1, Math.floor(maxRiskCents / entryPriceCents));
 }
 
@@ -252,7 +253,12 @@ function parseOrderFills(order) {
     const filled = parseFloat(order.fill_count_fp) || order.fill_count || 0;
     const remaining = parseFloat(order.remaining_count_fp) || order.remaining_count || 0;
     const initial = parseFloat(order.initial_count_fp) || order.initial_count || order.count || 0;
-    return { filled: Math.round(filled), remaining: Math.round(remaining), initial: Math.round(initial) };
+    // Extract average fill price (cents) for accurate P&L
+    const avgPriceFp = parseFloat(order.avg_price_fp);
+    const avgPriceLegacy = order.avg_price;
+    const avgPrice = !isNaN(avgPriceFp) ? Math.round(avgPriceFp * 100) :
+                     (avgPriceLegacy != null ? avgPriceLegacy : null);
+    return { filled: Math.round(filled), remaining: Math.round(remaining), initial: Math.round(initial), avgPrice };
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -332,8 +338,8 @@ async function verifyPositionOnKalshi(ticker, side) {
             if (pos.ticker === ticker) {
                 // Kalshi returns yes_count/no_count or market_exposure
                 const count = side === 'yes'
-                    ? (pos.yes_count || parseInt(pos.yes_count_fp) || 0)
-                    : (pos.no_count || parseInt(pos.no_count_fp) || 0);
+                    ? (pos.yes_count || parseInt(pos.yes_count_fp, 10) || 0)
+                    : (pos.no_count || parseInt(pos.no_count_fp, 10) || 0);
                 console.log(`[trade-executor] Kalshi position check: ${ticker} ${side} = ${count} contracts`);
                 return count;
             }
@@ -601,8 +607,12 @@ function parseOrderbookAsk(resp, side, ticker, minutesRemaining) {
     const askPrices = oppositeBids.map(entry => {
         const raw = parseFloat(entry[0]);
         const bidDollars = isDollarFmt ? raw : raw / 100;
-        return Math.round((1.00 - bidDollars) * 100);
-    });
+        const ask = Math.round((1.00 - bidDollars) * 100);
+        // Reject inverted/corrupted bids producing invalid ask prices
+        if (!isFinite(ask) || ask < 1 || ask > 99) return null;
+        return ask;
+    }).filter(x => x !== null);
+    if (askPrices.length === 0) return null;
     return Math.min(...askPrices);
 }
 
@@ -721,6 +731,7 @@ async function capContractsByBalance(contracts, pricePerContract) {
     if (config.paperMode) {
         const env = getEnvironment();
         const availableCents = paperBalances[env] || 0;
+        if (pricePerContract <= 0) return 0;
         const maxAffordable = Math.floor(availableCents / pricePerContract);
         if (maxAffordable <= 0) {
             console.log(`[trade-executor] Paper: can't afford any contracts: balance=${availableCents}c, price=${pricePerContract}c`);
@@ -735,6 +746,7 @@ async function capContractsByBalance(contracts, pricePerContract) {
     try {
         const balanceResp = await trading.getBalance();
         const availableCents = balanceResp.balance;
+        if (pricePerContract <= 0) return 0;
         const maxAffordable = Math.floor(availableCents / pricePerContract);
         if (maxAffordable <= 0) {
             console.log(`[trade-executor] Can't afford any contracts: balance=${availableCents}c, price=${pricePerContract}c`);
@@ -1073,6 +1085,10 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const cappedContracts = await capContractsByBalance(contracts, limitPrice);
     if (cappedContracts <= 0) return;
 
+    // Mark period as entered BEFORE placing order to prevent race condition
+    // where a second call passes the enteredPeriods check while we're awaiting
+    enteredPeriods[periodKey] = { side, ticker: kalshiTicker, entryTime: Date.now() };
+
     // Snapshot balance before order for verification
     let balanceBefore = 0;
     try { balanceBefore = (await trading.getBalance()).balance; } catch (e) { /* continue */ }
@@ -1110,6 +1126,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             console.log(`[trade-executor] Order ${order.order_id} got 0 fills — no position taken`);
             logTrade('buy_unfilled', { ...tradeInfo, orderId: order.order_id, finalStatus: order.status });
             markFillFailed(periodKey);
+            delete enteredPeriods[periodKey]; // Allow retry since nothing filled
             return;
         }
 
@@ -1119,6 +1136,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         if (filledContracts === 0) {
             logTrade('buy_phantom', { ...tradeInfo, orderId: order.order_id, claimedFills: fills.filled, orderStatus: order.status });
             markFillFailed(periodKey);
+            delete enteredPeriods[periodKey]; // Allow retry since phantom fill
             return;
         }
 
@@ -1137,8 +1155,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             totalCostCents: filledContracts * limitPrice,
             totalContracts: filledContracts,
         };
-        // Mark this period as entered to prevent duplicate entries
-        enteredPeriods[periodKey] = { side, ticker: kalshiTicker, entryTime: Date.now() };
+        // enteredPeriods already marked before order placement
         syncZeroCount = 0; // reset sync counter on new entry
         logTrade('buy', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: cappedContracts });
         dailyStats.tradeCount++;
@@ -1151,8 +1168,13 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         logTrade('buy_error', { ...tradeInfo, error: err.message, response: err.response });
 
         // On 409 (conflict/insufficient funds), don't retry this period
+        // Keep enteredPeriods mark to prevent duplicate attempts, but don't create
+        // a phantom 0-contract position that could cause division by zero in settlement
         if (err.status === 409) {
-            currentPosition = { ticker: kalshiTicker, side, contracts: 0, entryPrice: 0, orderId: 'blocked-409', periodKey, entryTime: Date.now() };
+            // enteredPeriods already set before order — leave it to block retries
+        } else {
+            // Order failed entirely — allow retry
+            delete enteredPeriods[periodKey];
         }
     } finally {
         orderInFlight = false;
@@ -1348,8 +1370,21 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 
         if (filledContracts < currentPosition.contracts) {
             console.log(`[trade-executor] Partial sell: ${filledContracts}/${currentPosition.contracts} — reducing position`);
+            // Pro-rata cost basis reduction
+            const oldTotal = currentPosition.totalContracts || currentPosition.contracts;
+            if (currentPosition.totalCostCents && oldTotal > 0) {
+                const costPerContract = currentPosition.totalCostCents / oldTotal;
+                currentPosition.totalCostCents -= Math.round(filledContracts * costPerContract);
+            }
             currentPosition.contracts -= filledContracts;
-            logTrade('sell_partial', { ...tradeInfo, orderId: order.order_id, filledContracts, remaining: currentPosition.contracts });
+            if (currentPosition.totalContracts) {
+                currentPosition.totalContracts -= filledContracts;
+            }
+            // Credit partial sell proceeds back to paper balance
+            const partialProceeds = filledContracts * (fills.avgPrice || currentPosition.entryPrice);
+            const env = kalshiAuth.getEnvironment();
+            paperBalances[env] = (paperBalances[env] || 0) + partialProceeds;
+            logTrade('sell_partial', { ...tradeInfo, orderId: order.order_id, filledContracts, remaining: currentPosition.contracts, proceeds: partialProceeds });
             dailyStats.tradeCount++;
             return;
         }
@@ -1383,9 +1418,15 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                 // Use the LARGER of: base sizing or loss-recovery sizing
                 const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
                 const recoverySizing = getFlipRecoveryContracts(liveSellLossCents, flipPrice, filledContracts);
-                const targetContracts = Math.max(baseSizing, recoverySizing);
+                const dynamicMaxFlip = getMaxContractsForRisk(flipPrice, 0.15);
+                const targetContracts = Math.min(Math.max(baseSizing, recoverySizing), dynamicMaxFlip);
+                const flipCost = targetContracts * flipPrice;
+                if (!checkPeriodExposure(soldPeriodKey, flipCost)) {
+                    console.log(`[trade-executor] Flip blocked: period exposure cap exceeded`);
+                } else {
                 const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
                 if (flipContracts > 0) {
+                    orderInFlight = true;
                     try {
                         const flipResult = await trading.placeOrder({
                             ticker: soldTicker, side: flipSide, action: 'buy', count: flipContracts,
@@ -1430,9 +1471,12 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                     } catch (flipErr) {
                         console.error(`[trade-executor] Flip buy failed:`, flipErr.message);
                         logTrade('flip_error', { ticker: soldTicker, side: flipSide, error: flipErr.message });
+                    } finally {
+                        orderInFlight = false;
                     }
                 }
             }
+            } // close period exposure check else
         } else if (isConfidentFlip && flippedThisPeriod) {
             console.log(`[trade-executor] FLIP BLOCKED (live): already flipped once this cycle — not flipping again`);
             setThought('skip', 'Flip blocked — already flipped once this cycle');
@@ -1453,9 +1497,13 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 // ═══════════════════════════════════════════════════════════════
 
 function onPeriodEnd(gradeResult) {
+    if (!gradeResult || !gradeResult.periodKey || !gradeResult.actualDirection) {
+        console.error('[trade-executor] onPeriodEnd: invalid gradeResult — missing required fields:', JSON.stringify(gradeResult));
+        return;
+    }
     // If currentPosition was cleared (e.g., by sync bug) but we know we entered this period,
     // still log a settlement so the frontend can show WIN/LOSS instead of PENDING
-    if (!currentPosition && gradeResult && gradeResult.periodKey && enteredPeriods[gradeResult.periodKey]) {
+    if (!currentPosition && enteredPeriods[gradeResult.periodKey]) {
         const ep = enteredPeriods[gradeResult.periodKey];
         console.log(`[trade-executor] onPeriodEnd: no currentPosition but enteredPeriods has ${gradeResult.periodKey} — logging settlement from entry record`);
         const positionWon = (ep.side === 'yes' && gradeResult.actualDirection === 'up') ||
@@ -1609,12 +1657,23 @@ function onPeriodEnd(gradeResult) {
     soldThisPeriod = null; // reset for new period
     flippedThisPeriod = false; // reset flip limit for new period
     syncZeroCount = 0;
+    // Reset period exposure tracking for new period
+    periodTotalCostCents = 0;
+    periodCostKey = null;
     // Clean up old period entries (keep last 5 for safety)
     const periodKeys = Object.keys(enteredPeriods);
     if (periodKeys.length > 5) {
         const sorted = periodKeys.sort();
         for (let i = 0; i < sorted.length - 5; i++) {
             delete enteredPeriods[sorted[i]];
+        }
+    }
+    // Clean up old fill failure tracking (keep only current/recent periods)
+    const ffKeys = Object.keys(fillFailedPeriods);
+    if (ffKeys.length > 5) {
+        const ffSorted = ffKeys.sort();
+        for (let i = 0; i < ffSorted.length - 5; i++) {
+            delete fillFailedPeriods[ffSorted[i]];
         }
     }
 }
@@ -1773,6 +1832,8 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
 async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemaining, kalshiTicker, periodKey) {
     // Only allow late lock in final 1 minute — placing earlier risks losing everything
     if (minutesRemaining > 1.0) return;
+    // Safety: don't place orders too close to settlement (execution + fill risk)
+    if (minutesRemaining < 0.15) return; // ~9 seconds - not enough time to fill
     if (killSwitch) return;
 
     // Must have strong prediction data
@@ -2297,8 +2358,10 @@ async function syncPositionWithKalshi() {
             console.log(`[trade-executor] Position sync: Kalshi reports 0 for ${currentPosition.ticker} (zero count: ${syncZeroCount}/3)`);
             if (syncZeroCount >= 3 && positionAge > 120000) {
                 console.log(`[trade-executor] Position sync: confirmed 0 contracts after ${syncZeroCount} checks — clearing position`);
+                const clearedPeriodKey = currentPosition.periodKey;
                 currentPosition = null;
                 syncZeroCount = 0;
+                if (clearedPeriodKey) delete enteredPeriods[clearedPeriodKey]; // Allow re-entry
                 persistPosition();
             }
         }
@@ -2308,8 +2371,10 @@ async function syncPositionWithKalshi() {
             syncZeroCount++;
             if (syncZeroCount >= 3) {
                 console.log(`[trade-executor] Position sync: 404 for ${currentPosition?.ticker} after ${syncZeroCount} checks — clearing position`);
+                const clearedPeriodKey = currentPosition?.periodKey;
                 currentPosition = null;
                 syncZeroCount = 0;
+                if (clearedPeriodKey) delete enteredPeriods[clearedPeriodKey]; // Allow re-entry
                 persistPosition();
             }
         }
@@ -2343,7 +2408,7 @@ function getStatus() {
                 ticker: currentPosition.ticker,
                 side: currentPosition.side,
                 contracts: totalContracts,              // always show total position size
-                entryPrice: Math.round(totalCost / totalContracts), // weighted average entry
+                entryPrice: totalContracts > 0 ? Math.round(totalCost / totalContracts) : 0, // weighted average entry
                 periodKey: currentPosition.periodKey,
                 holdingSeconds: Math.round((Date.now() - currentPosition.entryTime) / 1000),
                 totalCostCents: totalCost,
@@ -2369,6 +2434,7 @@ function getStatus() {
 // ═══════════════════════════════════════════════════════════════
 
 async function pressBet(addContracts) {
+    if (killSwitch) return { ok: false, reason: 'Kill switch is active — trading halted' };
     if (!currentPosition) {
         return { ok: false, reason: 'No open position to press' };
     }
@@ -2398,6 +2464,7 @@ async function pressBet(addContracts) {
         const newTotal = currentContracts + cappedAdd;
         currentPosition.totalCostCents = oldCost + addCost;
         currentPosition.totalContracts = newTotal;
+        currentPosition.contracts = newTotal;
         const env = getEnvironment();
         paperBalances[env] = (paperBalances[env] || 0) - addCost;
         setThought('bought', `Pressed +${cappedAdd}x ${side.toUpperCase()} @ ${limitPrice}c (now ${newTotal}x)`, { contracts: newTotal });
@@ -2468,6 +2535,7 @@ async function pressBet(addContracts) {
             const newTotal = currentContracts + filledContracts;
             currentPosition.totalCostCents = oldCost + addCost;
             currentPosition.totalContracts = newTotal;
+            currentPosition.contracts = newTotal;
             setThought('bought', `Pressed +${filledContracts}x ${side.toUpperCase()} @ ${limitPrice}c (now ${newTotal}x)`, { contracts: newTotal });
             logTrade('buy', { ...tradeInfo, limitPrice, orderId: order.order_id, fillStatus: order.status, filledContracts, attempt });
             dailyStats.tradeCount++;
@@ -2487,6 +2555,7 @@ async function pressBet(addContracts) {
 // ═══════════════════════════════════════════════════════════════
 
 async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideContracts) {
+    if (killSwitch) return { ok: false, reason: 'Kill switch is active — trading halted' };
     if (!prediction || !kalshiTicker || strike === null) {
         return { ok: false, reason: 'Missing prediction, ticker, or strike data' };
     }

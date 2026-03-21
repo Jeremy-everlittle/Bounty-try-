@@ -994,6 +994,9 @@ function computeEthLeadLag(btcPrices, ethPriceHistory) {
         return { signal: 0, ethMom: 0, btcMom: 0 };
     }
     const n = ethPriceHistory.length;
+    if (ethPriceHistory[n-3] <= 0 || btcPrices[btcPrices.length-3] <= 0) {
+        return { signal: 0, ethMom: 0, btcMom: 0 };
+    }
     const ethMom = (ethPriceHistory[n-1] - ethPriceHistory[n-3]) / ethPriceHistory[n-3];
     const bn = btcPrices.length;
     const btcMom = (btcPrices[bn-1] - btcPrices[bn-3]) / btcPrices[bn-3];
@@ -1454,7 +1457,7 @@ function detectMomentumExhaustion(prices, history) {
 // ── Detect choppy/range-bound market (ADX-like) ──
 function detectChoppiness(prices) {
     const n = prices.length;
-    if (n < 15) return { choppy: false, adx: 50, choppiness: 0.5 };
+    if (n < 15) return { choppy: false, adx: 50, choppiness: 0.5, plusDI: 0, minusDI: 0, trending: false };
 
     // Simplified ADX: directional movement index
     const lookback = Math.min(14, n - 1);
@@ -1524,7 +1527,7 @@ function updateProbTracker(periodKey, probForBet, currentPrice, betIsUp, strike)
     }
 
     const h = probTracker.history;
-    if (h.length < 3) return { velocity: 0, acceleration: 0, peakDrawdown: 0, profitAtRisk: 0, trend: 'stable' };
+    if (h.length < 3) return { velocity: 0, acceleration: 0, peakDrawdown: 0, profitAtRisk: 0, trend: 'stable', rawVelocity: 0 };
 
     // Probability velocity (EMA-smoothed first derivative)
     const dt = (h[h.length-1].timestamp - h[h.length-2].timestamp) / 1000; // seconds
@@ -2035,11 +2038,12 @@ function predictPrice(marketData, minutesAhead, strike) {
         if (liq.totalLiqVol > 2000000) liqVolAdjust = 1.30; // >$2M
     }
 
-    const microVolAdjust = spreadVolAdjust * vpinVolAdjust * lambdaVolAdjust * oiSignal.volMultiplier * liqVolAdjust;
+    const rawMicroVolAdjust = spreadVolAdjust * vpinVolAdjust * lambdaVolAdjust * oiSignal.volMultiplier * liqVolAdjust;
+    const microVolAdjust = Math.max(0.5, Math.min(2.0, rawMicroVolAdjust)); // cap to prevent signal saturation during extreme conditions
     const adjustedRemainingVol = remainingVol * microVolAdjust;
     const driftWithEarlyBias = minutesIntoPeriod <= 3 ? rawDrift * 0.75 + earlyMomentumSignal * 0.25 : rawDrift;
     const adjustedDrift = driftWithEarlyBias * driftMultiplier;
-    const driftZShift = adjustedRemainingVol > 0 ? adjustedDrift / adjustedRemainingVol : 0;
+    const driftZShift = adjustedRemainingVol > 0 && isFinite(adjustedDrift) ? adjustedDrift / adjustedRemainingVol : 0;
 
     // SIGNAL 5: RSI — research shows RSI works as MOMENTUM indicator for BTC,
     // not mean-reversion. High RSI = bullish continuation; low RSI = bearish.
@@ -2207,7 +2211,8 @@ function predictPrice(marketData, minutesAhead, strike) {
     const liqComposite = liqSignal * immediateBoosted;
 
     // GROUP 5: Exhaustion (contrarian, stronger mid/late period)
-    const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * (2.0 - regM.momentum);
+    // Exhaustion is most valuable during trends (reversal signal) and least in mean-reversion
+    const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * regM.momentum;
 
     // GROUP 6: ETH confirmation (small, only when active)
     const ethComposite = ethLL.signal * immediateBoosted * regM.momentum;
@@ -2417,7 +2422,7 @@ function predictPrice(marketData, minutesAhead, strike) {
 // ═══════════════════════════════════════════════════════════════
 
 function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemaining) {
-    if (!origPred || !updPred || strike === null) return null;
+    if (!origPred || !updPred || strike === null || strike === 0) return null;
     const reasons = [];
     const betIsUp = origPred.predictedPrice >= strike;
     const betDirection = betIsUp ? 'UP' : 'DOWN';
@@ -2437,8 +2442,8 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const probVel = updateProbTracker(periodKey, probForBet, currentPrice, betIsUp, strike);
 
     // Get momentum exhaustion and choppiness from updated prediction
-    const exhaustion = updPred._exhaustion || { exhaustion: 0, type: 'none' };
-    const choppiness = updPred._choppiness || { choppy: false, adx: 50 };
+    const exhaustion = updPred._exhaustion || { exhaustion: 0, type: 'none', roc: 0, acceleration: 0 };
+    const choppiness = updPred._choppiness || { choppy: false, adx: 50, choppiness: 0.5, plusDI: 0, minusDI: 0, trending: false };
 
     // Remaining vol estimate for recovery analysis
     const remainingVol = updPred._remainingVol || 0.002;

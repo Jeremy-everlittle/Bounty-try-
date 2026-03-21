@@ -1099,7 +1099,9 @@ async function fetchAllData() {
                     liquidations: state.liquidations,
                     fearGreed: state.fearGreed,
                     macroEvent: state.macroEvent,
-                    longShortRatio: state.longShortRatio
+                    longShortRatio: state.longShortRatio,
+                    ethPrice: state.ethPrice,
+                    openInterest: state.openInterest,
                 };
                 const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike, periodKey);
                 // Recompute bet quality based on updated prediction
@@ -1272,6 +1274,7 @@ async function fetchAllData() {
             history: state.history,
             lastUpdate: state.lastUpdate,
             periodKey: state.periodKey,
+            staleData: state._staleData || false,
             // Prediction data (from server!)
             prediction: store.getCurrentPeriod(),
             predictionLog: store.getPredictionLog(),
@@ -1312,10 +1315,20 @@ async function fetchAllData() {
 // ═══════════════════════════════════════════════════════════════
 
 function broadcast(data) {
-    const msg = JSON.stringify(data);
+    let msg;
+    try {
+        msg = JSON.stringify(data);
+    } catch (e) {
+        console.error('[broadcast] JSON.stringify failed:', e.message);
+        return;
+    }
     for (const client of wss.clients) {
         if (client.readyState === 1) { // WebSocket.OPEN
-            client.send(msg);
+            try {
+                client.send(msg);
+            } catch (e) {
+                console.error('[broadcast] send failed:', e.message);
+            }
         }
     }
 }
@@ -1371,6 +1384,8 @@ wss.on('connection', (ws, req) => {
                 console.log('Client requested history clear');
                 store.clearPredictionLog();
                 tradeExecutor.clearTradeLog();
+            } else if (msg.type === 'ping') {
+                try { ws.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
             }
         } catch (e) {}
     });
@@ -1533,8 +1548,8 @@ app.get('/api/trading/analytics', async (req, res) => {
 app.get('/api/db/dump', async (req, res) => {
     const db = require('./db');
     try {
-        const days = parseInt(req.query.days || '7', 10);
-        const tradeLimit = parseInt(req.query.trades || '200', 10);
+        const days = Math.min(365, Math.max(1, parseInt(req.query.days || '7', 10) || 7));
+        const tradeLimit = Math.min(5000, Math.max(1, parseInt(req.query.trades || '200', 10) || 200));
 
         const [dailyStats, recentTrades, winByStrategy, winByDirection, winByHour, cumulativePnl, totalTrades] = await Promise.all([
             db.getDailyStatsHistory(days),
@@ -1745,11 +1760,12 @@ app.post('/api/trading/config', (req, res) => {
     }
     const cfg = tradeExecutor.config;
     const allowed = ['baseContracts', 'maxPositionContracts', 'convictionMaxContracts', 'maxDailyLossCents', 'maxDailyTrades'];
+    const bounds = { baseContracts: 500, maxPositionContracts: 500, convictionMaxContracts: 500, maxDailyLossCents: 1000000, maxDailyTrades: 1000 };
     const applied = {};
     for (const key of allowed) {
         if (updates[key] !== undefined) {
             const val = parseInt(updates[key], 10);
-            if (!isNaN(val) && val > 0) {
+            if (!isNaN(val) && val > 0 && val <= (bounds[key] || 1000)) {
                 cfg[key] = val;
                 applied[key] = val;
             }
@@ -1981,7 +1997,11 @@ server.listen(PORT, () => {
 
     // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
     async function fetchLoop() {
-        await fetchAllData();
+        try {
+            await fetchAllData();
+        } catch (e) {
+            console.error('[server] fetchLoop error (will retry next cycle):', e.message);
+        }
         setTimeout(fetchLoop, 5000);
     }
     fetchLoop();
