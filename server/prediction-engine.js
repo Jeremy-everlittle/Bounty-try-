@@ -2211,7 +2211,8 @@ function predictPrice(marketData, minutesAhead, strike) {
     const liqComposite = liqSignal * immediateBoosted;
 
     // GROUP 5: Exhaustion (contrarian, stronger mid/late period)
-    const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * (2.0 - regM.momentum);
+    // Exhaustion is most valuable during trends (reversal signal) and least in mean-reversion
+    const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * regM.momentum;
 
     // GROUP 6: ETH confirmation (small, only when active)
     const ethComposite = ethLL.signal * immediateBoosted * regM.momentum;
