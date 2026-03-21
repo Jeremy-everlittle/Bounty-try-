@@ -44,6 +44,12 @@ function setEnvironment(env) {
     // Clear cached credentials so they are re-read for the new environment
     _privateKey = null;
     _apiKeyId = null;
+    // Log credential availability for the new environment
+    const keyEnv = env === 'demo' ? 'KALSHI_DEMO_API_KEY' : 'KALSHI_API_KEY';
+    const pkEnv = env === 'demo' ? 'KALSHI_DEMO_PRIVATE_KEY' : 'KALSHI_PRIVATE_KEY';
+    const keyId = process.env[keyEnv] || '';
+    const pk = process.env[pkEnv] || '';
+    console.log(`[kalshi-auth] ${env} credentials: API_KEY=${keyId ? keyId.substring(0, 8) + '...' : 'NOT SET'}, PRIVATE_KEY=${pk ? pk.length + ' chars' : 'NOT SET'}`);
 }
 
 function getBaseUrl() {
@@ -66,33 +72,76 @@ function getApiKeyId() {
     return _apiKeyId;
 }
 
+/**
+ * Normalize a PEM key string — handles various env-var formats:
+ *   1. Proper PEM with real newlines (already correct)
+ *   2. PEM with literal \n (common in env vars)
+ *   3. Raw base64 without PEM headers (just the key body)
+ *   4. PEM with headers but newlines stripped (one long line)
+ */
+function normalizePem(raw) {
+    if (!raw || !raw.trim()) return null;
+
+    // Step 1: replace literal \n with real newlines
+    let pem = raw.replace(/\\n/g, '\n').trim();
+
+    // Step 2: check if PEM headers are present
+    const hasHeader = pem.includes('-----BEGIN');
+    const hasFooter = pem.includes('-----END');
+
+    if (hasHeader && hasFooter) {
+        // Headers present — check if body has proper line breaks
+        // Extract body between headers
+        const bodyMatch = pem.match(/-----BEGIN[^-]+-----\s*([\s\S]*?)\s*-----END[^-]+-----/);
+        if (bodyMatch) {
+            let body = bodyMatch[1].replace(/\s+/g, ''); // strip all whitespace
+            // Re-wrap at 64 chars per line (PEM standard)
+            body = body.match(/.{1,64}/g).join('\n');
+            const headerLine = pem.match(/-----BEGIN[^-]+-----/)[0];
+            const footerLine = pem.match(/-----END[^-]+-----/)[0];
+            pem = `${headerLine}\n${body}\n${footerLine}\n`;
+        }
+        return pem;
+    }
+
+    // No PEM headers — treat as raw base64 body
+    let body = pem.replace(/\s+/g, ''); // strip all whitespace
+    // Re-wrap at 64 chars
+    body = body.match(/.{1,64}/g).join('\n');
+    return `-----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY-----\n`;
+}
+
 function getPrivateKey() {
     if (_privateKey) return _privateKey;
 
+    let rawKey = null;
     if (_currentEnv === 'demo') {
-        // Demo: inline PEM only
-        if (process.env.KALSHI_DEMO_PRIVATE_KEY) {
-            _privateKey = process.env.KALSHI_DEMO_PRIVATE_KEY.replace(/\\n/g, '\n');
-            return _privateKey;
-        }
-        return null;
+        rawKey = process.env.KALSHI_DEMO_PRIVATE_KEY;
+    } else {
+        rawKey = process.env.KALSHI_PRIVATE_KEY;
     }
 
-    // Production: try inline PEM first
-    if (process.env.KALSHI_PRIVATE_KEY) {
-        _privateKey = process.env.KALSHI_PRIVATE_KEY.replace(/\\n/g, '\n');
-        return _privateKey;
+    if (rawKey) {
+        _privateKey = normalizePem(rawKey);
+        if (_privateKey) {
+            // Log key format for debugging (safe — only shows structure, not content)
+            const lines = _privateKey.split('\n').filter(l => l.trim());
+            console.log(`[kalshi-auth] Private key loaded (${_currentEnv}): ${lines.length} lines, starts with ${lines[0].substring(0, 20)}...`);
+            return _privateKey;
+        }
     }
 
     // Production: try file path
-    const keyPath = process.env.KALSHI_PRIVATE_KEY_PATH;
-    if (keyPath) {
-        const absPath = path.resolve(keyPath);
-        if (fs.existsSync(absPath)) {
-            _privateKey = fs.readFileSync(absPath, 'utf8');
-            return _privateKey;
+    if (_currentEnv !== 'demo') {
+        const keyPath = process.env.KALSHI_PRIVATE_KEY_PATH;
+        if (keyPath) {
+            const absPath = path.resolve(keyPath);
+            if (fs.existsSync(absPath)) {
+                _privateKey = fs.readFileSync(absPath, 'utf8');
+                return _privateKey;
+            }
+            console.warn(`[kalshi-auth] Private key file not found: ${absPath}`);
         }
-        console.warn(`[kalshi-auth] Private key file not found: ${absPath}`);
     }
 
     return null;
@@ -111,12 +160,17 @@ function signPssText(message) {
     const privateKey = getPrivateKey();
     if (!privateKey) throw new Error('Kalshi private key not configured');
 
-    const signature = crypto.sign('sha256', Buffer.from(message), {
-        key: privateKey,
-        padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
-        saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
-    });
-    return signature.toString('base64');
+    try {
+        const signature = crypto.sign('sha256', Buffer.from(message), {
+            key: privateKey,
+            padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+            saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
+        });
+        return signature.toString('base64');
+    } catch (e) {
+        console.error(`[kalshi-auth] RSA signing failed: ${e.message} — key may be malformed`);
+        throw e;
+    }
 }
 
 /**
