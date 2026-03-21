@@ -1476,9 +1476,13 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 // ═══════════════════════════════════════════════════════════════
 
 function onPeriodEnd(gradeResult) {
+    if (!gradeResult || !gradeResult.periodKey || !gradeResult.actualDirection) {
+        console.error('[trade-executor] onPeriodEnd: invalid gradeResult — missing required fields:', JSON.stringify(gradeResult));
+        return;
+    }
     // If currentPosition was cleared (e.g., by sync bug) but we know we entered this period,
     // still log a settlement so the frontend can show WIN/LOSS instead of PENDING
-    if (!currentPosition && gradeResult && gradeResult.periodKey && enteredPeriods[gradeResult.periodKey]) {
+    if (!currentPosition && enteredPeriods[gradeResult.periodKey]) {
         const ep = enteredPeriods[gradeResult.periodKey];
         console.log(`[trade-executor] onPeriodEnd: no currentPosition but enteredPeriods has ${gradeResult.periodKey} — logging settlement from entry record`);
         const positionWon = (ep.side === 'yes' && gradeResult.actualDirection === 'up') ||
