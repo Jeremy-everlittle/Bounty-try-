@@ -1317,7 +1317,7 @@ class OnlineRLS {
         for (let i = 0; i < d; i++) {
             const variance = this.featureCount > 1
                 ? this.featureM2[i] / (this.featureCount - 1) : 1;
-            const std = Math.sqrt(variance) || 1;
+            const std = Math.sqrt(Math.max(variance, 1e-10));
             normed[i] = (features[i] - this.featureMean[i]) / std;
         }
         return normed;
