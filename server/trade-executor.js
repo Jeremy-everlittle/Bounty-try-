@@ -75,7 +75,7 @@ const config = {
     paperMode: (process.env.PAPER_MODE || 'true').toLowerCase() === 'true',
     baseContracts: parseInt(process.env.BASE_CONTRACTS || '10', 10), // percentage of balance to bet (e.g. 10 = 10%)
     maxPositionContracts: parseInt(process.env.MAX_POSITION_CONTRACTS || '50', 10),
-    convictionMaxContracts: parseInt(process.env.CONVICTION_MAX_CONTRACTS || '150', 10), // higher cap for high-conviction bets
+    convictionMaxContracts: parseInt(process.env.CONVICTION_MAX_CONTRACTS || '50', 10), // hard safety cap for high-conviction bets
     maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '10000', 10),   // $100
     maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '200', 10),
 };
@@ -97,6 +97,8 @@ let soldThisPeriod = null;    // Track sold positions for re-entry: { periodKey,
 let flippedThisPeriod = false; // Track if we already flipped this cycle (limit to 1 flip)
 let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
 let cachedBalance = null;     // { balanceCents, lastFetched }
+let periodTotalCostCents = 0; // Track total cost spent in current period
+let periodCostKey = null;     // Period key for cost tracking
 const BALANCE_CACHE_MS = 30000; // refresh balance every 30s
 
 // ── Paper balance tracking (separate per environment) ──
@@ -183,6 +185,16 @@ function getBaseContractCount(entryPriceCents) {
     return Math.max(1, contracts);
 }
 
+// ── Bankroll-relative max contract sizing ──
+// Computes max contracts based on a percentage of bankroll, preventing
+// catastrophically oversized positions regardless of static config caps.
+function getMaxContractsForRisk(entryPriceCents, maxRiskPct) {
+    const env = getEnvironment();
+    const balanceCents = config.paperMode ? (paperBalances[env] || 5000) : (cachedBalance?.balanceCents || 5000);
+    const maxRiskCents = balanceCents * maxRiskPct;
+    return Math.max(1, Math.floor(maxRiskCents / entryPriceCents));
+}
+
 // ── Loss-recovery flip sizing ──
 // When flipping, calculate how many contracts are needed to recover
 // the loss from selling the original position, plus a profit margin.
@@ -192,13 +204,23 @@ function getBaseContractCount(entryPriceCents) {
 // We take the MAX of this and the normal base sizing.
 const FLIP_MIN_PROFIT_PCT = 0.20; // require at least 20% profit on top of loss recovery
 
-function getFlipRecoveryContracts(lossCents, flipPriceCents) {
+function getFlipRecoveryContracts(lossCents, flipPriceCents, originalContracts) {
     if (!lossCents || lossCents <= 0) return 0; // no loss to recover
     const profitPerContract = 100 - flipPriceCents; // cents profit per contract if correct
     if (profitPerContract <= 0) return 0; // can't profit at this price
 
     const minProfitCents = Math.max(lossCents * FLIP_MIN_PROFIT_PCT, 10); // at least 20% of loss or 10¢
-    const neededContracts = Math.ceil((lossCents + minProfitCents) / profitPerContract);
+    let neededContracts = Math.ceil((lossCents + minProfitCents) / profitPerContract);
+
+    // Cap flip at 1.5x original position - no martingale recovery
+    if (originalContracts && originalContracts > 0) {
+        const maxFlipContracts = Math.ceil(originalContracts * 1.5);
+        if (neededContracts > maxFlipContracts) {
+            console.log(`[trade-executor] Flip recovery: capping ${neededContracts} → ${maxFlipContracts} contracts (1.5x original ${originalContracts})`);
+            neededContracts = Math.min(neededContracts, maxFlipContracts);
+        }
+    }
+
     console.log(`[trade-executor] Flip recovery: loss=$${(lossCents/100).toFixed(2)}, flipPrice=${flipPriceCents}c, profit/contract=${profitPerContract}c, need ${neededContracts} contracts to recover $${((lossCents + minProfitCents)/100).toFixed(2)}`);
     return neededContracts;
 }
@@ -441,6 +463,31 @@ async function canTrade(periodKey) {
     return { ok: true };
 }
 
+// Check if adding proposedCost would exceed period exposure cap (15% of bankroll)
+function checkPeriodExposure(periodKey, proposedCost) {
+    // Reset tracking when period changes
+    if (periodCostKey !== periodKey) {
+        periodTotalCostCents = 0;
+        periodCostKey = periodKey;
+    }
+    const env = getEnvironment();
+    const balanceCents = config.paperMode ? (paperBalances[env] || 5000) : (cachedBalance?.balanceCents || 5000);
+    const maxPeriodExposure = balanceCents * 0.15; // max 15% of bankroll per period
+    if (periodTotalCostCents + proposedCost > maxPeriodExposure) {
+        console.log(`[trade-executor] Period exposure cap reached: ${periodTotalCostCents}c + ${proposedCost}c > ${maxPeriodExposure.toFixed(0)}c (15% of $${(balanceCents/100).toFixed(2)})`);
+        return false;
+    }
+    return true;
+}
+
+function trackPeriodCost(periodKey, cost) {
+    if (periodCostKey !== periodKey) {
+        periodTotalCostCents = 0;
+        periodCostKey = periodKey;
+    }
+    periodTotalCostCents += cost;
+}
+
 function markFillFailed(periodKey) {
     if (!fillFailedPeriods[periodKey]) {
         fillFailedPeriods[periodKey] = { count: 0, lastAttempt: 0 };
@@ -608,7 +655,7 @@ async function getMarketSellPrice(ticker, side, minutesRemaining) {
     }
 }
 
-async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaining) {
+async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaining, passiveMode = false) {
     // Guard against NaN/undefined — fall back to 50c (fair value)
     if (theoreticalPrice === undefined || theoreticalPrice === null || isNaN(theoreticalPrice) || !isFinite(theoreticalPrice)) {
         console.warn(`[trade-executor] getAggressivePrice received invalid theoreticalPrice: ${theoreticalPrice} — defaulting to 50c`);
@@ -619,8 +666,10 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
     // Paper and live both use real orderbook for pricing
 
     // Determine max slippage based on time remaining
-    // Increased from 1/3/5 — Kalshi BTC markets have wider spreads
-    const maxSlippage = (minutesRemaining || 15) <= 3 ? 8
+    // In passive mode (minutesRemaining > 7), post at theoretical price (no slippage)
+    // to act as a maker and earn the spread. If no fill, next cycle retries.
+    const maxSlippage = passiveMode ? 0
+                      : (minutesRemaining || 15) <= 3 ? 8
                       : (minutesRemaining || 15) <= 7 ? 5
                       : 3; // early period: still willing to cross a typical spread
 
@@ -885,7 +934,10 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     }
 
     // Fetch orderbook once, use for both market ask (display) and limit price (execution)
-    let limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, minutesRemaining);
+    // Use passive mode (post at theoretical, no slippage) when >7 min remaining
+    // to earn the spread as a maker. The waitForFill timeout handles non-fills.
+    const passiveEntry = minutesRemaining > 7 && !isLockTier;
+    let limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, minutesRemaining, passiveEntry);
     // Paper mode safety net: if getAggressivePrice still returned null, use theoretical price
     // Paper trades don't hit the exchange, so "no liquidity" should never block them
     if (limitPrice === null && config.paperMode) {
@@ -923,14 +975,39 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         return;
     }
 
+    // ── Spread awareness: don't enter if spread exceeds edge ──
+    {
+        const spreadAsk = await getMarketPrice(kalshiTicker, side, minutesRemaining);
+        const spreadBid = await getMarketSellPrice(kalshiTicker, side, minutesRemaining);
+        if (spreadAsk && spreadBid) {
+            const spreadCents = spreadAsk - spreadBid;
+            const edgeCents = Math.round(betQuality.edge * 100);
+            if (spreadCents > edgeCents * 2 && !isLockTier) {
+                console.log(`[trade-executor] Spread ${spreadCents}c > 2x edge ${edgeCents}c — skipping entry`);
+                setThought('skip', `Spread ${spreadCents}c too wide for ${edgeCents}c edge`);
+                return;
+            }
+        }
+    }
+
     // ── Dynamic contract sizing: baseContracts% of balance ÷ entry price ──
     const baseCount = getBaseContractCount(limitPrice);
     const isHighConviction = betQuality.betSize > 1.0;
-    const positionCap = isHighConviction ? config.convictionMaxContracts : config.maxPositionContracts;
+    const dynamicMaxEntry = getMaxContractsForRisk(limitPrice, 0.15); // max 15% of bankroll
+    const positionCap = isHighConviction
+        ? Math.min(dynamicMaxEntry, config.convictionMaxContracts)
+        : Math.min(dynamicMaxEntry, config.maxPositionContracts);
     const contracts = Math.max(1, Math.min(
         positionCap,
         Math.round(betQuality.betSize * baseCount)
     ));
+
+    // ── Per-period exposure cap: don't exceed 15% of bankroll per period ──
+    const proposedCost = contracts * limitPrice;
+    if (!checkPeriodExposure(periodKey, proposedCost)) {
+        setThought('skip', 'Period exposure cap reached (15% of bankroll)');
+        return;
+    }
 
     // ── DB: log bet decision ──
     db.saveDecisionLog({
@@ -988,6 +1065,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         logTrade('buy', tradeInfo);
         decisionLog.logTradeExecution({ ...tradeInfo, strategy: 'initial', currentPrice: prediction.predictedPrice, strike, probability: (probForBet * 100).toFixed(1) + '%' });
         dailyStats.tradeCount++;
+        trackPeriodCost(periodKey, costCents);
         return;
     }
 
@@ -1064,6 +1142,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         syncZeroCount = 0; // reset sync counter on new entry
         logTrade('buy', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts, requestedContracts: cappedContracts });
         dailyStats.tradeCount++;
+        trackPeriodCost(periodKey, filledContracts * limitPrice);
         console.log(`[trade-executor] LIVE BUY: ${filledContracts}x ${side.toUpperCase()} on ${kalshiTicker} — order ${order.order_id} (${order.status})`);
 
     } catch (err) {
@@ -1189,7 +1268,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             if (flipPrice !== null) {
                 // Use the LARGER of: base sizing or loss-recovery sizing
                 const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
-                const recoverySizing = getFlipRecoveryContracts(sellLossCents, flipPrice);
+                const recoverySizing = getFlipRecoveryContracts(sellLossCents, flipPrice, sellContracts);
                 const targetContracts = Math.max(baseSizing, recoverySizing);
                 const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
                 if (flipContracts > 0) {
@@ -1303,7 +1382,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             if (flipPrice !== null) {
                 // Use the LARGER of: base sizing or loss-recovery sizing
                 const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
-                const recoverySizing = getFlipRecoveryContracts(liveSellLossCents, flipPrice);
+                const recoverySizing = getFlipRecoveryContracts(liveSellLossCents, flipPrice, filledContracts);
                 const targetContracts = Math.max(baseSizing, recoverySizing);
                 const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
                 if (flipContracts > 0) {
@@ -1582,7 +1661,8 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
 
     // How many more contracts can we add?
     const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
-    const dipCap = probForBet >= 0.75 ? config.convictionMaxContracts : config.maxPositionContracts;
+    const dynamicMaxDip = getMaxContractsForRisk(currentLimitPrice, 0.15);
+    const dipCap = probForBet >= 0.75 ? Math.min(dynamicMaxDip, config.convictionMaxContracts) : Math.min(dynamicMaxDip, config.maxPositionContracts);
     const maxAdd = dipCap - currentContracts;
     if (maxAdd <= 0) return; // already at max
 
@@ -1740,7 +1820,9 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
         if (currentPosition.side === lockSide) {
             // Already on the right side — add up to max
             const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
-            const addContracts = config.convictionMaxContracts - currentContracts; // late-lock = high conviction
+            const dynamicMax = getMaxContractsForRisk(limitPrice, 0.15); // max 15% of bankroll
+            const cappedMax = Math.min(dynamicMax, config.convictionMaxContracts);
+            const addContracts = cappedMax - currentContracts; // late-lock = high conviction
             if (addContracts <= 0) return; // already maxed out
             // Respect fill failure cooldowns
             const addCheck = await canTrade(periodKey);
@@ -1758,7 +1840,8 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     const check = await canTrade(periodKey);
     if (!check.ok) return;
 
-    const contracts = config.convictionMaxContracts; // late-lock = high conviction, go big
+    const dynamicMaxFresh = getMaxContractsForRisk(limitPrice, 0.15); // max 15% of bankroll
+    const contracts = Math.min(dynamicMaxFresh, config.convictionMaxContracts); // late-lock = high conviction, go big
     await executeLockEntry(lockSide, contracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock');
 }
 
@@ -1928,7 +2011,8 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
 
     // Re-enter at near-full size (was 60%, now 85%) — use conviction cap if high conviction
     const limitPrice = Math.max(5, Math.min(95, Math.round(probForBet * 100)));
-    const reEntryCap = bq.betSize > 1.0 ? config.convictionMaxContracts : config.maxPositionContracts;
+    const dynamicMaxReentry = getMaxContractsForRisk(limitPrice, 0.15);
+    const reEntryCap = bq.betSize > 1.0 ? Math.min(dynamicMaxReentry, config.convictionMaxContracts) : Math.min(dynamicMaxReentry, config.maxPositionContracts);
     const contracts = Math.max(1, Math.min(
         reEntryCap,
         Math.round(bq.betSize * getBaseContractCount(limitPrice) * 0.85)
@@ -2040,15 +2124,20 @@ function setKillSwitch(active) {
     killSwitch = active;
     console.log(`[trade-executor] Kill switch ${active ? 'ACTIVATED' : 'deactivated'}`);
     if (active && currentPosition && !config.paperMode) {
-        // Try to sell the current position immediately
-        trading.placeOrder({
-            ticker: currentPosition.ticker,
-            side: currentPosition.side,
-            action: 'sell',
-            count: currentPosition.contracts,
-            yesPrice: currentPosition.side === 'yes' ? 1 : undefined,
-            noPrice: currentPosition.side === 'no' ? 1 : undefined,
-            timeInForce: 'fill_or_kill',
+        // Try to sell the current position immediately at market bid (not 1 cent)
+        const emergencyPos = currentPosition; // capture before async
+        getMarketSellPrice(emergencyPos.ticker, emergencyPos.side, 0).then(marketBid => {
+            const emergencySellPrice = marketBid || 1;
+            console.log(`[trade-executor] Emergency sell: using price ${emergencySellPrice}c (market bid: ${marketBid || 'unavailable'})`);
+            return trading.placeOrder({
+                ticker: emergencyPos.ticker,
+                side: emergencyPos.side,
+                action: 'sell',
+                count: emergencyPos.contracts,
+                yesPrice: emergencyPos.side === 'yes' ? emergencySellPrice : undefined,
+                noPrice: emergencyPos.side === 'no' ? emergencySellPrice : undefined,
+                timeInForce: 'fill_or_kill',
+            });
         }).then(() => {
             console.log('[trade-executor] Emergency sell executed');
             currentPosition = null;

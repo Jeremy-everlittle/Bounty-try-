@@ -24,9 +24,10 @@ async function init() {
     pool = new Pool({
         connectionString,
         ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
-        max: 10,
+        max: 5,
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 10000,
+        statement_timeout: 10000,
     });
 
     // Test connection
@@ -412,6 +413,10 @@ async function init() {
 
         CREATE INDEX IF NOT EXISTS idx_cycle_data_period ON cycle_data(period_key);
         CREATE INDEX IF NOT EXISTS idx_cycle_data_time ON cycle_data(timestamp);
+
+        CREATE INDEX IF NOT EXISTS idx_cycle_data_period_time ON cycle_data(period_key, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_price_snap_period_created ON price_snapshots(period_key, created_at);
+        CREATE INDEX IF NOT EXISTS idx_ob_snap_period_created ON orderbook_snapshots(period_key, created_at);
     `);
 
     ready = true;
@@ -1368,12 +1373,12 @@ async function saveCycleData(data) {
             data.periodKey, data.minutesRemaining,
             data.btcPrice, data.strike, data.distanceFromStrike, data.distancePct,
             data.kalshiYesBid, data.kalshiYesAsk, data.kalshiNoBid, data.kalshiNoAsk, data.kalshiSpread,
-            JSON.stringify(data.kalshiYesBids || null), JSON.stringify(data.kalshiNoBids || null),
+            data.kalshiYesBids ? JSON.stringify(data.kalshiYesBids) : null, data.kalshiNoBids ? JSON.stringify(data.kalshiNoBids) : null,
             data.predictedPrice, data.probability, data.confidence, data.direction,
-            JSON.stringify(data.rawSignals || null),
-            JSON.stringify(data.marketContext || null),
-            JSON.stringify(data.betQuality || null),
-            JSON.stringify(data.sellSignal || null)
+            data.rawSignals ? JSON.stringify(data.rawSignals) : null,
+            data.marketContext ? JSON.stringify(data.marketContext) : null,
+            data.betQuality ? JSON.stringify(data.betQuality) : null,
+            data.sellSignal ? JSON.stringify(data.sellSignal) : null
         ]);
     } catch (e) {
         console.error('[db] saveCycleData error:', e.message);
@@ -1408,6 +1413,36 @@ async function getRecentCycleData(limit = 100) {
     } catch (e) {
         console.error('[db] getRecentCycleData error:', e.message);
         return [];
+    }
+}
+
+async function runRetention() {
+    if (!ready) return;
+    try {
+        const results = [];
+        // High-frequency data: keep 7 days
+        const r1 = await pool.query(`DELETE FROM cycle_data WHERE timestamp < NOW() - INTERVAL '7 days'`);
+        results.push(`cycle_data: ${r1.rowCount} rows deleted`);
+
+        // Price snapshots: keep 14 days
+        const r2 = await pool.query(`DELETE FROM price_snapshots WHERE created_at < NOW() - INTERVAL '14 days'`);
+        results.push(`price_snapshots: ${r2.rowCount} rows deleted`);
+
+        // Orderbook snapshots: keep 14 days
+        const r3 = await pool.query(`DELETE FROM orderbook_snapshots WHERE created_at < NOW() - INTERVAL '14 days'`);
+        results.push(`orderbook_snapshots: ${r3.rowCount} rows deleted`);
+
+        // Market data: keep 30 days
+        const r4 = await pool.query(`DELETE FROM market_data_snapshots WHERE created_at < NOW() - INTERVAL '30 days'`);
+        results.push(`market_data_snapshots: ${r4.rowCount} rows deleted`);
+
+        // Prediction snapshots: keep 90 days
+        const r5 = await pool.query(`DELETE FROM prediction_snapshots WHERE created_at < NOW() - INTERVAL '90 days'`);
+        results.push(`prediction_snapshots: ${r5.rowCount} rows deleted`);
+
+        console.log(`[db] Retention cleanup: ${results.join(', ')}`);
+    } catch (e) {
+        console.error('[db] Retention error:', e.message);
     }
 }
 
@@ -1458,4 +1493,6 @@ module.exports = {
     saveCycleData,
     getCycleData,
     getRecentCycleData,
+    // Data retention
+    runRetention,
 };
