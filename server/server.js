@@ -695,7 +695,7 @@ function capturePriceSnapshot(periodKey, price, strike, minutesRemaining, histor
 let _lastPeriodicObTime = 0;
 async function capturePeriodicOrderbook(ticker, periodKey, minutesRemaining, btcPrice, strike) {
     const now = Date.now();
-    if (now - _lastPeriodicObTime < 30000) return; // max one per 30s
+    if (now - _lastPeriodicObTime < 10000) return; // max one per 10s (was 30s — need finer resolution for analysis)
     _lastPeriodicObTime = now;
 
     try {
