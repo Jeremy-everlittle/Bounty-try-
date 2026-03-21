@@ -495,7 +495,7 @@ async function fetchOrderbook(ticker) {
     const { getBaseUrl } = require('./kalshi-auth');
     const fallbackUrls = [
         `${getBaseUrl()}/trade-api/v2/markets/${ticker}/orderbook`,
-        `https://api.kalshi.com/trade-api/v2/markets/${ticker}/orderbook`,
+        `https://api.elections.kalshi.com/trade-api/v2/markets/${ticker}/orderbook`,
     ];
     for (const url of fallbackUrls) {
         try {

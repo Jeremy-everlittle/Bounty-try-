@@ -10,7 +10,7 @@
 //   KALSHI_API_KEY           — Production API Key ID
 //   KALSHI_PRIVATE_KEY       — Production RSA private key PEM (newlines as \n)
 //   OR KALSHI_PRIVATE_KEY_PATH — path to production .pem file
-//   KALSHI_BASE_URL          — Production API URL (default: https://api.kalshi.com)
+//   KALSHI_BASE_URL          — Production API URL (default: https://api.elections.kalshi.com)
 //
 // Demo env vars:
 //   KALSHI_DEMO_API_KEY      — Demo API Key ID
@@ -56,9 +56,8 @@ function getBaseUrl() {
     if (_currentEnv === 'demo') {
         return process.env.KALSHI_DEMO_BASE_URL || 'https://demo-api.kalshi.co';
     }
-    // Production: api.kalshi.com is the current correct URL per Kalshi's official docs.
-    // The old trading-api.kalshi.com and api.elections.kalshi.com have been deprecated.
-    return process.env.KALSHI_BASE_URL || 'https://api.kalshi.com';
+    // Production: api.elections.kalshi.com is the current correct URL (per official Kalshi Python SDK).
+    return process.env.KALSHI_BASE_URL || 'https://api.elections.kalshi.com';
 }
 
 function getApiKeyId() {
