@@ -1164,8 +1164,10 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         logTrade('buy_error', { ...tradeInfo, error: err.message, response: err.response });
 
         // On 409 (conflict/insufficient funds), don't retry this period
+        // Keep enteredPeriods mark to prevent duplicate attempts, but don't create
+        // a phantom 0-contract position that could cause division by zero in settlement
         if (err.status === 409) {
-            currentPosition = { ticker: kalshiTicker, side, contracts: 0, entryPrice: 0, orderId: 'blocked-409', periodKey, entryTime: Date.now() };
+            // enteredPeriods already set before order — leave it to block retries
         } else {
             // Order failed entirely — allow retry
             delete enteredPeriods[periodKey];
@@ -2381,7 +2383,7 @@ function getStatus() {
                 ticker: currentPosition.ticker,
                 side: currentPosition.side,
                 contracts: totalContracts,              // always show total position size
-                entryPrice: Math.round(totalCost / totalContracts), // weighted average entry
+                entryPrice: totalContracts > 0 ? Math.round(totalCost / totalContracts) : 0, // weighted average entry
                 periodKey: currentPosition.periodKey,
                 holdingSeconds: Math.round((Date.now() - currentPosition.entryTime) / 1000),
                 totalCostCents: totalCost,
@@ -2436,6 +2438,7 @@ async function pressBet(addContracts) {
         const newTotal = currentContracts + cappedAdd;
         currentPosition.totalCostCents = oldCost + addCost;
         currentPosition.totalContracts = newTotal;
+        currentPosition.contracts = newTotal;
         const env = getEnvironment();
         paperBalances[env] = (paperBalances[env] || 0) - addCost;
         setThought('bought', `Pressed +${cappedAdd}x ${side.toUpperCase()} @ ${limitPrice}c (now ${newTotal}x)`, { contracts: newTotal });
@@ -2506,6 +2509,7 @@ async function pressBet(addContracts) {
             const newTotal = currentContracts + filledContracts;
             currentPosition.totalCostCents = oldCost + addCost;
             currentPosition.totalContracts = newTotal;
+            currentPosition.contracts = newTotal;
             setThought('bought', `Pressed +${filledContracts}x ${side.toUpperCase()} @ ${limitPrice}c (now ${newTotal}x)`, { contracts: newTotal });
             logTrade('buy', { ...tradeInfo, limitPrice, orderId: order.order_id, fillStatus: order.status, filledContracts, attempt });
             dailyStats.tradeCount++;
