@@ -2428,6 +2428,7 @@ function getStatus() {
 // ═══════════════════════════════════════════════════════════════
 
 async function pressBet(addContracts) {
+    if (killSwitch) return { ok: false, reason: 'Kill switch is active — trading halted' };
     if (!currentPosition) {
         return { ok: false, reason: 'No open position to press' };
     }
@@ -2548,6 +2549,7 @@ async function pressBet(addContracts) {
 // ═══════════════════════════════════════════════════════════════
 
 async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideContracts) {
+    if (killSwitch) return { ok: false, reason: 'Kill switch is active — trading halted' };
     if (!prediction || !kalshiTicker || strike === null) {
         return { ok: false, reason: 'Missing prediction, ticker, or strike data' };
     }
