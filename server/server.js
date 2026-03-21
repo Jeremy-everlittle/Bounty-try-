@@ -1122,6 +1122,81 @@ async function fetchAllData() {
                 // ── DB: price snapshot every tick ──
                 capturePriceSnapshot(periodKey, state.brtiPrice, state.kalshiStrike, minutesAhead, state.history);
 
+                // ── DB: comprehensive cycle data snapshot every tick ──
+                // Captures EVERYTHING the app computed this tick for full post-mortem visibility
+                try {
+                    const ob = state.kalshiOrderBook?.orderbook_fp || state.kalshiOrderBook?.orderbook || state.kalshiOrderBook;
+                    const obDollar = ob ? !!(ob.yes_dollars || ob.no_dollars) : false;
+                    const obYes = ob ? (ob.yes_dollars || ob.yes || []) : [];
+                    const obNo = ob ? (ob.no_dollars || ob.no || []) : [];
+                    const parseOB = (bids) => bids.map(e => {
+                        const raw = parseFloat(e[0]);
+                        return [obDollar ? Math.round(raw * 100) : Math.round(raw), parseFloat(e[1])];
+                    });
+                    const yParsed = parseOB(obYes);
+                    const nParsed = parseOB(obNo);
+                    const bestYesBid = yParsed.length > 0 ? Math.max(...yParsed.map(e => e[0])) : null;
+                    const bestNoBid = nParsed.length > 0 ? Math.max(...nParsed.map(e => e[0])) : null;
+                    const bestYesAsk = bestNoBid != null ? 100 - bestNoBid : null;
+                    const bestNoAsk = bestYesBid != null ? 100 - bestYesBid : null;
+
+                    const distFromStrike = state.brtiPrice && state.kalshiStrike ? state.brtiPrice - state.kalshiStrike : null;
+                    const distPct = state.kalshiStrike ? (Math.abs(distFromStrike) / state.kalshiStrike) * 100 : null;
+
+                    db.saveCycleData({
+                        periodKey,
+                        minutesRemaining: minutesAhead,
+                        btcPrice: state.brtiPrice,
+                        strike: state.kalshiStrike,
+                        distanceFromStrike: distFromStrike,
+                        distancePct: distPct,
+                        kalshiYesBid: bestYesBid,
+                        kalshiYesAsk: bestYesAsk,
+                        kalshiNoBid: bestNoBid,
+                        kalshiNoAsk: bestNoAsk,
+                        kalshiSpread: bestYesBid != null && bestYesAsk != null ? bestYesAsk - bestYesBid : null,
+                        kalshiYesBids: yParsed,
+                        kalshiNoBids: nParsed,
+                        predictedPrice: updated.predictedPrice,
+                        probability: updated.probability,
+                        confidence: updated.confidence,
+                        direction: updated.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN',
+                        rawSignals: updated._rawSignals || null,
+                        marketContext: {
+                            fundingRate: state.fundingRate,
+                            ethPrice: state.ethPriceHistory ? state.ethPriceHistory[state.ethPriceHistory.length - 1] : null,
+                            openInterest: state.openInterestHistory ? state.openInterestHistory[state.openInterestHistory.length - 1] : null,
+                            liquidations: state.liquidations,
+                            fearGreed: state.fearGreed,
+                            longShortRatio: state.longShortRatio,
+                            macroEvent: state.macroEvent,
+                            binanceOrderBookImbalance: state.orderBook ? (() => {
+                                const bids = state.orderBook.bids || [];
+                                const asks = state.orderBook.asks || [];
+                                const bidDepth = bids.reduce((s, b) => s + parseFloat(b[1] || 0), 0);
+                                const askDepth = asks.reduce((s, a) => s + parseFloat(a[1] || 0), 0);
+                                return { bidDepth, askDepth, imbalance: bidDepth + askDepth > 0 ? (bidDepth - askDepth) / (bidDepth + askDepth) : 0 };
+                            })() : null,
+                        },
+                        betQuality: updatedBetQuality ? {
+                            shouldBet: updatedBetQuality.shouldBet,
+                            quality: updatedBetQuality.quality,
+                            edge: updatedBetQuality.edge,
+                            betSize: updatedBetQuality.betSize,
+                            convictionTier: updatedBetQuality.convictionTier,
+                            skipReason: updatedBetQuality.skipReason,
+                        } : null,
+                        sellSignal: sellSignal ? {
+                            level: sellSignal.level,
+                            reasons: sellSignal.reasons,
+                            confidence: sellSignal.confidence,
+                        } : null,
+                    }).catch(e => console.error('[cycle-data] Save error:', e.message));
+                } catch (cycleErr) {
+                    // Non-critical — don't break the main loop
+                    console.error('[cycle-data] Capture error:', cycleErr.message);
+                }
+
                 // ── DB: periodic Kalshi orderbook snapshot (throttled to every 30s) ──
                 if (state.kalshiTicker) {
                     capturePeriodicOrderbook(state.kalshiTicker, periodKey, minutesAhead, state.brtiPrice, state.kalshiStrike);
@@ -1498,6 +1573,28 @@ app.get('/api/db/dump', async (req, res) => {
         });
     } catch (e) {
         console.error('[api] DB dump error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── Cycle Data API — full per-tick data for any period ────────
+app.get('/api/cycle-data/:periodKey', async (req, res) => {
+    const db = require('./db');
+    try {
+        const rows = await db.getCycleData(req.params.periodKey);
+        res.json({ count: rows.length, data: rows });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/cycle-data', async (req, res) => {
+    const db = require('./db');
+    try {
+        const limit = parseInt(req.query.limit || '100', 10);
+        const rows = await db.getRecentCycleData(limit);
+        res.json({ count: rows.length, data: rows });
+    } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
