@@ -202,13 +202,23 @@ function getMaxContractsForRisk(entryPriceCents, maxRiskPct) {
 // We take the MAX of this and the normal base sizing.
 const FLIP_MIN_PROFIT_PCT = 0.20; // require at least 20% profit on top of loss recovery
 
-function getFlipRecoveryContracts(lossCents, flipPriceCents) {
+function getFlipRecoveryContracts(lossCents, flipPriceCents, originalContracts) {
     if (!lossCents || lossCents <= 0) return 0; // no loss to recover
     const profitPerContract = 100 - flipPriceCents; // cents profit per contract if correct
     if (profitPerContract <= 0) return 0; // can't profit at this price
 
     const minProfitCents = Math.max(lossCents * FLIP_MIN_PROFIT_PCT, 10); // at least 20% of loss or 10¢
-    const neededContracts = Math.ceil((lossCents + minProfitCents) / profitPerContract);
+    let neededContracts = Math.ceil((lossCents + minProfitCents) / profitPerContract);
+
+    // Cap flip at 1.5x original position - no martingale recovery
+    if (originalContracts && originalContracts > 0) {
+        const maxFlipContracts = Math.ceil(originalContracts * 1.5);
+        if (neededContracts > maxFlipContracts) {
+            console.log(`[trade-executor] Flip recovery: capping ${neededContracts} → ${maxFlipContracts} contracts (1.5x original ${originalContracts})`);
+            neededContracts = Math.min(neededContracts, maxFlipContracts);
+        }
+    }
+
     console.log(`[trade-executor] Flip recovery: loss=$${(lossCents/100).toFixed(2)}, flipPrice=${flipPriceCents}c, profit/contract=${profitPerContract}c, need ${neededContracts} contracts to recover $${((lossCents + minProfitCents)/100).toFixed(2)}`);
     return neededContracts;
 }
@@ -1202,7 +1212,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             if (flipPrice !== null) {
                 // Use the LARGER of: base sizing or loss-recovery sizing
                 const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
-                const recoverySizing = getFlipRecoveryContracts(sellLossCents, flipPrice);
+                const recoverySizing = getFlipRecoveryContracts(sellLossCents, flipPrice, sellContracts);
                 const targetContracts = Math.max(baseSizing, recoverySizing);
                 const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
                 if (flipContracts > 0) {
@@ -1316,7 +1326,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             if (flipPrice !== null) {
                 // Use the LARGER of: base sizing or loss-recovery sizing
                 const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
-                const recoverySizing = getFlipRecoveryContracts(liveSellLossCents, flipPrice);
+                const recoverySizing = getFlipRecoveryContracts(liveSellLossCents, flipPrice, filledContracts);
                 const targetContracts = Math.max(baseSizing, recoverySizing);
                 const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
                 if (flipContracts > 0) {
