@@ -183,6 +183,26 @@ function getBaseContractCount(entryPriceCents) {
     return Math.max(1, contracts);
 }
 
+// ── Loss-recovery flip sizing ──
+// When flipping, calculate how many contracts are needed to recover
+// the loss from selling the original position, plus a profit margin.
+// Kalshi contracts pay 100¢ if correct, 0¢ if wrong.
+// Profit per contract = 100 - flipPriceCents
+// Required contracts = (lossCents + minProfitCents) / profitPerContract
+// We take the MAX of this and the normal base sizing.
+const FLIP_MIN_PROFIT_PCT = 0.20; // require at least 20% profit on top of loss recovery
+
+function getFlipRecoveryContracts(lossCents, flipPriceCents) {
+    if (!lossCents || lossCents <= 0) return 0; // no loss to recover
+    const profitPerContract = 100 - flipPriceCents; // cents profit per contract if correct
+    if (profitPerContract <= 0) return 0; // can't profit at this price
+
+    const minProfitCents = Math.max(lossCents * FLIP_MIN_PROFIT_PCT, 10); // at least 20% of loss or 10¢
+    const neededContracts = Math.ceil((lossCents + minProfitCents) / profitPerContract);
+    console.log(`[trade-executor] Flip recovery: loss=$${(lossCents/100).toFixed(2)}, flipPrice=${flipPriceCents}c, profit/contract=${profitPerContract}c, need ${neededContracts} contracts to recover $${((lossCents + minProfitCents)/100).toFixed(2)}`);
+    return neededContracts;
+}
+
 // Auto-trader thought status — exposed to the frontend
 let traderThought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
 
@@ -1127,9 +1147,12 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         const marketSellPrice = await getMarketSellPrice(currentPosition.ticker, currentPosition.side, minutesRemaining);
         const sellPrice = marketSellPrice || Math.max(1, currentPosition.entryPrice - 10);
         const sellProceeds = sellContracts * sellPrice;
+        // Calculate loss from selling (what we paid minus what we got back)
+        const originalCostCents = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+        const sellLossCents = Math.max(0, originalCostCents - sellProceeds);
         const env = getEnvironment();
         paperBalances[env] = (paperBalances[env] || 0) + sellProceeds;
-        console.log(`[trade-executor] PAPER SELL: ${sellContracts}x ${currentPosition.side.toUpperCase()} on ${currentPosition.ticker} @ ${sellPrice}c — reason: ${sellSignal.level} | Proceeds=$${(sellProceeds/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
+        console.log(`[trade-executor] PAPER SELL: ${sellContracts}x ${currentPosition.side.toUpperCase()} on ${currentPosition.ticker} @ ${sellPrice}c — reason: ${sellSignal.level} | Proceeds=$${(sellProceeds/100).toFixed(2)} | Loss=$${(sellLossCents/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
         logTrade('sell', tradeInfo);
         decisionLog.logSellDecision({ sellSignal, minutesRemaining, acted: true, reason: sellSignal.level, currentPrice, strike });
         dailyStats.tradeCount++;
@@ -1143,18 +1166,26 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             ticker: soldTicker,
             soldAt: Date.now(),
             reason: sellSignal.level,
+            lossCents: sellLossCents,
         };
         currentPosition = null;
 
         // ── FLIP: immediately enter the opposite side (max 1 flip per cycle) ──
+        // Size the flip to recover the loss from selling + a profit margin
         if (isConfidentFlip && !flippedThisPeriod && updatedPrediction && soldTicker && soldPeriodKey) {
             const flipSide = soldSide === 'yes' ? 'no' : 'yes';
-            console.log(`[trade-executor] CONFIDENT FLIP: sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()}`);
+            console.log(`[trade-executor] CONFIDENT FLIP: sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()} (need to recover $${(sellLossCents/100).toFixed(2)} loss)`);
             const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
             if (flipPrice !== null) {
-                const flipContracts = await capContractsByBalance(Math.max(1, getBaseContractCount(flipPrice)), flipPrice);
+                // Use the LARGER of: base sizing or loss-recovery sizing
+                const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
+                const recoverySizing = getFlipRecoveryContracts(sellLossCents, flipPrice);
+                const targetContracts = Math.max(baseSizing, recoverySizing);
+                const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
                 if (flipContracts > 0) {
                     const flipCost = flipContracts * flipPrice;
+                    const expectedProfit = flipContracts * (100 - flipPrice);
+                    const netAfterRecovery = expectedProfit - sellLossCents;
                     const env = getEnvironment();
                     paperBalances[env] = (paperBalances[env] || 0) - flipCost;
                     currentPosition = {
@@ -1163,6 +1194,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                         periodKey: soldPeriodKey, entryTime: Date.now(),
                         totalCostCents: flipCost, totalContracts: flipContracts,
                         flipped: true, originalSide: soldSide,
+                        flipLossCents: sellLossCents,
                     };
                     enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
                     flippedThisPeriod = true;
@@ -1172,12 +1204,14 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                         periodKey: soldPeriodKey, direction: flipSide === 'yes' ? 'UP' : 'DOWN',
                         strategy: 'confident_flip', fillStatus: 'paper-flip',
                         flipped: true, originalSide: soldSide,
+                        flipLossCents: sellLossCents, expectedProfit, netAfterRecovery,
                     });
                     dailyStats.tradeCount++;
-                    setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipContracts}x @ ${flipPrice}c`, {
+                    setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipContracts}x @ ${flipPrice}c (recovering $${(sellLossCents/100).toFixed(2)} loss, expected net +$${(netAfterRecovery/100).toFixed(2)})`, {
                         contracts: flipContracts, side: flipSide, strategy: 'confident_flip',
+                        flipLossCents: sellLossCents, expectedProfit, netAfterRecovery,
                     });
-                    console.log(`[trade-executor] PAPER FLIP: ${flipContracts}x ${flipSide.toUpperCase()} @ ${flipPrice}c`);
+                    console.log(`[trade-executor] PAPER FLIP: ${flipContracts}x ${flipSide.toUpperCase()} @ ${flipPrice}c | Loss to recover=$${(sellLossCents/100).toFixed(2)} | Expected profit=$${(expectedProfit/100).toFixed(2)} | Net=$${(netAfterRecovery/100).toFixed(2)}`);
                 }
             }
         } else if (isConfidentFlip && flippedThisPeriod) {
@@ -1231,8 +1265,11 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             return;
         }
 
-        // Fully sold
-        logTrade('sell', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts });
+        // Fully sold — calculate loss for flip recovery sizing
+        const liveSellProceeds = filledContracts * (fills.avgPrice || currentPosition.entryPrice);
+        const liveOriginalCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
+        const liveSellLossCents = Math.max(0, liveOriginalCost - liveSellProceeds);
+        logTrade('sell', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts, lossCents: liveSellLossCents });
         dailyStats.tradeCount++;
         const soldTicker = currentPosition.ticker;
         const soldPeriodKey = currentPosition.periodKey;
@@ -1243,16 +1280,22 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             ticker: soldTicker,
             soldAt: Date.now(),
             reason: sellSignal.level,
+            lossCents: liveSellLossCents,
         };
         currentPosition = null;
 
         // ── FLIP: immediately enter the opposite side (live, max 1 flip per cycle) ──
+        // Size to recover the loss from selling + a profit margin
         if (isConfidentFlip && !flippedThisPeriod && updatedPrediction && soldTicker && soldPeriodKey) {
             const flipSide = soldSide === 'yes' ? 'no' : 'yes';
-            console.log(`[trade-executor] CONFIDENT FLIP (live): sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()}`);
+            console.log(`[trade-executor] CONFIDENT FLIP (live): sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()} (need to recover $${(liveSellLossCents/100).toFixed(2)} loss)`);
             const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
             if (flipPrice !== null) {
-                const flipContracts = await capContractsByBalance(Math.max(1, getBaseContractCount(flipPrice)), flipPrice);
+                // Use the LARGER of: base sizing or loss-recovery sizing
+                const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
+                const recoverySizing = getFlipRecoveryContracts(liveSellLossCents, flipPrice);
+                const targetContracts = Math.max(baseSizing, recoverySizing);
+                const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
                 if (flipContracts > 0) {
                     try {
                         const flipResult = await trading.placeOrder({
@@ -1268,12 +1311,15 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                         if (flipFills.filled > 0) {
                             const avgPrice = flipFills.avgPrice || flipPrice;
                             const flipCost = flipFills.filled * avgPrice;
+                            const expectedProfit = flipFills.filled * (100 - avgPrice);
+                            const netAfterRecovery = expectedProfit - liveSellLossCents;
                             currentPosition = {
                                 ticker: soldTicker, side: flipSide, contracts: flipFills.filled,
                                 entryPrice: avgPrice, orderId: flipOrder.order_id,
                                 periodKey: soldPeriodKey, entryTime: Date.now(),
                                 totalCostCents: flipCost, totalContracts: flipFills.filled,
                                 flipped: true, originalSide: soldSide,
+                                flipLossCents: liveSellLossCents,
                             };
                             enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
                             flippedThisPeriod = true;
@@ -1283,12 +1329,14 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                                 periodKey: soldPeriodKey, direction: flipSide === 'yes' ? 'UP' : 'DOWN',
                                 strategy: 'confident_flip', orderId: flipOrder.order_id,
                                 flipped: true, originalSide: soldSide,
+                                flipLossCents: liveSellLossCents, expectedProfit, netAfterRecovery,
                             });
                             dailyStats.tradeCount++;
-                            setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipFills.filled}x @ ${avgPrice}c`, {
+                            setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipFills.filled}x @ ${avgPrice}c (recovering $${(liveSellLossCents/100).toFixed(2)} loss, expected net +$${(netAfterRecovery/100).toFixed(2)})`, {
                                 contracts: flipFills.filled, side: flipSide, strategy: 'confident_flip',
+                                flipLossCents: liveSellLossCents, expectedProfit, netAfterRecovery,
                             });
-                            console.log(`[trade-executor] LIVE FLIP: ${flipFills.filled}x ${flipSide.toUpperCase()} @ ${avgPrice}c — order ${flipOrder.order_id}`);
+                            console.log(`[trade-executor] LIVE FLIP: ${flipFills.filled}x ${flipSide.toUpperCase()} @ ${avgPrice}c | Loss to recover=$${(liveSellLossCents/100).toFixed(2)} | Expected profit=$${(expectedProfit/100).toFixed(2)} | Net=$${(netAfterRecovery/100).toFixed(2)} — order ${flipOrder.order_id}`);
                         }
                     } catch (flipErr) {
                         console.error(`[trade-executor] Flip buy failed:`, flipErr.message);
