@@ -1543,8 +1543,8 @@ app.get('/api/trading/analytics', async (req, res) => {
 app.get('/api/db/dump', async (req, res) => {
     const db = require('./db');
     try {
-        const days = parseInt(req.query.days || '7', 10);
-        const tradeLimit = parseInt(req.query.trades || '200', 10);
+        const days = Math.min(365, Math.max(1, parseInt(req.query.days || '7', 10) || 7));
+        const tradeLimit = Math.min(5000, Math.max(1, parseInt(req.query.trades || '200', 10) || 200));
 
         const [dailyStats, recentTrades, winByStrategy, winByDirection, winByHour, cumulativePnl, totalTrades] = await Promise.all([
             db.getDailyStatsHistory(days),
@@ -1755,11 +1755,12 @@ app.post('/api/trading/config', (req, res) => {
     }
     const cfg = tradeExecutor.config;
     const allowed = ['baseContracts', 'maxPositionContracts', 'convictionMaxContracts', 'maxDailyLossCents', 'maxDailyTrades'];
+    const bounds = { baseContracts: 500, maxPositionContracts: 500, convictionMaxContracts: 500, maxDailyLossCents: 1000000, maxDailyTrades: 1000 };
     const applied = {};
     for (const key of allowed) {
         if (updates[key] !== undefined) {
             const val = parseInt(updates[key], 10);
-            if (!isNaN(val) && val > 0) {
+            if (!isNaN(val) && val > 0 && val <= (bounds[key] || 1000)) {
                 cfg[key] = val;
                 applied[key] = val;
             }
