@@ -1099,7 +1099,9 @@ async function fetchAllData() {
                     liquidations: state.liquidations,
                     fearGreed: state.fearGreed,
                     macroEvent: state.macroEvent,
-                    longShortRatio: state.longShortRatio
+                    longShortRatio: state.longShortRatio,
+                    ethPrice: state.ethPrice,
+                    openInterest: state.openInterest,
                 };
                 const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike, periodKey);
                 // Recompute bet quality based on updated prediction

@@ -994,6 +994,9 @@ function computeEthLeadLag(btcPrices, ethPriceHistory) {
         return { signal: 0, ethMom: 0, btcMom: 0 };
     }
     const n = ethPriceHistory.length;
+    if (ethPriceHistory[n-3] <= 0 || btcPrices[btcPrices.length-3] <= 0) {
+        return { signal: 0, ethMom: 0, btcMom: 0 };
+    }
     const ethMom = (ethPriceHistory[n-1] - ethPriceHistory[n-3]) / ethPriceHistory[n-3];
     const bn = btcPrices.length;
     const btcMom = (btcPrices[bn-1] - btcPrices[bn-3]) / btcPrices[bn-3];
