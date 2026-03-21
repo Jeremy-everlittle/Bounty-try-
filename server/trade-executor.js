@@ -828,6 +828,28 @@ function getStatus() {
     };
 }
 
+// Manual trading controls (called from dashboard API)
+async function forceBet(prediction, ticker, strike, periodKey, contracts) {
+    if (config.killSwitch) return { ok: false, reason: 'Kill switch is active' };
+    console.log(`[trade-executor] Force bet: ${prediction.predictedPrice >= strike ? 'UP' : 'DOWN'} on ${ticker}`);
+    return onNewPrediction(prediction, ticker, strike, periodKey);
+}
+
+async function pressBet(prediction, ticker, strike, periodKey, contracts) {
+    if (config.killSwitch) return { ok: false, reason: 'Kill switch is active' };
+    console.log(`[trade-executor] Press bet on ${ticker}`);
+    return onNewPrediction(prediction, ticker, strike, periodKey);
+}
+
+async function forceSell() {
+    console.log('[trade-executor] Force sell requested');
+    return { ok: false, reason: 'Force sell not yet implemented' };
+}
+
+function clearTradeLog() {
+    state.recentTrades = [];
+}
+
 module.exports = {
     onNewPrediction,
     onSellSignal,
@@ -840,5 +862,9 @@ module.exports = {
     resetState,
     getStatus,
     onTradeNotify,
+    forceBet,
+    pressBet,
+    forceSell,
+    clearTradeLog,
     config, // exposed for startup logging
 };
