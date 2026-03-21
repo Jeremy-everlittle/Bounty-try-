@@ -95,6 +95,7 @@ function persistPosition() {
 let killSwitch = false;
 let soldThisPeriod = null;    // Track sold positions for re-entry: { periodKey, side, ticker, soldAt, reason }
 let flippedThisPeriod = false; // Track if we already flipped this cycle (limit to 1 flip)
+let clearedPosition = null;   // Preserved position data when sync clears it before onPeriodEnd settles
 let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
 let cachedBalance = null;     // { balanceCents, lastFetched }
 const BALANCE_CACHE_MS = 30000; // refresh balance every 30s
@@ -191,6 +192,7 @@ function getBaseContractCount(entryPriceCents) {
 // Required contracts = (lossCents + minProfitCents) / profitPerContract
 // We take the MAX of this and the normal base sizing.
 const FLIP_MIN_PROFIT_PCT = 0.20; // require at least 20% profit on top of loss recovery
+const FLIP_MAX_BALANCE_PCT = 0.50; // flips can use at most 50% of available balance (risk cap)
 
 function getFlipRecoveryContracts(lossCents, flipPriceCents) {
     if (!lossCents || lossCents <= 0) return 0; // no loss to recover
@@ -1188,9 +1190,20 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
             if (flipPrice !== null) {
                 // Use the LARGER of: base sizing or loss-recovery sizing
+                // BUT cap to maxPositionContracts and 50% of available balance (risk management)
                 const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
                 const recoverySizing = getFlipRecoveryContracts(sellLossCents, flipPrice);
-                const targetContracts = Math.max(baseSizing, recoverySizing);
+                let targetContracts = Math.max(baseSizing, recoverySizing);
+                // Cap 1: never exceed maxPositionContracts for flips (no conviction override)
+                targetContracts = Math.min(targetContracts, config.maxPositionContracts);
+                // Cap 2: flips can use at most 50% of available balance to limit downside
+                const env = getEnvironment();
+                const flipBudgetCents = Math.floor((paperBalances[env] || 0) * FLIP_MAX_BALANCE_PCT);
+                const maxByBudget = Math.floor(flipBudgetCents / flipPrice);
+                if (targetContracts > maxByBudget && maxByBudget > 0) {
+                    console.log(`[trade-executor] Flip risk cap: ${targetContracts} → ${maxByBudget} contracts (50% of balance = ${flipBudgetCents}c @ ${flipPrice}c each)`);
+                    targetContracts = maxByBudget;
+                }
                 const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
                 if (flipContracts > 0) {
                     const flipCost = flipContracts * flipPrice;
@@ -1302,9 +1315,24 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
             if (flipPrice !== null) {
                 // Use the LARGER of: base sizing or loss-recovery sizing
+                // BUT cap to maxPositionContracts and 50% of available balance (risk management)
                 const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
                 const recoverySizing = getFlipRecoveryContracts(liveSellLossCents, flipPrice);
-                const targetContracts = Math.max(baseSizing, recoverySizing);
+                let targetContracts = Math.max(baseSizing, recoverySizing);
+                // Cap 1: never exceed maxPositionContracts for flips (no conviction override)
+                targetContracts = Math.min(targetContracts, config.maxPositionContracts);
+                // Cap 2: flips use at most 50% of balance — fetch live balance for cap
+                try {
+                    const balResp = await trading.getBalance();
+                    const flipBudgetCents = Math.floor(balResp.balance * FLIP_MAX_BALANCE_PCT);
+                    const maxByBudget = Math.floor(flipBudgetCents / flipPrice);
+                    if (targetContracts > maxByBudget && maxByBudget > 0) {
+                        console.log(`[trade-executor] Flip risk cap (live): ${targetContracts} → ${maxByBudget} contracts (50% of balance = ${flipBudgetCents}c @ ${flipPrice}c each)`);
+                        targetContracts = maxByBudget;
+                    }
+                } catch (balErr) {
+                    console.warn(`[trade-executor] Flip balance check failed: ${balErr.message} — using position cap only`);
+                }
                 const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
                 if (flipContracts > 0) {
                     try {
@@ -1376,8 +1404,26 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 function onPeriodEnd(gradeResult) {
     // If currentPosition was cleared (e.g., by sync bug) but we know we entered this period,
     // still log a settlement so the frontend can show WIN/LOSS instead of PENDING
+    // If currentPosition was cleared by sync but we saved the data, restore it for settlement
+    if (!currentPosition && clearedPosition && gradeResult && gradeResult.periodKey &&
+        clearedPosition.periodKey === gradeResult.periodKey) {
+        console.log(`[trade-executor] onPeriodEnd: restoring cleared position for proper settlement of ${gradeResult.periodKey}`);
+        currentPosition = clearedPosition;
+        clearedPosition = null;
+        // Fall through to normal settlement below
+    }
     if (!currentPosition && gradeResult && gradeResult.periodKey && enteredPeriods[gradeResult.periodKey]) {
         const ep = enteredPeriods[gradeResult.periodKey];
+        // Check if a real settlement was already logged for this period (avoid duplicate)
+        const alreadySettled = tradeLog.some(t => t.type === 'settle' && t.periodKey === gradeResult.periodKey && t.pnlCents !== 0);
+        if (alreadySettled) {
+            console.log(`[trade-executor] onPeriodEnd: skipping enteredPeriods fallback — real settlement already exists for ${gradeResult.periodKey}`);
+            soldThisPeriod = null;
+            flippedThisPeriod = false;
+            syncZeroCount = 0;
+            clearedPosition = null;
+            return;
+        }
         console.log(`[trade-executor] onPeriodEnd: no currentPosition but enteredPeriods has ${gradeResult.periodKey} — logging settlement from entry record`);
         const positionWon = (ep.side === 'yes' && gradeResult.actualDirection === 'up') ||
                             (ep.side === 'no' && gradeResult.actualDirection === 'down');
@@ -1386,14 +1432,35 @@ function onPeriodEnd(gradeResult) {
         } else {
             dailyStats.losses++;
         }
+        // Try to compute P&L from trade history if possible
+        let fallbackPnl = 0;
+        const periodBuys = tradeLog.filter(t => t.periodKey === gradeResult.periodKey &&
+            (t.type === 'buy' || t.type === 'dip_buy' || t.type === 'late_lock' || t.type === 're_entry'));
+        const periodSells = tradeLog.filter(t => t.periodKey === gradeResult.periodKey && t.type === 'sell');
+        if (periodBuys.length > 0) {
+            // Find the last buy set (after any sells = the flip position)
+            const lastSellIdx = periodSells.length > 0 ?
+                Math.max(...periodSells.map(s => tradeLog.indexOf(s))) : -1;
+            const activeBuys = lastSellIdx >= 0 ?
+                periodBuys.filter(b => tradeLog.indexOf(b) > lastSellIdx) : periodBuys;
+            const totalContracts = activeBuys.reduce((sum, b) => sum + (b.contracts || 0), 0);
+            const totalCost = activeBuys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
+            const flipLoss = activeBuys.find(b => b.flipLossCents)?.flipLossCents || 0;
+            if (positionWon) {
+                fallbackPnl = (totalContracts * 100) - totalCost - flipLoss;
+            } else {
+                fallbackPnl = -totalCost - flipLoss;
+            }
+            console.log(`[trade-executor] Computed fallback P&L from trade history: ${fallbackPnl}c (contracts=${totalContracts}, cost=${totalCost}, flipLoss=${flipLoss})`);
+        }
         logTrade('settle', {
             ticker: ep.ticker,
             side: ep.side,
-            contracts: 0, // unknown — position was cleared
+            contracts: 0,
             entryPrice: 0,
             correct: positionWon,
             predictionCorrect: gradeResult.correct,
-            pnlCents: 0, // unknown — position was cleared
+            pnlCents: fallbackPnl,
             dailyPnlCents: dailyStats.pnlCents,
             periodKey: gradeResult.periodKey,
             note: 'settled from enteredPeriods (position was cleared before settlement)',
@@ -1401,9 +1468,13 @@ function onPeriodEnd(gradeResult) {
             strikePrice: gradeResult.strikePrice,
             settlementPrice: gradeResult.settlementPrice,
         });
+        if (fallbackPnl !== 0) {
+            dailyStats.pnlCents += fallbackPnl;
+        }
         soldThisPeriod = null;
         flippedThisPeriod = false;
         syncZeroCount = 0;
+        clearedPosition = null;
         return;
     }
     if (!currentPosition) {
@@ -1527,6 +1598,7 @@ function onPeriodEnd(gradeResult) {
     snapshotBalanceToDB('post_settle').catch(e => {});
 
     currentPosition = null;
+    clearedPosition = null;
     soldThisPeriod = null; // reset for new period
     flippedThisPeriod = false; // reset flip limit for new period
     syncZeroCount = 0;
@@ -2208,7 +2280,8 @@ async function syncPositionWithKalshi() {
             syncZeroCount++;
             console.log(`[trade-executor] Position sync: Kalshi reports 0 for ${currentPosition.ticker} (zero count: ${syncZeroCount}/3)`);
             if (syncZeroCount >= 3 && positionAge > 120000) {
-                console.log(`[trade-executor] Position sync: confirmed 0 contracts after ${syncZeroCount} checks — clearing position`);
+                console.log(`[trade-executor] Position sync: confirmed 0 contracts after ${syncZeroCount} checks — preserving for settlement, clearing position`);
+                clearedPosition = { ...currentPosition };
                 currentPosition = null;
                 syncZeroCount = 0;
                 persistPosition();
@@ -2219,7 +2292,8 @@ async function syncPositionWithKalshi() {
         if (e.status === 404 && positionAge > 180000) {
             syncZeroCount++;
             if (syncZeroCount >= 3) {
-                console.log(`[trade-executor] Position sync: 404 for ${currentPosition?.ticker} after ${syncZeroCount} checks — clearing position`);
+                console.log(`[trade-executor] Position sync: 404 for ${currentPosition?.ticker} after ${syncZeroCount} checks — preserving for settlement, clearing position`);
+                clearedPosition = currentPosition ? { ...currentPosition } : null;
                 currentPosition = null;
                 syncZeroCount = 0;
                 persistPosition();

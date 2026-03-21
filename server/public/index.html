@@ -1388,8 +1388,12 @@
                     displayTime = dateStr + ' ' + fmt(startD) + '\u2013' + fmt(endD);
                 }
 
-                // Determine settlement from trades
-                const settlement = periodTrades.find(t => t.type === 'settle');
+                // Determine settlement from trades — prefer the entry with actual P&L data
+                // (avoid picking up a pnlCents:0 fallback entry when a real one exists)
+                const settleEntries = periodTrades.filter(t => t.type === 'settle');
+                const settlement = settleEntries.length > 1
+                    ? (settleEntries.find(t => t.pnlCents !== 0 && t.pnlCents !== undefined) || settleEntries[settleEntries.length - 1])
+                    : settleEntries[0] || null;
                 const buys = periodTrades.filter(t => t.type === 'buy' || t.type === 'dip_buy' || t.type === 'late_lock' || t.type === 'late_lock_add' || t.type === 're_entry');
                 const sells = periodTrades.filter(t => t.type === 'sell');
                 const errors = periodTrades.filter(t => t.type && (t.type.includes('error') || t.type.includes('failed') || t.type.includes('unfilled') || t.type.includes('phantom')));
