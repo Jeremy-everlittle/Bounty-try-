@@ -97,6 +97,8 @@ let soldThisPeriod = null;    // Track sold positions for re-entry: { periodKey,
 let flippedThisPeriod = false; // Track if we already flipped this cycle (limit to 1 flip)
 let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
 let cachedBalance = null;     // { balanceCents, lastFetched }
+let periodTotalCostCents = 0; // Track total cost spent in current period
+let periodCostKey = null;     // Period key for cost tracking
 const BALANCE_CACHE_MS = 30000; // refresh balance every 30s
 
 // ── Paper balance tracking (separate per environment) ──
@@ -628,7 +630,7 @@ async function getMarketSellPrice(ticker, side, minutesRemaining) {
     }
 }
 
-async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaining) {
+async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaining, passiveMode = false) {
     // Guard against NaN/undefined — fall back to 50c (fair value)
     if (theoreticalPrice === undefined || theoreticalPrice === null || isNaN(theoreticalPrice) || !isFinite(theoreticalPrice)) {
         console.warn(`[trade-executor] getAggressivePrice received invalid theoreticalPrice: ${theoreticalPrice} — defaulting to 50c`);
@@ -639,8 +641,10 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
     // Paper and live both use real orderbook for pricing
 
     // Determine max slippage based on time remaining
-    // Increased from 1/3/5 — Kalshi BTC markets have wider spreads
-    const maxSlippage = (minutesRemaining || 15) <= 3 ? 8
+    // In passive mode (minutesRemaining > 7), post at theoretical price (no slippage)
+    // to act as a maker and earn the spread. If no fill, next cycle retries.
+    const maxSlippage = passiveMode ? 0
+                      : (minutesRemaining || 15) <= 3 ? 8
                       : (minutesRemaining || 15) <= 7 ? 5
                       : 3; // early period: still willing to cross a typical spread
 
@@ -905,7 +909,10 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     }
 
     // Fetch orderbook once, use for both market ask (display) and limit price (execution)
-    let limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, minutesRemaining);
+    // Use passive mode (post at theoretical, no slippage) when >7 min remaining
+    // to earn the spread as a maker. The waitForFill timeout handles non-fills.
+    const passiveEntry = minutesRemaining > 7 && !isLockTier;
+    let limitPrice = await getAggressivePrice(kalshiTicker, side, theoreticalPrice, minutesRemaining, passiveEntry);
     // Paper mode safety net: if getAggressivePrice still returned null, use theoretical price
     // Paper trades don't hit the exchange, so "no liquidity" should never block them
     if (limitPrice === null && config.paperMode) {
