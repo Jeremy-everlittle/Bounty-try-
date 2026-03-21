@@ -2358,7 +2358,69 @@ function predictPrice(marketData, minutesAhead, strike) {
         signals: { momentum: momentumLabel, volatility: volLabel, trend: trendLabel, rsi: rsiLabel },
         _regimeInfo: { volRegime: volRegime.regime, trendRegime: getBayesTrendLabel(trendRegime) },
         _exhaustion: momExhaustion,
-        _choppiness: choppiness
+        _choppiness: choppiness,
+        _rawSignals: {
+            // Volatility
+            ccVol, ewmaVol, gkVol, rawPerMinVol, perMinuteVol, remainingVol, adjustedRemainingVol,
+            leverageAdj, settlementVolAdj, microVolAdjust, spreadVolAdjust, vpinVolAdjust, lambdaVolAdjust,
+            jumpDetected: jumpInfo.jumpDetected, jumpRatio: jumpInfo.jumpRatio,
+            hurstH,
+
+            // Positional
+            zScore, positionalProb, positionalWeight,
+
+            // Momentum
+            mom3, mom5, mom10, emaTrend, momAccel, rawDrift, adjustedDrift, driftMultiplier,
+            earlyMomentumSignal, driftZShift,
+            ema5, ema20,
+
+            // Regime
+            volRegime: volRegime.regime, volRatio: volRegime.ratio,
+            trendTrending: trendRegime.trending, trendMeanReverting: trendRegime.meanReverting, varianceRatio: trendRegime.vr,
+            ac1, ac2,
+
+            // Order flow & microstructure
+            orderFlowSignal, orderFlowRaw, tradeFlowSignal,
+
+            // Technical indicators
+            rsi, rsiSignal,
+            macdSignal,
+            linRegSignal, linRegR2: linReg.r2,
+            vwapSignal, vwapDeviation: vwapResult.deviation,
+            bbSqueeze: bbSqueeze.squeeze, bbBreakoutSignal: bbSqueeze.breakoutSignal, bbBandwidth: bbSqueeze.bandwidth,
+
+            // Pattern & structure
+            candlePattern: candlePattern.pattern, candleSignal: candlePattern.signal,
+            haSignal: haResult.signal,
+            srSignal,
+            crossTFSignal: crossTF.signal,
+            breakoutSignal,
+            cpSignal,
+            microMRSignal,
+            normRocSignal,
+            mrCompositeSignal: mrComposite.signal,
+
+            // External signals
+            fundingSignal,
+            longShortSignal,
+            ethLLSignal: ethLL.signal,
+            liqSignal,
+            volumeSurgeSignal,
+            hourBias,
+            exhaustionSignal,
+
+            // Combination
+            momentumComposite, flowComposite, meanRevComposite, liqComposite, exhaustionComposite, ethComposite,
+            rawTotalZShift, totalZShift, shrinkageFactor, chopDampen,
+            agreementMult,
+
+            // Final probability chain
+            combinedProb, polarizedProb, bayesianProb: bayesResult.adjustedProb, finalProb,
+
+            // ML
+            mlFeatures: _lastMLFeatures,
+            mlSignalPredictions: _lastSignalPredictions,
+        }
     };
 }
 
