@@ -667,7 +667,7 @@
         .trader-thought.thought-blocked .trader-thought-label { color: #f85149; }
         .trader-thought.thought-blocked .trader-thought-msg { color: #f85149; }
         .trading-controls { display: flex; gap: 6px; margin-top: 8px; }
-        .trading-btn { font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: #e6edf3; cursor: pointer; }
+        .trading-btn { font-size: 13px; font-weight: 700; padding: 12px 16px; min-height: 44px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: #e6edf3; cursor: pointer; }
         .trading-btn:hover { background: rgba(255,255,255,0.1); }
         .trading-btn-danger { color: #f85149; border-color: rgba(248,81,73,0.4); }
         .trading-btn-danger:hover { background: rgba(248,81,73,0.15); }
@@ -830,6 +830,9 @@
             <div style="margin-top:6px;display:flex;gap:6px;">
                 <button class="trading-btn" id="force-bet-btn" onclick="forceBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(136,87,255,0.15);border-color:rgba(136,87,255,0.4);color:#a371f7;">FORCE BET</button>
                 <button class="trading-btn" id="press-bet-btn" onclick="pressBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(56,139,253,0.15);border-color:rgba(56,139,253,0.4);color:#58a6ff;display:none;">PRESS BET</button>
+            </div>
+            <div style="border-top: 1px solid #30363d; margin: 8px 0;"></div>
+            <div style="display:flex;gap:6px;">
                 <button class="trading-btn trading-btn-danger" id="force-sell-btn" onclick="forceSellPosition()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(248,81,73,0.15);border-color:rgba(248,81,73,0.4);color:#f85149;display:none;">FORCE SELL</button>
             </div>
             <!-- Settings gear toggle -->
@@ -983,6 +986,17 @@
         let wsConnected = false;
         let wsReconnectTimer = null;
 
+        // Heartbeat to detect stale connections
+        let wsHeartbeatInterval;
+        function startHeartbeat() {
+            if (wsHeartbeatInterval) clearInterval(wsHeartbeatInterval);
+            wsHeartbeatInterval = setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'ping' }));
+                }
+            }, 20000); // ping every 20s
+        }
+
         function connectWebSocket() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = protocol + '//' + location.host + (_DASH_KEY ? '?apiKey=' + encodeURIComponent(_DASH_KEY) : '');
@@ -993,6 +1007,7 @@
             ws.onopen = () => {
                 wsConnected = true;
                 console.log('WebSocket connected');
+                startHeartbeat();
                 document.getElementById('status-bar').innerHTML =
                     '<span style="color:#3fb950">&#9679;</span> Connected to server';
             };
@@ -1033,6 +1048,7 @@
 
             ws.onclose = () => {
                 wsConnected = false;
+                if (wsHeartbeatInterval) clearInterval(wsHeartbeatInterval);
                 console.log('WebSocket disconnected, reconnecting in 3s...');
                 document.getElementById('status-bar').innerHTML =
                     '&#9888; Server disconnected — reconnecting...';
@@ -1541,7 +1557,7 @@
 
                         // P&L for settlements
                         if (t.pnlCents !== undefined) {
-                            const pnlPos = t.pnlCents > 0;
+                            const pnlPos = t.pnlCents >= 0;
                             html += '<span class="period-trade-pnl" style="color:' + (pnlPos ? '#3fb950' : '#f85149') + '">' +
                                 (pnlPos ? '+' : '') + '$' + (t.pnlCents / 100).toFixed(2) + '</span>';
                         }
@@ -2363,6 +2379,9 @@
             try {
                 const ts = serverData && serverData.tradingStatus;
                 const activate = ts ? !ts.killSwitch : true;
+                if (activate) {
+                    if (!confirm('KILL SWITCH: This will stop ALL trading and emergency sell any open position. Are you sure?')) return;
+                }
                 await authFetch('/api/trading/kill-switch', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -3051,9 +3070,11 @@
             }, 1000);
         }
 
-        // Price refresh — fetches new data every 500ms
+        // Price refresh — only polls when WebSocket is NOT connected
         function startLiveRefresh() {
-            setInterval(fetchAndPredict, 500);
+            setInterval(() => {
+                if (!wsConnected) fetchAndPredict();
+            }, 500);
         }
 
         // ── Smooth price interpolation ──────────────────────────────
