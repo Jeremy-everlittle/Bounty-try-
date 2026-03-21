@@ -38,20 +38,7 @@ async function init() {
         return null;
     }
 
-    // ── Drop all old tables (user confirmed no valid data to keep) ──
-    await pool.query(`
-        DROP TABLE IF EXISTS trades CASCADE;
-        DROP TABLE IF EXISTS daily_stats CASCADE;
-        DROP TABLE IF EXISTS positions CASCADE;
-        DROP TABLE IF EXISTS prediction_snapshots CASCADE;
-        DROP TABLE IF EXISTS price_snapshots CASCADE;
-        DROP TABLE IF EXISTS orderbook_snapshots CASCADE;
-        DROP TABLE IF EXISTS market_data_snapshots CASCADE;
-        DROP TABLE IF EXISTS account_balances CASCADE;
-    `);
-    console.log('[db] Dropped old tables — clean slate');
-
-    // ── Create tables ──
+    // ── Create tables if they don't exist (preserves data across deploys) ──
     await pool.query(`
         -- ═══════════════════════════════════════════════════════════
         -- TRADES — Every order placed, filled, failed, or settled
@@ -344,6 +331,40 @@ async function init() {
         );
         CREATE INDEX IF NOT EXISTS idx_acct_bal_env ON account_balances(environment);
         CREATE INDEX IF NOT EXISTS idx_acct_bal_created ON account_balances(created_at);
+
+        -- ═══════════════════════════════════════════════════════════
+        -- PREDICTION LOG — Period history entries shown in the UI
+        -- Backs the in-memory predictionLog from store.js
+        -- ═══════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS prediction_log (
+            id SERIAL PRIMARY KEY,
+            period_key TEXT NOT NULL UNIQUE,
+            time TEXT,
+            timestamp BIGINT,
+            start_price NUMERIC,
+            predicted_price NUMERIC,
+            predicted_direction TEXT,
+            actual_price NUMERIC,
+            actual_direction TEXT,
+            correct BOOLEAN,
+            confidence NUMERIC,
+            probability NUMERIC,
+            data JSONB,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_pred_log_period ON prediction_log(period_key);
+        CREATE INDEX IF NOT EXISTS idx_pred_log_created ON prediction_log(created_at);
+
+        -- ═══════════════════════════════════════════════════════════
+        -- STORE STATE — Persists critical learning state across deploys
+        -- Single-row key-value store for bayesian, errorAnalysis, etc.
+        -- ═══════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS store_state (
+            key TEXT PRIMARY KEY,
+            value JSONB NOT NULL,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
     `);
 
     ready = true;
@@ -1160,6 +1181,117 @@ async function getBalanceSummary() {
     }
 }
 
+// ── Prediction Log (UI Period History) ────────────────────────
+
+async function savePredictionLogEntry(entry) {
+    if (!ready) return;
+    try {
+        // Extract core fields, store everything else in data JSONB
+        const known = ['periodKey', 'time', 'timestamp', 'startPrice', 'predictedPrice',
+                       'predictedDirection', 'actualPrice', 'actualDirection', 'correct',
+                       'confidence', 'probability'];
+        const extra = {};
+        for (const [k, v] of Object.entries(entry)) {
+            if (!known.includes(k)) extra[k] = v;
+        }
+
+        await pool.query(`
+            INSERT INTO prediction_log (period_key, time, timestamp, start_price, predicted_price,
+                predicted_direction, actual_price, actual_direction, correct, confidence, probability, data)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT(period_key) DO UPDATE SET
+                actual_price = COALESCE($7, prediction_log.actual_price),
+                actual_direction = COALESCE($8, prediction_log.actual_direction),
+                correct = COALESCE($9, prediction_log.correct),
+                data = COALESCE($12, prediction_log.data),
+                updated_at = NOW()
+        `, [
+            entry.periodKey,
+            entry.time || null,
+            entry.timestamp || null,
+            entry.startPrice || null,
+            entry.predictedPrice || null,
+            entry.predictedDirection || null,
+            entry.actualPrice != null ? entry.actualPrice : null,
+            entry.actualDirection || null,
+            entry.correct != null ? entry.correct : null,
+            entry.confidence || null,
+            entry.probability || null,
+            Object.keys(extra).length > 0 ? JSON.stringify(extra) : null,
+        ]);
+    } catch (e) {
+        console.error('[db] Failed to save prediction log entry:', e.message);
+    }
+}
+
+async function loadPredictionLog(limit = 500) {
+    if (!ready) return [];
+    try {
+        const { rows } = await pool.query(
+            'SELECT * FROM prediction_log ORDER BY created_at ASC LIMIT $1', [limit]
+        );
+        return rows.map(row => {
+            const entry = {
+                periodKey: row.period_key,
+                time: row.time,
+                timestamp: row.timestamp ? parseInt(row.timestamp) : null,
+                startPrice: row.start_price ? parseFloat(row.start_price) : null,
+                predictedPrice: row.predicted_price ? parseFloat(row.predicted_price) : null,
+                predictedDirection: row.predicted_direction,
+                actualPrice: row.actual_price ? parseFloat(row.actual_price) : null,
+                actualDirection: row.actual_direction,
+                correct: row.correct,
+            };
+            if (row.confidence) entry.confidence = parseFloat(row.confidence);
+            if (row.probability) entry.probability = parseFloat(row.probability);
+            // Merge any extra fields from data JSONB
+            if (row.data) {
+                try { Object.assign(entry, typeof row.data === 'string' ? JSON.parse(row.data) : row.data); } catch (_) {}
+            }
+            return entry;
+        });
+    } catch (e) {
+        console.error('[db] Failed to load prediction log:', e.message);
+        return [];
+    }
+}
+
+async function clearPredictionLog() {
+    if (!ready) return;
+    try {
+        await pool.query('DELETE FROM prediction_log');
+    } catch (e) {
+        console.error('[db] Failed to clear prediction log:', e.message);
+    }
+}
+
+// ── Store State (Key-Value persistence) ──────────────────────
+
+async function saveStoreState(key, value) {
+    if (!ready) return;
+    try {
+        await pool.query(`
+            INSERT INTO store_state (key, value, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT(key) DO UPDATE SET value = $2, updated_at = NOW()
+        `, [key, JSON.stringify(value)]);
+    } catch (e) {
+        console.error(`[db] Failed to save store state '${key}':`, e.message);
+    }
+}
+
+async function loadStoreState(key) {
+    if (!ready) return null;
+    try {
+        const { rows } = await pool.query('SELECT value FROM store_state WHERE key = $1', [key]);
+        if (rows.length === 0) return null;
+        return rows[0].value;
+    } catch (e) {
+        console.error(`[db] Failed to load store state '${key}':`, e.message);
+        return null;
+    }
+}
+
 // ── Cleanup ────────────────────────────────────────────────────
 
 async function close() {
@@ -1207,4 +1339,11 @@ module.exports = {
     getBalanceHistory,
     getLatestBalance,
     getBalanceSummary,
+    // Prediction log (UI period history)
+    savePredictionLogEntry,
+    loadPredictionLog,
+    clearPredictionLog,
+    // Store state persistence
+    saveStoreState,
+    loadStoreState,
 };

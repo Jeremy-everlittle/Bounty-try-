@@ -1285,8 +1285,7 @@ wss.on('connection', (ws, req) => {
             const msg = JSON.parse(raw);
             if (msg.type === 'clearHistory') {
                 console.log('Client requested history clear');
-                store.getState().predictionLog = [];
-                store.save();
+                store.clearPredictionLog();
                 tradeExecutor.clearTradeLog();
             }
         } catch (e) {}
@@ -1771,9 +1770,11 @@ const PORT = process.env.PORT || 3000;
 // Load persisted prediction state before starting
 store.load();
 
-// Initialize PostgreSQL database and restore trade history, then start server
-tradeExecutor.initFromDB().then(() => {
+// Initialize PostgreSQL database, restore trade history & store state, then start server
+tradeExecutor.initFromDB().then(async () => {
     console.log('[db] Database initialization complete');
+    // Load persistent store data from DB (fills gaps if JSON file was wiped by deploy)
+    await store.loadFromDB();
 }).catch(e => {
     console.error('[db] Database initialization failed (continuing without DB):', e.message);
 });
