@@ -831,6 +831,21 @@
                             mergePredictionLogs(msg.predictionLog);
                             renderPredictionHistory();
                         }
+                        // Safety: if stuck in transition but server has valid data, auto-recover
+                        if (isTransitioning && msg.brtiPrice && msg.kalshiStrike && msg.prediction && msg.prediction.originalPrediction) {
+                            console.log('Auto-recovering from stuck transition via WebSocket data');
+                            isTransitioning = false;
+                            kalshiStrike = msg.kalshiStrike;
+                            periodStartPrice = kalshiStrike;
+                            originalPrediction = msg.prediction.originalPrediction;
+                            updatedPrediction = msg.prediction.updatedPrediction || null;
+                            currentPrediction = updatedPrediction || originalPrediction;
+                            currentTarget = getPeriodEndTime();
+                            currentPeriodKey = getPeriodKey();
+                            document.getElementById('kalshi-error-banner').style.display = 'none';
+                            document.getElementById('status-bar').innerHTML =
+                                '<span style="color:#3fb950">&#9679;</span> Connected to server';
+                        }
                     }
                 } catch (e) {
                     console.error('WebSocket message parse error:', e);
@@ -2255,12 +2270,17 @@
                 }
 
                 if (transitionRetries >= 40) {
+                    // CRITICAL: release transition lock so regular fetch cycle can resume
+                    isTransitioning = false;
                     document.getElementById('kalshi-error-msg').textContent =
                         'Kalshi strike not available — no market found for this period';
                     document.getElementById('kalshi-error-banner').style.display = 'block';
                     document.getElementById('status-bar').innerHTML =
                         '&#9888; Kalshi strike unavailable &mdash; tap Refresh to retry';
-                    if (data) document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
+                    if (data) {
+                        document.getElementById('current-price').textContent = formatPrice(data.currentPrice);
+                        latestData = data;
+                    }
                     return;
                 }
 
