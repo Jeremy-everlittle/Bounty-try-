@@ -2038,7 +2038,8 @@ function predictPrice(marketData, minutesAhead, strike) {
         if (liq.totalLiqVol > 2000000) liqVolAdjust = 1.30; // >$2M
     }
 
-    const microVolAdjust = spreadVolAdjust * vpinVolAdjust * lambdaVolAdjust * oiSignal.volMultiplier * liqVolAdjust;
+    const rawMicroVolAdjust = spreadVolAdjust * vpinVolAdjust * lambdaVolAdjust * oiSignal.volMultiplier * liqVolAdjust;
+    const microVolAdjust = Math.max(0.5, Math.min(2.0, rawMicroVolAdjust)); // cap to prevent signal saturation during extreme conditions
     const adjustedRemainingVol = remainingVol * microVolAdjust;
     const driftWithEarlyBias = minutesIntoPeriod <= 3 ? rawDrift * 0.75 + earlyMomentumSignal * 0.25 : rawDrift;
     const adjustedDrift = driftWithEarlyBias * driftMultiplier;
