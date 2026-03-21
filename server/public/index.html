@@ -999,6 +999,8 @@
         }
 
         function connectWebSocket() {
+            // Cancel any pending reconnect timer to prevent overlapping connections
+            if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = protocol + '//' + location.host + (_DASH_KEY ? '?apiKey=' + encodeURIComponent(_DASH_KEY) : '');
             console.log('Connecting to WebSocket:', wsUrl);

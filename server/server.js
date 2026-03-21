@@ -1382,6 +1382,8 @@ wss.on('connection', (ws, req) => {
                 console.log('Client requested history clear');
                 store.clearPredictionLog();
                 tradeExecutor.clearTradeLog();
+            } else if (msg.type === 'ping') {
+                try { ws.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
             }
         } catch (e) {}
     });
