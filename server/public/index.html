@@ -1441,9 +1441,9 @@
 
                     // Prices: Strike, Predicted, Final
                     html += '<div class="period-prices">' +
-                        '<div class="period-price-cell"><span class="period-price-label">Strike</span><span class="period-price-value">' + formatPrice(p.startPrice) + '</span></div>' +
-                        '<div class="period-price-cell"><span class="period-price-label">Predicted</span><span class="period-price-value pred">' + formatPrice(p.predictedPrice) + '</span></div>' +
-                        '<div class="period-price-cell"><span class="period-price-label">Final</span><span class="period-price-value">' + formatPrice(p.actualPrice) + '</span></div>' +
+                        '<div class="period-price-cell"><span class="period-price-label">Strike</span><span class="period-price-value">' + (p.startPrice ? formatPrice(p.startPrice) : '--') + '</span></div>' +
+                        '<div class="period-price-cell"><span class="period-price-label">Predicted</span><span class="period-price-value pred">' + (p.predictedPrice ? formatPrice(p.predictedPrice) : '--') + '</span></div>' +
+                        '<div class="period-price-cell"><span class="period-price-label">Final</span><span class="period-price-value">' + (p.actualPrice ? formatPrice(p.actualPrice) : '--') + '</span></div>' +
                         '</div>';
 
                     // Accuracy line
