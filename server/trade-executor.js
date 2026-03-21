@@ -2130,7 +2130,7 @@ async function refreshBalance() {
         const resp = await trading.getBalance();
         cachedBalance = { balanceCents: resp.balance, portfolioValueCents: resp.portfolio_value, lastFetched: Date.now() };
     } catch (e) {
-        // Silently fail — will retry next cycle
+        console.error(`[trade-executor] refreshBalance failed (${getEnvironment()}): ${e.message}`);
     }
 }
 
