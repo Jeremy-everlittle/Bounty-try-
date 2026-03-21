@@ -1398,14 +1398,15 @@
                 // Determine outcome
                 let outcomeLabel, outcomeCls, periodCls;
                 if (settlement) {
-                    if (settlement.correct) {
+                    const periodPnl = settlement.pnlCents || 0;
+                    if (periodPnl >= 0) {
                         outcomeLabel = 'WIN'; outcomeCls = 'period-outcome-win'; periodCls = 'period-win';
                         totalWins++;
                     } else {
                         outcomeLabel = 'LOSS'; outcomeCls = 'period-outcome-loss'; periodCls = 'period-loss';
                         totalLosses++;
                     }
-                    totalPnlCents += settlement.pnlCents || 0;
+                    totalPnlCents += periodPnl;
                 } else if (!hasTrades) {
                     outcomeLabel = 'NO BET'; outcomeCls = 'period-outcome-nobet'; periodCls = 'period-no-bet';
                 } else {
