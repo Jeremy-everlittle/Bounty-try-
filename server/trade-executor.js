@@ -1691,8 +1691,8 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
 // ═══════════════════════════════════════════════════════════════
 
 async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemaining, kalshiTicker, periodKey) {
-    // Allow late lock in final 3 minutes (was 2)
-    if (minutesRemaining > 3.0) return;
+    // Only allow late lock in final 1 minute — placing earlier risks losing everything
+    if (minutesRemaining > 1.0) return;
     if (killSwitch) return;
 
     // Must have strong prediction data
