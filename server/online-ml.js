@@ -189,13 +189,13 @@ class OnlineLogisticRegression {
         const error = pred - label;
         const lr = this._currentLR();
 
-        // Update weights with L2 regularization
+        // Update weights with L2 regularization and gradient clipping
         for (let i = 0; i < this.numFeatures; i++) {
-            const grad = error * x[i] + this.lambda * this.weights[i];
+            const grad = Math.max(-5, Math.min(5, error * x[i] + this.lambda * this.weights[i]));
             this.weights[i] -= lr * grad;
         }
-        // Bias has no regularization
-        this.bias -= lr * error;
+        // Bias has no regularization (clip to prevent explosion)
+        this.bias -= lr * Math.max(-5, Math.min(5, error));
 
         this.t++;
         this.trainingSamples++;
