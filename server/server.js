@@ -1444,6 +1444,64 @@ app.get('/api/trading/analytics', async (req, res) => {
     }
 });
 
+// ── DB Dump / Debug Endpoint ─────────────────────────────────
+// Full trade history + stats for external analysis
+app.get('/api/db/dump', async (req, res) => {
+    const db = require('./db');
+    try {
+        const days = parseInt(req.query.days || '7', 10);
+        const tradeLimit = parseInt(req.query.trades || '200', 10);
+
+        const [dailyStats, recentTrades, winByStrategy, winByDirection, winByHour, cumulativePnl, totalTrades] = await Promise.all([
+            db.getDailyStatsHistory(days),
+            db.getRecentTrades(tradeLimit),
+            db.getWinRateByStrategy(),
+            db.getWinRateByDirection(),
+            db.getWinRateByHour(),
+            db.getCumulativePnl(),
+            db.getTradeCount(),
+        ]);
+
+        // Summarize settlements for quick analysis
+        const settlements = (recentTrades || []).filter(t => t.type === 'settle');
+        const buys = (recentTrades || []).filter(t => t.type === 'buy');
+
+        res.json({
+            summary: {
+                totalTrades,
+                cumulativePnl,
+                settlementsInWindow: settlements.length,
+                winsInWindow: settlements.filter(s => s.correct).length,
+                lossesInWindow: settlements.filter(s => !s.correct).length,
+                flipsInWindow: settlements.filter(s => s.data?.flipped).length,
+            },
+            dailyStats,
+            winByStrategy,
+            winByDirection,
+            winByHour,
+            recentTrades: (recentTrades || []).map(t => ({
+                type: t.type,
+                time: t.time,
+                side: t.side,
+                contracts: t.contracts,
+                price: t.limit_price || t.entry_price,
+                pnlCents: t.pnl_cents,
+                correct: t.correct,
+                strategy: t.strategy,
+                periodKey: t.period_key,
+                conviction: t.data?.convictionTier,
+                edge: t.data?.edge,
+                flipped: t.data?.flipped,
+                flipLoss: t.data?.flipLossCents,
+                sigma: t.data?.sigmaDistance,
+            })),
+        });
+    } catch (e) {
+        console.error('[api] DB dump error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ── Snapshot / Cycle Analysis API Endpoints ──────────────────
 
 app.get('/api/snapshots/predictions', async (req, res) => {
