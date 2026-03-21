@@ -1366,6 +1366,12 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 
         if (filledContracts < currentPosition.contracts) {
             console.log(`[trade-executor] Partial sell: ${filledContracts}/${currentPosition.contracts} — reducing position`);
+            // Pro-rata cost basis reduction
+            const oldTotal = currentPosition.totalContracts || currentPosition.contracts;
+            if (currentPosition.totalCostCents && oldTotal > 0) {
+                const costPerContract = currentPosition.totalCostCents / oldTotal;
+                currentPosition.totalCostCents -= Math.round(filledContracts * costPerContract);
+            }
             currentPosition.contracts -= filledContracts;
             if (currentPosition.totalContracts) {
                 currentPosition.totalContracts -= filledContracts;
