@@ -1265,7 +1265,7 @@ function getCalibrationBin(prob) {
 }
 
 function computeDirectionalPrior(direction, windowSize) {
-    if (typeof windowSize === 'undefined') windowSize = 5;
+    if (typeof windowSize === 'undefined') windowSize = 20;
     const bayesianState = store.getBayesianState();
     const graded = bayesianState.records.filter(
         r => r.predictedDirection === direction && r.correct !== null
@@ -1291,31 +1291,14 @@ function computeRegimeAdjustment(volRegimeLabel, trendRegimeLabel) {
 }
 
 function computeCalibrationAdjustment(rawProb) {
-    const bayesianState = store.getBayesianState();
-    const bin = getCalibrationBin(rawProb);
-    const beta = bayesianState.calibrationBins[bin];
-    if (!beta) return { calibratedProb: rawProb, adjustment: 0 };
-    const n = beta.a + beta.b - 2;
-    if (n < 3) return { calibratedProb: rawProb, adjustment: 0 };
-    const historicalAccuracy = betaMean(beta);
-    const weight = Math.min(n / 20, 0.5);
-    const calibratedProb = rawProb * (1 - weight) + historicalAccuracy * weight;
-    return { calibratedProb, adjustment: calibratedProb - rawProb };
+    // Neutralized — OnlineCalibrator in online-ml.js is the sole calibration layer
+    return { calibratedProb: rawProb, adjustment: 0 };
 }
 
 function detectPredictionStreak() {
-    const bayesianState = store.getBayesianState();
-    const graded = bayesianState.records.filter(r => r.actualDirection !== null);
-    if (graded.length < 3) return { streakLength: 0, streakDirection: null, adjustment: 0 };
-    let streak = 0;
-    const lastCorrect = graded[graded.length - 1].correct;
-    for (let i = graded.length - 1; i >= 0; i--) {
-        if (graded[i].correct === lastCorrect) streak++;
-        else break;
-    }
-    if (streak < 3) return { streakLength: streak, streakDirection: null, adjustment: 0 };
-    const adj = lastCorrect ? Math.min(streak * 0.02, 0.1) : -Math.min(streak * 0.03, 0.15);
-    return { streakLength: streak, streakDirection: lastCorrect ? 'correct' : 'wrong', adjustment: adj };
+    // Removed: streak-based probability adjustment is gambler's fallacy.
+    // Winning/losing streaks should NOT adjust probabilities.
+    return { streakLength: 0, streakDirection: null, adjustment: 0 };
 }
 
 function bayesianAdjust(rawProb, volRegimeLabel, trendRegimeLabel) {
@@ -1336,7 +1319,7 @@ function computeBayesianPrior() {
     const predLog = store.getPredictionLog();
     const graded = predLog.filter(p => p.actualDirection !== null);
     if (graded.length < 2) return 0;
-    const recent = graded.slice(-5);
+    const recent = graded.slice(-20);
     let upWeight = 0, totalWeight = 0;
     for (let i = 0; i < recent.length; i++) {
         const w = Math.pow(1.5, i);
@@ -1747,7 +1730,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
 
         // TIER 3: LOCK — price is far on our side near settlement, nearly guaranteed
         // 85%+ probability, <5 min left, on right side, strong sigma distance
-        if (probForBet >= 0.85 && minutesLeft <= 5 && onRightSide && sigmaFromStrike >= 1.0 && !chop.choppy) {
+        if (probForBet >= 0.85 && minutesLeft <= 5 && onRightSide && sigmaFromStrike >= 2.0 && !chop.choppy) {
             betSize = Math.max(betSize, 3.0);
             convictionTier = 'LOCK';
             betSizeReason = 'MAX CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
@@ -2014,6 +1997,7 @@ function predictPrice(marketData, minutesAhead, strike) {
         const clustering = computeTradeSizeClustering(recentTrades);
         const rawFlow = computeTradeFlowImbalance(recentTrades);
         const cvd = computeCVD(recentTrades);
+        const cvdSignal = cvd.signal;
         const vpin = computeVPIN(recentTrades);
         tradeFlowSignal = clustering.signal * 0.35 + rawFlow * 0.25 + cvd.signal * 0.25 + vpin.signal * 0.15;
         // VPIN Granger-causes price jumps (research) — strongest microstructure signal
@@ -2211,7 +2195,7 @@ function predictPrice(marketData, minutesAhead, strike) {
     // ═══════════════════════════════════════════════════════════════
 
     // GROUP 1: Single momentum composite (replaces 7 redundant momentum signals)
-    const momentumComposite = driftZShift * regM.momentum;
+    const momentumComposite = (driftZShift + volumeSurgeSignal * 0.3) * regM.momentum;
 
     // GROUP 2: Order flow composite (replaces 4 overlapping flow signals)
     const flowComposite = (orderFlowSignal * 0.5 + tradeFlowSignal * 0.3 + (typeof cvdSignal !== 'undefined' ? cvdSignal * 0.2 : 0)) * regM.flow;
@@ -2223,18 +2207,22 @@ function predictPrice(marketData, minutesAhead, strike) {
     const liqComposite = liqSignal * immediateBoosted;
 
     // GROUP 5: Exhaustion (contrarian, stronger mid/late period)
-    const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * regM.reversion;
+    const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * (2.0 - regM.momentum);
 
     // GROUP 6: ETH confirmation (small, only when active)
     const ethComposite = ethLL.signal * immediateBoosted * regM.momentum;
+
+    // GROUP 7: Contrarian/Positioning (funding + long/short ratio)
+    const contrarianComposite = fundingSignal * 0.6 + longShortSignal * 0.4;
 
     const rawTotalZShift = (
         momentumComposite     * 0.12 +   // single momentum (was 7 signals totaling ~0.45)
         flowComposite         * 0.08 +   // order flow (with decay: multiply by exp(-minutesAhead/3))
         meanRevComposite      * 0.10 +   // mean reversion
         liqComposite          * 0.08 +   // liquidation cascades
-        exhaustionComposite   * 1.00 +   // already scaled
-        ethComposite          * 0.04     // ETH confirmation
+        exhaustionComposite   * 0.08 +   // exhaustion (was 1.00 — 8x overweighted vs other groups)
+        ethComposite          * 0.04 +   // ETH confirmation
+        contrarianComposite   * 0.05     // contrarian/positioning
     );
 
     // Shrinkage + cap: max 0.4 total z-shift (was 1.2 — a 1.2 z-shift moves
@@ -2324,7 +2312,7 @@ function predictPrice(marketData, minutesAhead, strike) {
     // T = 1.3 is the recommended default for unverified models.
     // The self-learned overconfidenceRatio above partially handles this,
     // but temperature scaling in logit space is more principled.
-    const TEMPERATURE = 1.02; // very mild (was 1.10 — crushed edge too much)
+    const TEMPERATURE = 1.12; // model is provably overconfident (was 1.02 — cosmetically mild)
     if (finalProb > 0.01 && finalProb < 0.99) {
         const logit = Math.log(finalProb / (1 - finalProb));
         const scaledLogit = logit / TEMPERATURE;
