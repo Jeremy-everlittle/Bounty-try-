@@ -2293,7 +2293,9 @@
             card.style.display = 'block';
             content.innerHTML = '<div class="period-detail-loading">Loading analysis...</div>';
             try {
-                const resp = await fetch('/api/auto-bettor-analysis');
+                const headers = {};
+                if (_DASH_KEY) headers['x-api-key'] = _DASH_KEY;
+                const resp = await fetch('/api/auto-bettor-analysis', { headers });
                 const data = await resp.json();
                 if (data.error) { content.innerHTML = '<div style="color:#f85149;padding:8px">Error: ' + data.error + '</div>'; return; }
                 renderAutoBettorAnalysis(content, data);
