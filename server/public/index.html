@@ -1830,12 +1830,13 @@
                 const cH = H - pad.top - pad.bottom;
 
                 // Price range for Y axis (BTC price + strike + bounds)
-                const allPrices = points.map(p => p.price);
-                if (strike) allPrices.push(strike);
+                const allPrices = points.map(p => p.price).filter(v => v && isFinite(v));
+                if (strike && isFinite(strike)) allPrices.push(strike);
                 for (const p of points) {
-                    if (p.predHigh) allPrices.push(p.predHigh);
-                    if (p.predLow) allPrices.push(p.predLow);
+                    if (p.predHigh && isFinite(p.predHigh)) allPrices.push(p.predHigh);
+                    if (p.predLow && isFinite(p.predLow)) allPrices.push(p.predLow);
                 }
+                if (allPrices.length === 0) return;
                 let yMin = Math.min(...allPrices);
                 let yMax = Math.max(...allPrices);
                 const yPad = (yMax - yMin) * 0.1 || 10;
@@ -3702,17 +3703,24 @@
             // Compute price range including strike, prediction, bounds
             const prices = filtered.map(p => p.price);
             const strike = periodStartPrice || null;
-            const allPrices = [...prices, predictedPrice];
-            if (strike) allPrices.push(strike);
-            if (bounds && bounds.high) allPrices.push(bounds.high);
-            if (bounds && bounds.low) allPrices.push(bounds.low);
+            const allPrices = [...prices];
+            if (predictedPrice && isFinite(predictedPrice)) allPrices.push(predictedPrice);
+            if (strike && isFinite(strike)) allPrices.push(strike);
+            if (bounds && bounds.high && isFinite(bounds.high)) allPrices.push(bounds.high);
+            if (bounds && bounds.low && isFinite(bounds.low)) allPrices.push(bounds.low);
             // Include all historical bounds so the chart never clips
             if (bHistory && bHistory.length) {
-                for (const b of bHistory) { allPrices.push(b.high, b.low); }
+                for (const b of bHistory) {
+                    if (b.high && isFinite(b.high)) allPrices.push(b.high);
+                    if (b.low && isFinite(b.low)) allPrices.push(b.low);
+                }
             }
-            const minP = Math.min(...allPrices) * 0.9999;
-            const maxP = Math.max(...allPrices) * 1.0001;
-            const range = maxP - minP;
+            // Safety: filter out any remaining invalid values
+            const validPrices = allPrices.filter(p => p && isFinite(p) && p > 0);
+            if (validPrices.length === 0) return;
+            const minP = Math.min(...validPrices) * 0.9999;
+            const maxP = Math.max(...validPrices) * 1.0001;
+            const range = maxP - minP || 1;
 
             function toY(p) { return pad.top + (1 - (p - minP) / range) * cH; }
 
