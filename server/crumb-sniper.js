@@ -78,50 +78,54 @@ async function scanForCandidates() {
     const maxClose = new Date(now.getTime() + CONFIG.maxSecondsToExpiry * 1000);
 
     try {
-        // Fetch markets closing within our window using multiple strategies:
-        // 1. Try timestamp-based filtering (may not work on all API versions)
-        // 2. Fall back to fetching open markets from known series and filtering locally
+        // Fetch ALL markets closing within our window — any category, any type.
+        // Strategy 1: Timestamp-based query (Kalshi API filters server-side)
+        // Strategy 2: Broad open market scan with local time filtering
         const allMarkets = [];
         let cursor = null;
+        const seenTickers = new Set();
 
-        // Strategy 1: Timestamp-based query (use ISO strings — Kalshi API expects ISO format)
-        const params = {
-            min_close_ts: minClose.toISOString(),
-            max_close_ts: maxClose.toISOString(),
-            limit: '200',
-        };
+        // Strategy 1: Timestamp-based query — try both ISO and Unix formats
+        // since Kalshi API docs are ambiguous about which format they expect
+        for (const tsFormat of ['iso', 'unix']) {
+            if (allMarkets.length > 0) break; // found markets, skip other format
 
-        for (let page = 0; page < 10; page++) { // max 10 pages = 2000 markets
-            const qp = new URLSearchParams(params);
-            if (cursor) qp.set('cursor', cursor);
+            const params = tsFormat === 'iso'
+                ? { min_close_ts: minClose.toISOString(), max_close_ts: maxClose.toISOString(), limit: '200' }
+                : { min_close_ts: Math.floor(minClose.getTime() / 1000).toString(), max_close_ts: Math.floor(maxClose.getTime() / 1000).toString(), limit: '200' };
 
-            const data = await fetchJSON(PUBLIC_API + '/markets?' + qp.toString());
-            if (!data || !data.markets || data.markets.length === 0) break;
+            cursor = null;
+            for (let page = 0; page < 10; page++) {
+                const qp = new URLSearchParams(params);
+                if (cursor) qp.set('cursor', cursor);
 
-            allMarkets.push(...data.markets);
-            cursor = data.cursor;
-            if (!cursor) break; // no more pages
+                const data = await fetchJSON(PUBLIC_API + '/markets?' + qp.toString());
+                if (!data || !data.markets || data.markets.length === 0) break;
+
+                for (const m of data.markets) {
+                    if (!seenTickers.has(m.ticker)) {
+                        allMarkets.push(m);
+                        seenTickers.add(m.ticker);
+                    }
+                }
+                cursor = data.cursor;
+                if (!cursor) break;
+            }
         }
 
-        // Strategy 2: If timestamp query returned nothing, scan known series tickers
-        // for open markets and filter by close time locally
+        // Strategy 2: If timestamp queries failed, fetch ALL open markets
+        // and filter by close time locally. This catches everything — crypto,
+        // politics, sports, weather, finance, etc.
         if (allMarkets.length === 0) {
-            // Scan all known crypto series in parallel for speed
-            const SERIES_TICKERS = [
-                'KXBTC15M', 'KXBTC5M', 'KXBTC1H', 'KXBTC1D',
-                'KXETH15M', 'KXETH5M', 'KXETH1H',
-                'KXSOL15M', 'KXSOL5M',
-                'KXDOGE15M', 'KXADA15M', 'KXXRP15M',
-            ];
-            const seriesResults = await Promise.allSettled(
-                SERIES_TICKERS.map(series =>
-                    fetchJSON(PUBLIC_API + '/markets?series_ticker=' + series + '&status=open&limit=50')
-                )
-            );
-            const seenTickers = new Set();
-            for (const result of seriesResults) {
-                if (result.status !== 'fulfilled' || !result.value || !result.value.markets) continue;
-                for (const m of result.value.markets) {
+            cursor = null;
+            for (let page = 0; page < 10; page++) {
+                const qp = new URLSearchParams({ status: 'open', limit: '200' });
+                if (cursor) qp.set('cursor', cursor);
+
+                const data = await fetchJSON(PUBLIC_API + '/markets?' + qp.toString());
+                if (!data || !data.markets || data.markets.length === 0) break;
+
+                for (const m of data.markets) {
                     if (seenTickers.has(m.ticker)) continue;
                     const ct = new Date(m.close_time || m.expiration_time);
                     const secsLeft = (ct - now) / 1000;
@@ -130,6 +134,8 @@ async function scanForCandidates() {
                         seenTickers.add(m.ticker);
                     }
                 }
+                cursor = data.cursor;
+                if (!cursor) break;
             }
         }
 
@@ -560,7 +566,7 @@ function start(options = {}) {
     if (options.paperBalance !== undefined) paperBalanceCents = options.paperBalance;
 
     resetDailyStatsIfNeeded();
-    console.log(`[crumb-sniper] Started in ${paperMode ? 'PAPER' : 'LIVE'} mode | Scan every ${CONFIG.scanIntervalMs / 1000}s | Bet threshold: ${CONFIG.betMinPrice}-${CONFIG.betMaxPrice}¢`);
+    console.log(`[crumb-sniper] Started in ${paperMode ? 'PAPER' : 'LIVE'} mode | Scan every ${CONFIG.scanIntervalMs / 1000}s | Window: ${CONFIG.minSecondsToExpiry}-${CONFIG.maxSecondsToExpiry}s to expiry | Bet threshold: ${CONFIG.betMinPrice}-${CONFIG.betMaxPrice}¢ | Scanning ALL Kalshi markets`);
 
     // Run immediately, then on interval
     runScanCycle();
