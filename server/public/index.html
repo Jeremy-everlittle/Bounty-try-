@@ -631,6 +631,28 @@
         .period-pnl-value { font-size: 14px; font-weight: 700; }
         .period-accuracy { font-size: 10px; color: #8b949e; margin-top: 4px; }
         .period-no-trades { font-size: 10px; color: #484f58; font-style: italic; margin-top: 4px; }
+        /* ── Period Detail Chart (expandable) ── */
+        .period-detail-toggle { display: flex; align-items: center; gap: 4px; margin-top: 8px; padding: 4px 8px; cursor: pointer; font-size: 10px; color: #58a6ff; background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.15); border-radius: 4px; user-select: none; width: fit-content; transition: background 0.15s; }
+        .period-detail-toggle:hover { background: rgba(88,166,255,0.15); }
+        .period-detail-toggle .toggle-arrow { transition: transform 0.2s; font-size: 8px; }
+        .period-detail-toggle .toggle-arrow.open { transform: rotate(90deg); }
+        .period-detail-container { display: none; margin-top: 8px; border-radius: 6px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.06); overflow: hidden; }
+        .period-detail-container.open { display: block; }
+        .period-detail-loading { padding: 20px; text-align: center; color: #8b949e; font-size: 11px; }
+        .period-chart-wrap { padding: 8px; }
+        .period-chart-wrap canvas { width: 100%; border-radius: 4px; }
+        .period-chart-legend { display: flex; flex-wrap: wrap; gap: 10px; padding: 6px 10px; font-size: 9px; color: #8b949e; border-top: 1px solid rgba(255,255,255,0.06); }
+        .period-chart-legend span { display: flex; align-items: center; gap: 3px; }
+        .period-chart-legend .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .period-detail-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 6px; padding: 8px 10px; border-top: 1px solid rgba(255,255,255,0.06); }
+        .period-detail-stat { font-size: 10px; }
+        .period-detail-stat .stat-label { color: #8b949e; font-size: 9px; }
+        .period-detail-stat .stat-value { color: #e6edf3; font-weight: 600; }
+        .period-detail-signals { padding: 8px 10px; border-top: 1px solid rgba(255,255,255,0.06); }
+        .period-detail-signals-title { font-size: 9px; color: #8b949e; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+        .period-signal-row { display: flex; justify-content: space-between; padding: 2px 0; font-size: 10px; border-bottom: 1px solid rgba(255,255,255,0.03); }
+        .period-signal-name { color: #b0b8c1; }
+        .period-signal-value { font-weight: 600; }
         /* ── Trader Thought Bubble ── */
         .trader-thought { margin-top: 8px; padding: 8px 10px; border-radius: 6px; font-size: 11px; }
         .trader-thought-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 3px; }
@@ -1720,6 +1742,19 @@
                     html += '<div class="period-no-trades">No bets placed this period</div>';
                 }
 
+                // Expandable detail chart toggle (only for graded periods)
+                const pk = p ? p.periodKey : (periodTrades[0] && periodTrades[0].periodKey);
+                if (pk && p && p.correct !== null) {
+                    const safeKey = pk.replace(/[^a-zA-Z0-9_-]/g, '_');
+                    html += '<div class="period-detail-toggle" onclick="togglePeriodDetail(\'' + pk + '\', \'' + safeKey + '\')">' +
+                        '<span class="toggle-arrow" id="arrow-' + safeKey + '">\u25B6</span>' +
+                        '<span>Period Details</span>' +
+                        '</div>';
+                    html += '<div class="period-detail-container" id="detail-' + safeKey + '">' +
+                        '<div class="period-detail-loading">Click to load period data...</div>' +
+                        '</div>';
+                }
+
                 html += '</div>';
             }
             container.innerHTML = html;
@@ -1749,6 +1784,443 @@
                     statsEl.style.display = 'none';
                 }
             }
+        }
+
+        // ── Period Detail Chart ─────────────────────────────────────
+        const periodDetailCache = {};
+
+        async function togglePeriodDetail(periodKey, safeKey) {
+            const container = document.getElementById('detail-' + safeKey);
+            const arrow = document.getElementById('arrow-' + safeKey);
+            if (!container) return;
+
+            const isOpen = container.classList.contains('open');
+            if (isOpen) {
+                container.classList.remove('open');
+                arrow.classList.remove('open');
+                return;
+            }
+
+            container.classList.add('open');
+            arrow.classList.add('open');
+
+            // Load data if not cached
+            if (!periodDetailCache[periodKey]) {
+                container.innerHTML = '<div class="period-detail-loading">Loading period data...</div>';
+                try {
+                    const headers = {};
+                    if (_DASH_KEY) headers['x-api-key'] = _DASH_KEY;
+                    const resp = await fetch('/api/cycle-data/' + encodeURIComponent(periodKey), { headers });
+                    const json = await resp.json();
+                    periodDetailCache[periodKey] = json.data || [];
+                } catch (e) {
+                    container.innerHTML = '<div class="period-detail-loading" style="color:#f85149">Failed to load: ' + e.message + '</div>';
+                    return;
+                }
+            }
+
+            const data = periodDetailCache[periodKey];
+            if (!data || data.length === 0) {
+                container.innerHTML = '<div class="period-detail-loading">No tick data recorded for this period.</div>';
+                return;
+            }
+
+            renderPeriodDetailChart(container, data, periodKey);
+        }
+
+        function renderPeriodDetailChart(container, ticks, periodKey) {
+            // Parse timestamps and values
+            const points = ticks.map(t => ({
+                time: new Date(t.timestamp),
+                price: parseFloat(t.btc_price),
+                predicted: parseFloat(t.predicted_price) || null,
+                strike: parseFloat(t.strike) || null,
+                prob: parseFloat(t.probability) || null,
+                conf: parseFloat(t.confidence) || null,
+                dir: t.direction,
+                minsLeft: parseFloat(t.minutes_remaining) || 0,
+                kalshiYesBid: parseFloat(t.kalshi_yes_bid) || null,
+                kalshiYesAsk: parseFloat(t.kalshi_yes_ask) || null,
+                rawSignals: typeof t.raw_signals === 'string' ? JSON.parse(t.raw_signals || '{}') : (t.raw_signals || {}),
+                betQuality: typeof t.bet_quality === 'string' ? JSON.parse(t.bet_quality || '{}') : (t.bet_quality || {}),
+                sellSignal: typeof t.sell_signal === 'string' ? JSON.parse(t.sell_signal || '{}') : (t.sell_signal || {}),
+            })).sort((a, b) => a.time - b.time);
+
+            if (points.length === 0) {
+                container.innerHTML = '<div class="period-detail-loading">No data points.</div>';
+                return;
+            }
+
+            // Detect direction flips
+            const flips = [];
+            for (let i = 1; i < points.length; i++) {
+                if (points[i].dir && points[i - 1].dir && points[i].dir !== points[i - 1].dir) {
+                    flips.push({ idx: i, from: points[i - 1].dir, to: points[i].dir, time: points[i].time });
+                }
+            }
+
+            // Build chart
+            const canvasId = 'chart-' + periodKey.replace(/[^a-zA-Z0-9]/g, '_');
+            const chartHeight = 180;
+            const dpr = window.devicePixelRatio || 1;
+
+            let html = '<div class="period-chart-wrap">';
+            html += '<canvas id="' + canvasId + '" height="' + chartHeight + '" style="height:' + chartHeight + 'px"></canvas>';
+            html += '</div>';
+
+            // Legend
+            html += '<div class="period-chart-legend">';
+            html += '<span><span class="dot" style="background:#58a6ff"></span>BTC Price</span>';
+            html += '<span><span class="dot" style="background:#f0883e"></span>Predicted</span>';
+            html += '<span><span class="dot" style="background:rgba(255,255,255,0.25)"></span>Strike</span>';
+            html += '<span><span class="dot" style="background:#a371f7"></span>P(up) %</span>';
+            if (flips.length > 0) html += '<span><span class="dot" style="background:#e3b341"></span>Direction Flip</span>';
+            html += '</div>';
+
+            // Stats grid
+            const firstPrice = points[0].price;
+            const lastPrice = points[points.length - 1].price;
+            const strike = points[0].strike;
+            const priceRange = points.map(p => p.price);
+            const minPrice = Math.min(...priceRange);
+            const maxPrice = Math.max(...priceRange);
+            const avgProb = points.reduce((s, p) => s + (p.prob || 0), 0) / points.length;
+            const avgConf = points.reduce((s, p) => s + (p.conf || 0), 0) / points.length;
+            const finalDir = points[points.length - 1].dir;
+            const dirChanges = flips.length;
+
+            html += '<div class="period-detail-stats">';
+            html += '<div class="period-detail-stat"><div class="stat-label">Ticks Captured</div><div class="stat-value">' + points.length + '</div></div>';
+            html += '<div class="period-detail-stat"><div class="stat-label">Price Range</div><div class="stat-value">$' + minPrice.toFixed(2) + ' - $' + maxPrice.toFixed(2) + '</div></div>';
+            html += '<div class="period-detail-stat"><div class="stat-label">Price Move</div><div class="stat-value" style="color:' + (lastPrice >= firstPrice ? '#3fb950' : '#f85149') + '">' + (lastPrice >= firstPrice ? '+' : '') + '$' + (lastPrice - firstPrice).toFixed(2) + '</div></div>';
+            html += '<div class="period-detail-stat"><div class="stat-label">Avg P(up)</div><div class="stat-value">' + (avgProb * 100).toFixed(1) + '%</div></div>';
+            html += '<div class="period-detail-stat"><div class="stat-label">Avg Confidence</div><div class="stat-value">' + (avgConf * 100).toFixed(0) + '%</div></div>';
+            html += '<div class="period-detail-stat"><div class="stat-label">Direction Flips</div><div class="stat-value">' + dirChanges + '</div></div>';
+            html += '</div>';
+
+            // Signal breakdown from first and last ticks
+            const lastSignals = points[points.length - 1].rawSignals || {};
+            const signalKeys = Object.keys(lastSignals).filter(k => typeof lastSignals[k] === 'number');
+            if (signalKeys.length > 0) {
+                html += '<div class="period-detail-signals">';
+                html += '<div class="period-detail-signals-title">Final Signal Values</div>';
+                for (const key of signalKeys.slice(0, 12)) {
+                    const val = lastSignals[key];
+                    const color = val > 0 ? '#3fb950' : val < 0 ? '#f85149' : '#8b949e';
+                    html += '<div class="period-signal-row">';
+                    html += '<span class="period-signal-name">' + key.replace(/_/g, ' ') + '</span>';
+                    html += '<span class="period-signal-value" style="color:' + color + '">' + (typeof val === 'number' ? val.toFixed(4) : val) + '</span>';
+                    html += '</div>';
+                }
+                html += '</div>';
+            }
+
+            // Period Self-Analysis
+            html += '<div class="period-detail-signals" style="border-top:1px solid rgba(255,255,255,0.08)">';
+            html += '<div class="period-detail-signals-title" style="color:#58a6ff">Period Analysis</div>';
+
+            const analysis = analyzePeriod(points, flips, strike);
+            for (const item of analysis) {
+                const icon = item.type === 'good' ? '\u2713' : item.type === 'bad' ? '\u2717' : '\u25CB';
+                const color = item.type === 'good' ? '#3fb950' : item.type === 'bad' ? '#f85149' : '#d29922';
+                html += '<div style="padding:3px 0;font-size:10px;color:' + color + '">' +
+                    '<span style="font-weight:700;margin-right:4px">' + icon + '</span>' + item.msg + '</div>';
+            }
+
+            // Improvement suggestions
+            const improvements = suggestImprovements(points, flips, strike);
+            if (improvements.length > 0) {
+                html += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05)">';
+                html += '<div style="font-size:9px;color:#d29922;font-weight:600;letter-spacing:0.5px;margin-bottom:3px">IMPROVEMENTS</div>';
+                for (const imp of improvements) {
+                    html += '<div style="padding:2px 0;font-size:10px;color:#b0b8c1">\u2192 ' + imp + '</div>';
+                }
+                html += '</div>';
+            }
+            html += '</div>';
+
+            container.innerHTML = html;
+
+            // Draw chart on canvas
+            requestAnimationFrame(() => {
+                const canvas = document.getElementById(canvasId);
+                if (!canvas) return;
+                const rect = canvas.parentElement.getBoundingClientRect();
+                canvas.width = rect.width * dpr;
+                canvas.height = chartHeight * dpr;
+                canvas.style.width = rect.width + 'px';
+
+                const ctx = canvas.getContext('2d');
+                ctx.scale(dpr, dpr);
+                const W = rect.width;
+                const H = chartHeight;
+                const pad = { top: 16, right: 8, bottom: 24, left: 55 };
+                const cW = W - pad.left - pad.right;
+                const cH = H - pad.top - pad.bottom;
+
+                // Price range for Y axis
+                const allPrices = points.map(p => p.price);
+                if (strike) allPrices.push(strike);
+                points.forEach(p => { if (p.predicted) allPrices.push(p.predicted); });
+                let yMin = Math.min(...allPrices);
+                let yMax = Math.max(...allPrices);
+                const yPad = (yMax - yMin) * 0.1 || 10;
+                yMin -= yPad; yMax += yPad;
+
+                // Time range for X axis
+                const tMin = points[0].time.getTime();
+                const tMax = points[points.length - 1].time.getTime();
+                const tRange = tMax - tMin || 1;
+
+                function xPos(t) { return pad.left + ((t.getTime() - tMin) / tRange) * cW; }
+                function yPos(v) { return pad.top + (1 - (v - yMin) / (yMax - yMin)) * cH; }
+
+                // Background
+                ctx.fillStyle = 'rgba(0,0,0,0.4)';
+                ctx.fillRect(0, 0, W, H);
+
+                // Grid lines
+                ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+                ctx.lineWidth = 0.5;
+                const ySteps = 5;
+                for (let i = 0; i <= ySteps; i++) {
+                    const y = pad.top + (i / ySteps) * cH;
+                    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+                    const val = yMax - (i / ySteps) * (yMax - yMin);
+                    ctx.fillStyle = '#8b949e'; ctx.font = '9px monospace'; ctx.textAlign = 'right';
+                    ctx.fillText('$' + val.toFixed(0), pad.left - 4, y + 3);
+                }
+
+                // X axis time labels
+                const xSteps = Math.min(6, points.length);
+                ctx.fillStyle = '#8b949e'; ctx.font = '8px monospace'; ctx.textAlign = 'center';
+                for (let i = 0; i <= xSteps; i++) {
+                    const idx = Math.floor((i / xSteps) * (points.length - 1));
+                    const t = points[idx].time;
+                    const x = xPos(t);
+                    ctx.fillText(t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }), x, H - 4);
+                }
+
+                // Strike line (dashed)
+                if (strike) {
+                    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([4, 4]);
+                    ctx.beginPath();
+                    ctx.moveTo(pad.left, yPos(strike));
+                    ctx.lineTo(W - pad.right, yPos(strike));
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = '8px monospace'; ctx.textAlign = 'left';
+                    ctx.fillText('Strike', pad.left + 4, yPos(strike) - 3);
+                }
+
+                // Predicted price line
+                ctx.strokeStyle = '#f0883e';
+                ctx.lineWidth = 1.5;
+                ctx.globalAlpha = 0.7;
+                ctx.beginPath();
+                let started = false;
+                for (const p of points) {
+                    if (p.predicted === null) continue;
+                    const x = xPos(p.time), y = yPos(p.predicted);
+                    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+
+                // BTC price line
+                ctx.strokeStyle = '#58a6ff';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < points.length; i++) {
+                    const x = xPos(points[i].time), y = yPos(points[i].price);
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // P(up) overlay (secondary Y axis, drawn as area)
+                ctx.fillStyle = 'rgba(163,113,247,0.1)';
+                ctx.strokeStyle = 'rgba(163,113,247,0.5)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                for (let i = 0; i < points.length; i++) {
+                    const x = xPos(points[i].time);
+                    const probY = pad.top + (1 - (points[i].prob || 0.5)) * cH;
+                    if (i === 0) ctx.moveTo(x, probY); else ctx.lineTo(x, probY);
+                }
+                ctx.stroke();
+
+                // Direction flip markers
+                for (const flip of flips) {
+                    const p = points[flip.idx];
+                    const x = xPos(p.time);
+                    // Vertical yellow line
+                    ctx.strokeStyle = '#e3b341';
+                    ctx.lineWidth = 1.5;
+                    ctx.setLineDash([2, 2]);
+                    ctx.beginPath();
+                    ctx.moveTo(x, pad.top);
+                    ctx.lineTo(x, pad.top + cH);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    // Arrow label
+                    ctx.fillStyle = '#e3b341';
+                    ctx.font = 'bold 8px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('\u21C4 ' + flip.to.toUpperCase(), x, pad.top - 3);
+                }
+
+                // 50% line for probability
+                const y50 = pad.top + 0.5 * cH;
+                ctx.strokeStyle = 'rgba(163,113,247,0.2)';
+                ctx.lineWidth = 0.5;
+                ctx.setLineDash([2, 3]);
+                ctx.beginPath(); ctx.moveTo(pad.left, y50); ctx.lineTo(W - pad.right, y50); ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = 'rgba(163,113,247,0.4)'; ctx.font = '7px monospace'; ctx.textAlign = 'right';
+                ctx.fillText('50%', W - pad.right - 2, y50 - 2);
+            });
+        }
+
+        // ── Period Self-Analysis ────────────────────────────────────
+        function analyzePeriod(points, flips, strike) {
+            const analysis = [];
+            if (points.length < 3) return [{ type: 'info', msg: 'Too few data points for analysis.' }];
+
+            const first = points[0], last = points[points.length - 1];
+            const actualDir = last.price >= strike ? 'up' : 'down';
+            const predictedDir = first.dir;
+            const finalPredDir = last.dir;
+
+            // Did the prediction get the direction right?
+            if (finalPredDir === actualDir) {
+                analysis.push({ type: 'good', msg: 'Final prediction direction (' + finalPredDir.toUpperCase() + ') was correct.' });
+            } else {
+                analysis.push({ type: 'bad', msg: 'Final prediction direction (' + finalPredDir.toUpperCase() + ') was wrong — actual was ' + actualDir.toUpperCase() + '.' });
+            }
+
+            // Did it start correct?
+            if (predictedDir === actualDir) {
+                analysis.push({ type: 'good', msg: 'Initial prediction was correct from the start.' });
+            } else if (finalPredDir === actualDir) {
+                analysis.push({ type: 'info', msg: 'Started wrong but self-corrected via flip.' });
+            }
+
+            // Direction stability
+            if (flips.length === 0) {
+                analysis.push({ type: 'good', msg: 'No direction flips — prediction was stable throughout.' });
+            } else if (flips.length === 1) {
+                const flip = flips[0];
+                if (flip.to === actualDir) {
+                    analysis.push({ type: 'good', msg: 'Single flip to ' + flip.to.toUpperCase() + ' was a good correction.' });
+                } else {
+                    analysis.push({ type: 'bad', msg: 'Single flip to ' + flip.to.toUpperCase() + ' was a bad flip — original direction was right.' });
+                }
+            } else {
+                analysis.push({ type: 'bad', msg: flips.length + ' direction flips — prediction was indecisive.' });
+            }
+
+            // How close was the prediction to actual final price?
+            const lastPredicted = last.predicted;
+            if (lastPredicted) {
+                const predError = Math.abs(lastPredicted - last.price);
+                const pctError = (predError / last.price * 100);
+                if (pctError < 0.05) {
+                    analysis.push({ type: 'good', msg: 'Price prediction very accurate: $' + predError.toFixed(2) + ' off (' + pctError.toFixed(3) + '%).' });
+                } else if (pctError < 0.2) {
+                    analysis.push({ type: 'info', msg: 'Price prediction reasonable: $' + predError.toFixed(2) + ' off (' + pctError.toFixed(3) + '%).' });
+                } else {
+                    analysis.push({ type: 'bad', msg: 'Price prediction far off: $' + predError.toFixed(2) + ' off (' + pctError.toFixed(3) + '%).' });
+                }
+            }
+
+            // Confidence assessment
+            const avgConf = points.reduce((s, p) => s + (p.conf || 0), 0) / points.length;
+            const maxConf = Math.max(...points.map(p => p.conf || 0));
+            const minConf = Math.min(...points.map(p => p.conf || 0));
+            if (finalPredDir === actualDir && avgConf > 0.7) {
+                analysis.push({ type: 'good', msg: 'High confidence (' + (avgConf * 100).toFixed(0) + '%) on a correct prediction.' });
+            } else if (finalPredDir !== actualDir && avgConf > 0.7) {
+                analysis.push({ type: 'bad', msg: 'High confidence (' + (avgConf * 100).toFixed(0) + '%) on a WRONG prediction — overconfident.' });
+            } else if (avgConf < 0.5) {
+                analysis.push({ type: 'info', msg: 'Low confidence (' + (avgConf * 100).toFixed(0) + '%) — model was uncertain.' });
+            }
+
+            // Price vs strike at different points
+            const midIdx = Math.floor(points.length / 2);
+            const midPoint = points[midIdx];
+            const midAboveStrike = midPoint.price >= strike;
+            const endAboveStrike = last.price >= strike;
+            if (midAboveStrike !== endAboveStrike) {
+                analysis.push({ type: 'info', msg: 'Price crossed strike mid-period — volatile conditions.' });
+            }
+
+            // Kalshi market agreement
+            const lastBetQuality = last.betQuality;
+            if (lastBetQuality && lastBetQuality.edge !== undefined) {
+                if (lastBetQuality.edge === true || lastBetQuality.edge === 'YES') {
+                    analysis.push({ type: 'good', msg: 'Kalshi orderbook showed positive edge (Kelly > 0).' });
+                } else {
+                    analysis.push({ type: 'info', msg: 'Kalshi orderbook showed no edge (negative Kelly).' });
+                }
+            }
+
+            return analysis;
+        }
+
+        function suggestImprovements(points, flips, strike) {
+            const suggestions = [];
+            if (points.length < 3) return suggestions;
+
+            const last = points[points.length - 1];
+            const actualDir = last.price >= strike ? 'up' : 'down';
+            const finalPredDir = last.dir;
+            const avgConf = points.reduce((s, p) => s + (p.conf || 0), 0) / points.length;
+            const avgProb = points.reduce((s, p) => s + (p.prob || 0.5), 0) / points.length;
+
+            // Bad flips
+            if (flips.length > 0) {
+                const badFlips = flips.filter(f => f.to !== actualDir);
+                if (badFlips.length > 0) {
+                    suggestions.push('Consider adding a flip cooldown or requiring higher threshold to change direction — ' + badFlips.length + ' bad flip(s) hurt this period.');
+                }
+                if (flips.length > 2) {
+                    suggestions.push('Too many flips (' + flips.length + '). Add minimum hold time before direction changes to reduce whipsawing.');
+                }
+            }
+
+            // Overconfidence on wrong predictions
+            if (finalPredDir !== actualDir && avgConf > 0.7) {
+                suggestions.push('Model was overconfident (' + (avgConf * 100).toFixed(0) + '%) on wrong direction. Consider calibration adjustment or lowering confidence when signals conflict.');
+            }
+
+            // Low prob but correct
+            if (finalPredDir === actualDir && avgProb < 0.4) {
+                suggestions.push('Probability was low (' + (avgProb * 100).toFixed(0) + '%) despite correct prediction. Investigate which signals were suppressing probability.');
+            }
+
+            // Price crossed strike late — timing issue
+            const last20Pct = points.slice(Math.floor(points.length * 0.8));
+            const earlyDir = points[Math.floor(points.length * 0.3)].price >= strike ? 'up' : 'down';
+            if (earlyDir !== actualDir) {
+                suggestions.push('Price reversed in the final portion of the period. Late reversals are hard to predict — consider weighting recent momentum more heavily.');
+            }
+
+            // Kalshi spread was wide
+            const kalshiPoints = points.filter(p => p.kalshiYesBid && p.kalshiYesAsk);
+            if (kalshiPoints.length > 0) {
+                const avgSpread = kalshiPoints.reduce((s, p) => s + (p.kalshiYesAsk - p.kalshiYesBid), 0) / kalshiPoints.length;
+                if (avgSpread > 10) {
+                    suggestions.push('Average Kalshi spread was wide (' + avgSpread.toFixed(0) + 'c). Consider tighter entry criteria when liquidity is low.');
+                }
+            }
+
+            if (suggestions.length === 0) {
+                suggestions.push('Period performed well. No major issues identified.');
+            }
+
+            return suggestions;
         }
 
         // ── Time helpers ──────────────────────────────────────────────
