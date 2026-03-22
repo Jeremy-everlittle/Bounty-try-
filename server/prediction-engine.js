@@ -2337,11 +2337,32 @@ function predictPrice(marketData, minutesAhead, strike) {
     // Construct output
     const predictUp = finalProb > 0.5;
     const confidenceDistance = Math.abs(finalProb - 0.5) * 2;
-    // Anchor to current price (martingale property) with small drift
+
+    // ── End-of-period price forecast ──
+    // Goal: predict where BTC will actually be at settlement, not just current + tiny drift.
+    // Uses momentum extrapolation scaled by remaining time and conviction.
     const priceScale = learned.priceErrorScale || 1.0;
-    const maxDrift = adjustedRemainingVol * settlementVolAdj * current * 0.15 * priceScale;
-    const drift = maxDrift * confidenceDistance;
-    const predictedPrice = predictUp ? current + Math.max(drift, 0.01) : current - Math.max(drift, 0.01);
+
+    // Component 1: Momentum extrapolation — project recent price trend forward
+    // rawDrift is a blended momentum (% move), scale by minutes remaining
+    const momentumProjection = adjustedDrift * minutesAhead * current * priceScale;
+
+    // Component 2: Volatility-based expected move in predicted direction
+    // When model is highly confident, expect price to move proportionally to vol
+    const expectedVolMove = adjustedRemainingVol * settlementVolAdj * current;
+    const directionSign = predictUp ? 1 : -1;
+    const volProjection = directionSign * expectedVolMove * confidenceDistance;
+
+    // Blend: momentum dominates early (trend extrapolation), vol-based dominates late
+    // (when near settlement, vol compression means less expected movement)
+    const momentumWeight = Math.min(0.7, minutesAhead / 15);
+    const volWeight = 1 - momentumWeight;
+    const totalDrift = momentumProjection * momentumWeight + volProjection * volWeight;
+
+    // Apply a floor so there's always a visible difference from current price
+    const minDrift = current * 0.0001; // at least $6-7 on BTC ~$69k
+    const finalDrift = Math.sign(totalDrift || directionSign) * Math.max(Math.abs(totalDrift), minDrift);
+    const predictedPrice = current + finalDrift;
     const changePercent = ((predictedPrice - current) / current) * 100;
 
     // ── Mathematical high/low bounds (2σ confidence interval) ──
@@ -2814,11 +2835,14 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
     const finalLockedIsUp = stabilityState.lockedDirection === 'up';
     if (finalLockedIsUp !== rawIsUp && !didFlip) {
         const confDist = Math.abs(smoothedP - 0.5) * 2;
-        const offset = remainingVol * strike * confDist * 0.5;
+        // Use remaining vol to project a meaningful end-of-period price on the locked side of strike
+        const expectedMove = remainingVol * strike * confDist;
+        const minOffset = strike * 0.0001; // visible minimum offset
+        const offset = Math.max(expectedMove, minOffset);
         raw.predictedPrice = finalLockedIsUp
-            ? strike + Math.max(offset, 0.01)
-            : strike - Math.max(offset, 0.01);
-        raw.changePercent = ((raw.predictedPrice - strike) / strike) * 100;
+            ? strike + offset
+            : strike - offset;
+        raw.changePercent = ((raw.predictedPrice - current) / current) * 100;
     }
 
     // Save true raw probability before overwriting with smoothed
