@@ -12,6 +12,7 @@ const decisionLog = require('./decision-logger');
 const tradeExecutor = require('./trade-executor');
 const kalshiAuth = require('./kalshi-auth');
 const db = require('./db');
+const crumbSniper = require('./crumb-sniper');
 
 // Build version — updated each commit (Railway has no .git dir)
 const BUILD_VERSION = {
@@ -1288,6 +1289,7 @@ async function fetchAllData() {
             kalshiEnvironment: kalshiAuth.getEnvironment(),
             kalshiOrderBook: state.kalshiOrderBook || null,
             kalshiOrderBookError: state.kalshiOrderBookError || null,
+            crumbSniperStatus: crumbSniper.getStatus(),
         });
 
         console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | Env=${kalshiAuth.getEnvironment()} | ${wss.clients.size} clients`);
@@ -1804,6 +1806,26 @@ app.post('/api/trading/paper-balance', (req, res) => {
         newBalance = tradeExecutor.addPaperBalance(env, cents);
     }
     res.json({ environment: env, balanceCents: newBalance, balanceDollars: (newBalance / 100).toFixed(2) });
+});
+
+// ── Crumb Sniper endpoints ──
+app.get('/api/crumb-sniper/status', (req, res) => {
+    res.json(crumbSniper.getStatus());
+});
+
+app.post('/api/crumb-sniper/start', (req, res) => {
+    crumbSniper.start({ paperMode: true });
+    res.json({ ok: true, status: 'started' });
+});
+
+app.post('/api/crumb-sniper/stop', (req, res) => {
+    crumbSniper.stop();
+    res.json({ ok: true, status: 'stopped' });
+});
+
+app.post('/api/crumb-sniper/config', (req, res) => {
+    if (req.body) crumbSniper.updateConfig(req.body);
+    res.json({ ok: true, config: crumbSniper.CONFIG });
 });
 
 // ═══════════════════════════════════════════════════════════════
