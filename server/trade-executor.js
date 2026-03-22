@@ -192,7 +192,7 @@ function getBaseContractCount(entryPriceCents) {
 // Required contracts = (lossCents + minProfitCents) / profitPerContract
 // We take the MAX of this and the normal base sizing.
 const FLIP_MIN_PROFIT_PCT = 0.20; // require at least 20% profit on top of loss recovery
-const FLIP_MAX_BALANCE_PCT = 0.50; // flips can use at most 50% of available balance (risk cap)
+const FLIP_MAX_BALANCE_PCT = 0.25; // flips can use at most 25% of balance (reduced from 50% — data shows flips are wrong ~50% of the time)
 
 function getFlipRecoveryContracts(lossCents, flipPriceCents) {
     if (!lossCents || lossCents <= 0) return 0; // no loss to recover
@@ -845,6 +845,20 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
                               : MAX_ENTRY_PRICE;             // after 5 min: standard 85¢ cap
 
     const convictionLabel = betQuality.convictionTier ? ` [${betQuality.convictionTier}]` : '';
+
+    // ── NEGATIVE EDGE GUARD ──
+    // Data shows entries at -17% to -24% edge result in consistent losses.
+    // Block entries when Kelly edge is deeply negative (model prob far below market price).
+    // Exception: LOCK tier (near-guaranteed, sigma-based, not edge-based).
+    if (!isLockTier && betQuality.edge !== undefined && betQuality.edge < -0.10) {
+        const msg = `Edge too negative (${(betQuality.edge * 100).toFixed(1)}%) — model probability far below market price, no value`;
+        console.log(`[trade-executor] ${msg}`);
+        setThought('skip', msg);
+        decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike,
+            edge: betQuality.edge, probability: prediction.probability });
+        return;
+    }
+
     setThought('buying', `Placing ${isUp ? 'UP' : 'DOWN'} bet${convictionLabel}`, {
         edge: betQuality.edge, quality: betQuality.quality, betSize: betQuality.betSize,
         conviction: betQuality.convictionTier || 'normal',
@@ -1190,13 +1204,15 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
             if (flipPrice !== null) {
                 // Use the LARGER of: base sizing or loss-recovery sizing
-                // BUT cap to maxPositionContracts and 50% of available balance (risk management)
+                // BUT cap to 60% of maxPositionContracts and 25% of balance (risk management)
+                // Data shows flips are wrong ~50% of the time — size conservatively
                 const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
                 const recoverySizing = getFlipRecoveryContracts(sellLossCents, flipPrice);
                 let targetContracts = Math.max(baseSizing, recoverySizing);
-                // Cap 1: never exceed maxPositionContracts for flips (no conviction override)
-                targetContracts = Math.min(targetContracts, config.maxPositionContracts);
-                // Cap 2: flips can use at most 50% of available balance to limit downside
+                // Cap 1: flips capped at 60% of maxPositionContracts — inherently riskier
+                const flipContractCap = Math.round(config.maxPositionContracts * 0.6);
+                targetContracts = Math.min(targetContracts, flipContractCap);
+                // Cap 2: flips can use at most 25% of available balance (reduced from 50%)
                 const env = getEnvironment();
                 const flipBudgetCents = Math.floor((paperBalances[env] || 0) * FLIP_MAX_BALANCE_PCT);
                 const maxByBudget = Math.floor(flipBudgetCents / flipPrice);
@@ -1315,13 +1331,14 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
             if (flipPrice !== null) {
                 // Use the LARGER of: base sizing or loss-recovery sizing
-                // BUT cap to maxPositionContracts and 50% of available balance (risk management)
+                // BUT cap to 60% of maxPositionContracts and 25% of balance (risk management)
                 const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
                 const recoverySizing = getFlipRecoveryContracts(liveSellLossCents, flipPrice);
                 let targetContracts = Math.max(baseSizing, recoverySizing);
-                // Cap 1: never exceed maxPositionContracts for flips (no conviction override)
-                targetContracts = Math.min(targetContracts, config.maxPositionContracts);
-                // Cap 2: flips use at most 50% of balance — fetch live balance for cap
+                // Cap 1: flips capped at 60% of maxPositionContracts — inherently riskier
+                const flipContractCap = Math.round(config.maxPositionContracts * 0.6);
+                targetContracts = Math.min(targetContracts, flipContractCap);
+                // Cap 2: flips use at most 25% of balance — fetch live balance for cap
                 try {
                     const balResp = await trading.getBalance();
                     const flipBudgetCents = Math.floor(balResp.balance * FLIP_MAX_BALANCE_PCT);
@@ -1810,9 +1827,19 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     // If we already have a position on this side, add to it up to max
     if (currentPosition && currentPosition.periodKey === periodKey) {
         if (currentPosition.side === lockSide) {
+            // SAFETY: Never late_lock_add after a flip — flipped positions have higher
+            // uncertainty and adding to max (150 contracts) amplifies a potentially wrong call.
+            // Data shows flip + late_lock_add is the #1 cause of catastrophic losses.
+            if (currentPosition.flipped || flippedThisPeriod) {
+                console.log(`[trade-executor] Late-lock ADD blocked: position was FLIPPED this period — not adding to flipped position`);
+                return;
+            }
             // Already on the right side — add up to max
             const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
-            const addContracts = config.convictionMaxContracts - currentContracts; // late-lock = high conviction
+            // Cap late-lock adds at maxPositionContracts (50) rather than convictionMaxContracts (150)
+            // to limit exposure when the late-lock thesis could still be wrong
+            const lateLockCap = config.maxPositionContracts;
+            const addContracts = lateLockCap - currentContracts;
             if (addContracts <= 0) return; // already maxed out
             // Respect fill failure cooldowns
             const addCheck = await canTrade(periodKey);
@@ -1830,7 +1857,9 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     const check = await canTrade(periodKey);
     if (!check.ok) return;
 
-    const contracts = config.convictionMaxContracts; // late-lock = high conviction, go big
+    // Cap fresh late-lock at maxPositionContracts (50) instead of conviction max (150).
+    // Data shows huge late-lock entries lead to outsized losses when sigma estimate is wrong.
+    const contracts = config.maxPositionContracts;
     await executeLockEntry(lockSide, contracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock');
 }
 

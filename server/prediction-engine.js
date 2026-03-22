@@ -2506,22 +2506,25 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const almostNoTime = minutesRemaining < 2.0;
 
     // ── CASE 0: CONFIDENT FLIP — model strongly disagrees with position ──
-    // When the updated prediction has HIGH confidence the other way AND price confirms it,
-    // sell and flip to the winning side. This is different from normal "wrong side" holds
-    // because the model is highly confident (not just briefly on wrong side).
-    // Requirements (all must be true):
+    // TIGHTENED: Data analysis shows flips are wrong ~50% of the time, and when wrong
+    // they cause the biggest losses (especially with subsequent late_lock_add).
+    // Bad flip examples: 11:45 period flipped from NO to YES at 87% confidence = -$40.64 loss.
+    // Requirements (all must be true — raised thresholds from real loss data):
     //   1. On wrong side of strike (price confirms the model)
-    //   2. Model flipped direction OR updated probability strongly favors the other side
-    //   3. High confidence (>=80%) — not just a marginal signal
-    //   4. Enough time to profit from the flip (>=4 min remaining)
-    //   5. Sigma distance >= 0.8 — not just a tiny blip across strike
+    //   2. Model flipped direction AND probability strongly favors the other side (>=75%, was 70%)
+    //   3. Very high confidence (>=90%, was 80%) — most bad flips were at 80-87% confidence
+    //   4. Enough time to profit from the flip (>=5 min, was 4 min)
+    //   5. Sigma distance >= 1.2 (was 0.8) — require clear separation, not marginal crossings
+    //   6. NEW: Majority of signals must agree with flip direction (>=2 opposing signals)
     const updProbForOtherSide = betIsUp ? (1 - updPred.probability) : updPred.probability;
     const confidenceForFlip = updPred.confidence || 0;
     const shouldFlip = onWrongSide
-        && (modelFlipped || updProbForOtherSide >= 0.70)
-        && confidenceForFlip >= 0.80
-        && minutesRemaining >= 4
-        && sigmaDistance >= 0.8;
+        && modelFlipped                           // model must actually flip (not just probability drift)
+        && updProbForOtherSide >= 0.75             // raised from 0.70
+        && confidenceForFlip >= 0.90               // raised from 0.80 — most bad flips were 80-87%
+        && minutesRemaining >= 5                   // raised from 4 — need more time to recover sell loss
+        && sigmaDistance >= 1.2                    // raised from 0.8 — require clear separation
+        && opposing >= 2;                          // NEW: signals must agree with flip
 
     if (shouldFlip) {
         level = 'confident_flip'; shortLabel = 'FLIP';

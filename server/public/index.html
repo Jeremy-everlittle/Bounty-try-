@@ -1806,7 +1806,7 @@
             } else if (settleEntry) {
                 knownOutcome = settleEntry.correct ? (settleEntry.direction || null) : (settleEntry.direction === 'up' ? 'down' : 'up');
             }
-            const analysis = analyzePeriod(points, flips, strike, knownOutcome);
+            const analysis = analyzePeriod(points, flips, strike, knownOutcome, periodTradesForAnalysis);
             for (const item of analysis) {
                 const icon = item.type === 'good' ? '\u2713' : item.type === 'bad' ? '\u2717' : '\u25CB';
                 const color = item.type === 'good' ? '#3fb950' : item.type === 'bad' ? '#f85149' : '#d29922';
@@ -1815,7 +1815,7 @@
             }
 
             // Improvement suggestions
-            const improvements = suggestImprovements(points, flips, strike, knownOutcome);
+            const improvements = suggestImprovements(points, flips, strike, knownOutcome, periodTradesForAnalysis);
             if (improvements.length > 0) {
                 html += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05)">';
                 html += '<div style="font-size:9px;color:#d29922;font-weight:600;letter-spacing:0.5px;margin-bottom:3px">IMPROVEMENTS</div>';
@@ -2181,7 +2181,7 @@
         }
 
         // ── Period Self-Analysis ────────────────────────────────────
-        function analyzePeriod(points, flips, strike, knownOutcome) {
+        function analyzePeriod(points, flips, strike, knownOutcome, trades) {
             const analysis = [];
             if (points.length < 3) return [{ type: 'info', msg: 'Too few data points for analysis.' }];
 
@@ -2191,7 +2191,7 @@
             const predictedDir = first.dir;
             const finalPredDir = last.dir;
 
-            // Did the prediction get the direction right?
+            // ── 1. Direction correctness ──
             if (finalPredDir === actualDir) {
                 analysis.push({ type: 'good', msg: 'Final prediction direction (' + finalPredDir.toUpperCase() + ') was correct.' });
             } else {
@@ -2205,7 +2205,7 @@
                 analysis.push({ type: 'info', msg: 'Started wrong but self-corrected via flip.' });
             }
 
-            // Direction stability
+            // ── 2. Direction stability & flip quality ──
             if (flips.length === 0) {
                 analysis.push({ type: 'good', msg: 'No direction flips — prediction was stable throughout.' });
             } else if (flips.length === 1) {
@@ -2219,7 +2219,7 @@
                 analysis.push({ type: 'bad', msg: flips.length + ' direction flips — prediction was indecisive.' });
             }
 
-            // How close was the prediction to actual final price?
+            // ── 3. Price prediction accuracy ──
             const lastPredicted = last.predicted;
             if (lastPredicted) {
                 const predError = Math.abs(lastPredicted - last.price);
@@ -2233,10 +2233,8 @@
                 }
             }
 
-            // Confidence assessment
+            // ── 4. Confidence assessment ──
             const avgConf = points.reduce((s, p) => s + (p.conf || 0), 0) / points.length;
-            const maxConf = Math.max(...points.map(p => p.conf || 0));
-            const minConf = Math.min(...points.map(p => p.conf || 0));
             if (finalPredDir === actualDir && avgConf > 0.7) {
                 analysis.push({ type: 'good', msg: 'High confidence (' + (avgConf * 100).toFixed(0) + '%) on a correct prediction.' });
             } else if (finalPredDir !== actualDir && avgConf > 0.7) {
@@ -2245,7 +2243,7 @@
                 analysis.push({ type: 'info', msg: 'Low confidence (' + (avgConf * 100).toFixed(0) + '%) — model was uncertain.' });
             }
 
-            // Price vs strike at different points
+            // ── 5. Price vs strike dynamics ──
             const midIdx = Math.floor(points.length / 2);
             const midPoint = points[midIdx];
             const midAboveStrike = midPoint.price >= strike;
@@ -2254,7 +2252,18 @@
                 analysis.push({ type: 'info', msg: 'Price crossed strike mid-period — volatile conditions.' });
             }
 
-            // Kalshi market agreement
+            // Count how many times price crossed strike
+            let strikeCrossings = 0;
+            for (let i = 1; i < points.length; i++) {
+                const prevAbove = points[i-1].price >= strike;
+                const curAbove = points[i].price >= strike;
+                if (prevAbove !== curAbove) strikeCrossings++;
+            }
+            if (strikeCrossings >= 3) {
+                analysis.push({ type: 'bad', msg: 'Price crossed strike ' + strikeCrossings + ' times — highly choppy, hard to predict.' });
+            }
+
+            // ── 6. Kalshi market agreement ──
             const lastBetQuality = last.betQuality;
             if (lastBetQuality && lastBetQuality.edge !== undefined) {
                 if (lastBetQuality.edge === true || lastBetQuality.edge === 'YES') {
@@ -2264,10 +2273,105 @@
                 }
             }
 
+            // ── 7. TRADE QUALITY ANALYSIS (new — evaluates actual bets, not just signals) ──
+            if (trades && trades.length > 0) {
+                const buys = trades.filter(t => t.type === 'buy' || t.type === 'dip_buy' || t.type === 'late_lock' || t.type === 'late_lock_add' || t.type === 're_entry');
+                const sells = trades.filter(t => t.type === 'sell');
+                const settlement = trades.find(t => t.type === 'settle');
+                const flipTrades = trades.filter(t => t.strategy === 'confident_flip' || t.flipped);
+                const lateLocks = trades.filter(t => t.type === 'late_lock' || t.type === 'late_lock_add');
+                const dipBuys = trades.filter(t => t.type === 'dip_buy');
+                const pressBets = trades.filter(t => t.strategy === 'press_bet');
+
+                // Total contracts deployed
+                const totalContracts = buys.reduce((s, b) => s + (b.contracts || 0), 0);
+                const totalCost = buys.reduce((s, b) => s + ((b.contracts || 0) * (b.limitPrice || b.entryPrice || 0)), 0);
+                const avgEntryPrice = totalContracts > 0 ? Math.round(totalCost / totalContracts) : 0;
+
+                // Position sizing evaluation
+                if (totalContracts > 100) {
+                    analysis.push({ type: 'bad', msg: 'Oversized position: ' + totalContracts + ' total contracts deployed. Large positions amplify losses.' });
+                } else if (totalContracts > 50) {
+                    analysis.push({ type: 'info', msg: 'Moderate position: ' + totalContracts + ' contracts.' });
+                }
+
+                // Entry price evaluation
+                if (avgEntryPrice > 0) {
+                    if (avgEntryPrice >= 80 && settlement && !settlement.correct) {
+                        analysis.push({ type: 'bad', msg: 'Expensive entry (avg ' + avgEntryPrice + '\u00A2) on a losing bet — risked a lot per contract.' });
+                    } else if (avgEntryPrice <= 30 && settlement && settlement.correct) {
+                        analysis.push({ type: 'good', msg: 'Cheap entry (avg ' + avgEntryPrice + '\u00A2) on a winner — great risk/reward.' });
+                    }
+                }
+
+                // Flip + add pattern (the deadly combo)
+                if (flipTrades.length > 0 && lateLocks.length > 0) {
+                    const lockContracts = lateLocks.reduce((s, t) => s + (t.contracts || 0), 0);
+                    analysis.push({ type: 'bad', msg: 'FLIP + LATE LOCK combo: flipped then added ' + lockContracts + ' contracts via late-lock. This is the riskiest pattern.' });
+                }
+
+                // Bad flip with sell loss
+                if (flipTrades.length > 0 && sells.length > 0) {
+                    const sellLoss = sells.reduce((s, t) => {
+                        const cost = (t.contracts || 0) * (t.limitPrice || 0);
+                        return s + cost;
+                    }, 0);
+                    if (settlement && !settlement.correct) {
+                        analysis.push({ type: 'bad', msg: 'Flip lost: paid sell spread to exit, then lost on the flip side too.' });
+                    }
+                }
+
+                // Dip buying on a loser
+                if (dipBuys.length > 0 && settlement && !settlement.correct) {
+                    const dipContracts = dipBuys.reduce((s, t) => s + (t.contracts || 0), 0);
+                    analysis.push({ type: 'bad', msg: 'Dip-bought ' + dipContracts + ' contracts into a losing position — added to losses.' });
+                }
+
+                // Press betting on a loser
+                if (pressBets.length > 0 && settlement && !settlement.correct) {
+                    const pressContracts = pressBets.reduce((s, t) => s + (t.contracts || 0), 0);
+                    analysis.push({ type: 'bad', msg: 'Press bet added ' + pressContracts + ' contracts to a losing position.' });
+                }
+
+                // Entry timing analysis
+                if (buys.length > 0) {
+                    const firstBuy = buys[0];
+                    const buyTime = new Date(firstBuy.time);
+                    const periodStart = points[0].time;
+                    const periodEnd = new Date(periodStart.getTime() + 15 * 60 * 1000);
+                    const minsIntoPeriod = (buyTime - periodStart) / 60000;
+                    if (minsIntoPeriod < 2 && settlement && !settlement.correct) {
+                        analysis.push({ type: 'info', msg: 'Entered early (' + minsIntoPeriod.toFixed(0) + ' min in) — price direction may not have been established yet.' });
+                    } else if (minsIntoPeriod > 12 && !lateLocks.length) {
+                        analysis.push({ type: 'info', msg: 'Late entry (' + minsIntoPeriod.toFixed(0) + ' min in) — limited time for price to move.' });
+                    }
+                }
+
+                // Probability vs price position mismatch
+                const avgProb = points.reduce((s, p) => s + (p.prob || 0.5), 0) / points.length;
+                const avgProbDir = avgProb >= 0.5 ? 'up' : 'down';
+                if (buys.length > 0) {
+                    const firstBuySide = buys[0].side;
+                    const buySideDir = firstBuySide === 'yes' ? 'up' : 'down';
+                    if (buySideDir !== avgProbDir && settlement && !settlement.correct) {
+                        analysis.push({ type: 'bad', msg: 'Bet side (' + firstBuySide.toUpperCase() + ') disagreed with avg model probability (' + (avgProb * 100).toFixed(0) + '% up).' });
+                    }
+                }
+
+                // Sell signal analysis — were there ignored sell signals?
+                const sellSignalPoints = points.filter(p => p.sellSignal && p.sellSignal.level);
+                if (sellSignalPoints.length > 0) {
+                    const uniqueLevels = [...new Set(sellSignalPoints.map(p => p.sellSignal.level))];
+                    if (uniqueLevels.includes('confident_flip') && flipTrades.length === 0) {
+                        analysis.push({ type: 'info', msg: 'Flip signal was generated but no flip executed.' });
+                    }
+                }
+            }
+
             return analysis;
         }
 
-        function suggestImprovements(points, flips, strike, knownOutcome) {
+        function suggestImprovements(points, flips, strike, knownOutcome, trades) {
             const suggestions = [];
             if (points.length < 3) return suggestions;
 
@@ -2299,7 +2403,6 @@
             }
 
             // Price crossed strike late — timing issue
-            const last20Pct = points.slice(Math.floor(points.length * 0.8));
             const earlyDir = points[Math.floor(points.length * 0.3)].price >= strike ? 'up' : 'down';
             if (earlyDir !== actualDir) {
                 suggestions.push('Price reversed in the final portion of the period. Late reversals are hard to predict — consider weighting recent momentum more heavily.');
@@ -2311,6 +2414,73 @@
                 const avgSpread = kalshiPoints.reduce((s, p) => s + (p.kalshiYesAsk - p.kalshiYesBid), 0) / kalshiPoints.length;
                 if (avgSpread > 10) {
                     suggestions.push('Average Kalshi spread was wide (' + avgSpread.toFixed(0) + 'c). Consider tighter entry criteria when liquidity is low.');
+                }
+            }
+
+            // ── NEW: Trade-aware improvement suggestions ──
+            if (trades && trades.length > 0) {
+                const buys = trades.filter(t => t.type === 'buy' || t.type === 'dip_buy' || t.type === 'late_lock' || t.type === 'late_lock_add' || t.type === 're_entry');
+                const settlement = trades.find(t => t.type === 'settle');
+                const flipTrades = trades.filter(t => t.strategy === 'confident_flip' || t.flipped);
+                const lateLocks = trades.filter(t => t.type === 'late_lock' || t.type === 'late_lock_add');
+                const totalContracts = buys.reduce((s, b) => s + (b.contracts || 0), 0);
+
+                // Catastrophic sizing
+                if (totalContracts > 80 && settlement && !settlement.correct) {
+                    const pnl = settlement.pnlCents || 0;
+                    suggestions.push('Position of ' + totalContracts + ' contracts lost $' + Math.abs(pnl / 100).toFixed(2) + '. Reduce max position size or require stronger conviction for large bets.');
+                }
+
+                // Flip that caused net loss even when right
+                if (flipTrades.length > 0 && settlement && settlement.correct) {
+                    const pnl = settlement.pnlCents || 0;
+                    if (pnl < 0) {
+                        suggestions.push('Flip was in the right direction but net P&L was negative due to sell spread cost. Flip must save more than the spread cost to be worthwhile.');
+                    }
+                }
+
+                // Late lock adds making position too large
+                if (lateLocks.length > 0) {
+                    const lockContracts = lateLocks.reduce((s, t) => s + (t.contracts || 0), 0);
+                    if (lockContracts > 40) {
+                        suggestions.push('Late-lock added ' + lockContracts + ' contracts. Consider capping late-lock additions to prevent outsized risk on possibly wrong sigma estimates.');
+                    }
+                }
+
+                // Edge analysis on entry
+                const edgeTrades = buys.filter(t => t.edge !== undefined);
+                if (edgeTrades.length > 0) {
+                    const edges = edgeTrades.map(t => typeof t.edge === 'string' ? parseFloat(t.edge) : t.edge).filter(e => !isNaN(e));
+                    if (edges.length > 0) {
+                        const avgEdge = edges.reduce((s, e) => s + e, 0) / edges.length;
+                        if (avgEdge < -10) {
+                            suggestions.push('Average entry edge was ' + avgEdge.toFixed(1) + '% — deeply negative. The model probability was far below market price at entry. Skip trades with negative edge.');
+                        }
+                    }
+                }
+
+                // Price trajectory analysis: did price trend match bet direction?
+                const priceAtEntry = buys[0] ? points.find(p => Math.abs(p.time - new Date(buys[0].time)) < 15000) : null;
+                const firstBuySide = buys[0] && buys[0].side;
+                if (firstBuySide && priceAtEntry) {
+                    const priceDelta = last.price - priceAtEntry.price;
+                    const betOnUp = firstBuySide === 'yes';
+                    if ((betOnUp && priceDelta < -50) || (!betOnUp && priceDelta > 50)) {
+                        suggestions.push('Price moved $' + Math.abs(priceDelta).toFixed(0) + ' against the bet direction after entry. Consider waiting for price confirmation before committing.');
+                    }
+                }
+            }
+
+            // ── Price volatility regime analysis ──
+            const priceChanges = [];
+            for (let i = 1; i < points.length; i++) {
+                priceChanges.push(Math.abs(points[i].price - points[i-1].price));
+            }
+            if (priceChanges.length > 10) {
+                const avgChange = priceChanges.reduce((s, c) => s + c, 0) / priceChanges.length;
+                const maxChange = Math.max(...priceChanges);
+                if (maxChange > avgChange * 5) {
+                    suggestions.push('Sudden price spike detected (max tick move ' + maxChange.toFixed(0) + 'x avg). Volatile spikes may trigger bad flips — consider ignoring flip signals near price spikes.');
                 }
             }
 
