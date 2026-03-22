@@ -1247,6 +1247,7 @@
         let predictionPoint = null;
         let currentPrediction = null;
         let latestData = null;
+        let boundsHistory = []; // accumulated {time, high, low} for drawing bounds lines
 
         // ── Prediction history (server DB-backed) ──────────
         // Prediction log — populated entirely from server (DB-backed)
@@ -3400,7 +3401,7 @@
 
         // ── Chart ─────────────────────────────────────────────────────
 
-        function drawChart(history, currentPrice, predictedPrice, targetLabel, bounds) {
+        function drawChart(history, currentPrice, predictedPrice, targetLabel, bounds, bHistory) {
             const canvas = document.getElementById('chart');
             const ctx = canvas.getContext('2d');
             const dpr = window.devicePixelRatio || 1;
@@ -3440,6 +3441,10 @@
             if (strike) allPrices.push(strike);
             if (bounds && bounds.high) allPrices.push(bounds.high);
             if (bounds && bounds.low) allPrices.push(bounds.low);
+            // Include all historical bounds so the chart never clips
+            if (bHistory && bHistory.length) {
+                for (const b of bHistory) { allPrices.push(b.high, b.low); }
+            }
             const minP = Math.min(...allPrices) * 0.9999;
             const maxP = Math.max(...allPrices) * 1.0001;
             const range = maxP - minP;
@@ -3567,38 +3572,73 @@
             // High/Low bounds shaded area (from now to period end)
             const lastPoint = filtered[filtered.length - 1];
             const nowT = lastPoint.time;
-            if (bounds && bounds.high && bounds.low) {
-                ctx.fillStyle = 'rgba(88,166,255,0.08)';
+            if (bHistory && bHistory.length > 0) {
+                // Shaded fill between high and low history lines
+                ctx.fillStyle = 'rgba(88,166,255,0.06)';
                 ctx.beginPath();
-                ctx.moveTo(toX(nowT), toY(bounds.high));
-                ctx.lineTo(toX(tMax), toY(bounds.high));
-                ctx.lineTo(toX(tMax), toY(bounds.low));
-                ctx.lineTo(toX(nowT), toY(bounds.low));
+                ctx.moveTo(toX(bHistory[0].time), toY(bHistory[0].high));
+                for (let i = 1; i < bHistory.length; i++) {
+                    ctx.lineTo(toX(bHistory[i].time), toY(bHistory[i].high));
+                }
+                // Extend to period end at current bounds level
+                if (bounds && bounds.high) ctx.lineTo(toX(tMax), toY(bounds.high));
+                if (bounds && bounds.low) ctx.lineTo(toX(tMax), toY(bounds.low));
+                for (let i = bHistory.length - 1; i >= 0; i--) {
+                    ctx.lineTo(toX(bHistory[i].time), toY(bHistory[i].low));
+                }
                 ctx.closePath();
                 ctx.fill();
-                // High line — full width
-                ctx.strokeStyle = 'rgba(63,185,80,0.35)';
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 4]);
+
+                // High line — evolving over time
+                ctx.strokeStyle = 'rgba(63,185,80,0.5)';
+                ctx.lineWidth = 1.5;
                 ctx.beginPath();
-                ctx.moveTo(pad.left, toY(bounds.high));
-                ctx.lineTo(w - pad.right, toY(bounds.high));
-                ctx.stroke();
-                // Low line — full width
-                ctx.strokeStyle = 'rgba(248,81,73,0.35)';
+                for (let i = 0; i < bHistory.length; i++) {
+                    const x = toX(bHistory[i].time), y = toY(bHistory[i].high);
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                // Extend dashed to period end
+                if (bounds && bounds.high) {
+                    ctx.stroke();
+                    ctx.setLineDash([4, 4]);
+                    ctx.beginPath();
+                    ctx.moveTo(toX(bHistory[bHistory.length - 1].time), toY(bHistory[bHistory.length - 1].high));
+                    ctx.lineTo(toX(tMax), toY(bounds.high));
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                } else {
+                    ctx.stroke();
+                }
+
+                // Low line — evolving over time
+                ctx.strokeStyle = 'rgba(248,81,73,0.5)';
+                ctx.lineWidth = 1.5;
                 ctx.beginPath();
-                ctx.moveTo(pad.left, toY(bounds.low));
-                ctx.lineTo(w - pad.right, toY(bounds.low));
-                ctx.stroke();
-                ctx.setLineDash([]);
-                // High label
-                ctx.fillStyle = '#3fb950';
+                for (let i = 0; i < bHistory.length; i++) {
+                    const x = toX(bHistory[i].time), y = toY(bHistory[i].low);
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                // Extend dashed to period end
+                if (bounds && bounds.low) {
+                    ctx.stroke();
+                    ctx.setLineDash([4, 4]);
+                    ctx.beginPath();
+                    ctx.moveTo(toX(bHistory[bHistory.length - 1].time), toY(bHistory[bHistory.length - 1].low));
+                    ctx.lineTo(toX(tMax), toY(bounds.low));
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                } else {
+                    ctx.stroke();
+                }
+
+                // Current high/low labels
+                const lastB = bHistory[bHistory.length - 1];
                 ctx.font = 'bold 8px monospace';
                 ctx.textAlign = 'left';
-                ctx.fillText('\u25B2 High ' + formatPrice(bounds.high), toX(tMax) + 3, toY(bounds.high) + 3);
-                // Low label
+                ctx.fillStyle = '#3fb950';
+                ctx.fillText('\u25B2 ' + formatPrice(lastB.high), toX(tMax) + 3, toY(lastB.high) + 3);
                 ctx.fillStyle = '#f85149';
-                ctx.fillText('\u25BC Low ' + formatPrice(bounds.low), toX(tMax) + 3, toY(bounds.low) + 3);
+                ctx.fillText('\u25BC ' + formatPrice(lastB.low), toX(tMax) + 3, toY(lastB.low) + 3);
             }
 
             // Prediction dashed line (from now to period end)
@@ -3768,7 +3808,15 @@
             const chartPred = originalPrediction ? originalPrediction.predictedPrice : data.currentPrice;
             const targetLabel = formatTargetTime(periodEnd);
             const chartBounds = activePredForBounds ? { high: activePredForBounds.predictedHigh, low: activePredForBounds.predictedLow } : null;
-            drawChart(data.history, data.currentPrice, chartPred, targetLabel, chartBounds);
+            // Accumulate bounds history for drawing evolving high/low lines
+            if (chartBounds && chartBounds.high && chartBounds.low) {
+                const now = Date.now();
+                // Avoid duplicate entries within the same second
+                if (!boundsHistory.length || now - boundsHistory[boundsHistory.length - 1].time > 500) {
+                    boundsHistory.push({ time: now, high: chartBounds.high, low: chartBounds.low });
+                }
+            }
+            drawChart(data.history, data.currentPrice, chartPred, targetLabel, chartBounds, boundsHistory);
 
             // Status — show data source
             document.getElementById('status-bar').innerHTML =
@@ -3817,6 +3865,7 @@
             smoothedProbability = null;
             lockedDirection = null;
             resetAdvisorHistory();
+            boundsHistory = [];
             periodStartPrice = null;
             kalshiStrike = null;
             kalshiCloseTime = null;
