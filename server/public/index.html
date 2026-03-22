@@ -1093,6 +1093,16 @@
         <div class="history-stats" id="history-stats"></div>
     </div>
 
+    <div class="card" id="auto-bettor-card" style="display:none">
+        <div class="card-label" style="display:flex;justify-content:space-between;align-items:center;">
+            Auto-Bettor Analysis
+            <span id="refresh-analysis-btn" style="font-size:11px;color:#58a6ff;cursor:pointer;padding:2px 8px;border:1px solid #3d3d3d;border-radius:4px;" onclick="loadAutoBettorAnalysis()">Refresh</span>
+        </div>
+        <div id="auto-bettor-content" style="padding:0 2px;">
+            <div class="period-detail-loading">Loading analysis...</div>
+        </div>
+    </div>
+
     <div class="status-bar" id="status-bar"></div>
     <div class="kalshi-error-banner" id="kalshi-error-banner">
         <div class="error-msg" id="kalshi-error-msg">Kalshi strike not available</div>
@@ -1877,7 +1887,7 @@
             // Legend
             html += '<div class="period-chart-legend">';
             html += '<span><span class="dot" style="background:#58a6ff"></span>BTC Price</span>';
-            html += '<span><span class="dot" style="background:#f0883e"></span>Predicted</span>';
+            html += '<span><span class="dot" style="background:#f0883e"></span>Kalshi YES \u00A2</span>';
             html += '<span><span class="dot" style="background:rgba(255,255,255,0.25)"></span>Strike</span>';
             html += '<span><span class="dot" style="background:#a371f7"></span>P(up) %</span>';
             if (flips.length > 0) html += '<span><span class="dot" style="background:#e3b341"></span>Direction Flip</span>';
@@ -1960,18 +1970,21 @@
                 ctx.scale(dpr, dpr);
                 const W = rect.width;
                 const H = chartHeight;
-                const pad = { top: 16, right: 8, bottom: 24, left: 55 };
+                const pad = { top: 16, right: 45, bottom: 24, left: 55 };
                 const cW = W - pad.left - pad.right;
                 const cH = H - pad.top - pad.bottom;
 
-                // Price range for Y axis
+                // Price range for Y axis (BTC price + strike only, not predicted which overlaps)
                 const allPrices = points.map(p => p.price);
                 if (strike) allPrices.push(strike);
-                points.forEach(p => { if (p.predicted) allPrices.push(p.predicted); });
                 let yMin = Math.min(...allPrices);
                 let yMax = Math.max(...allPrices);
                 const yPad = (yMax - yMin) * 0.1 || 10;
                 yMin -= yPad; yMax += yPad;
+
+                // Kalshi YES price range for secondary axis (right side, 0-100¢)
+                const hasKalshi = points.some(p => p.kalshiYesBid !== null);
+                const kalshiMin = 0, kalshiMax = 100;
 
                 // Time range for X axis
                 const tMin = points[0].time.getTime();
@@ -1995,6 +2008,16 @@
                     const val = yMax - (i / ySteps) * (yMax - yMin);
                     ctx.fillStyle = '#8b949e'; ctx.font = '9px monospace'; ctx.textAlign = 'right';
                     ctx.fillText('$' + val.toFixed(0), pad.left - 4, y + 3);
+                }
+
+                // Right Y axis labels (Kalshi YES price 0-100¢)
+                if (hasKalshi) {
+                    ctx.fillStyle = '#f0883e'; ctx.font = '8px monospace'; ctx.textAlign = 'left';
+                    for (let i = 0; i <= ySteps; i++) {
+                        const y = pad.top + (i / ySteps) * cH;
+                        const val = kalshiMax - (i / ySteps) * (kalshiMax - kalshiMin);
+                        ctx.fillText(val.toFixed(0) + '\u00A2', W - pad.right + 4, y + 3);
+                    }
                 }
 
                 // X axis time labels
@@ -2031,27 +2054,47 @@
                 }
                 ctx.stroke();
 
-                // Predicted price line (drawn on top, dashed so visible when overlapping BTC)
-                ctx.strokeStyle = '#f0883e';
-                ctx.lineWidth = 2;
-                ctx.setLineDash([6, 3]);
-                ctx.beginPath();
-                let started = false;
-                let lastPredX = 0, lastPredY = 0, lastPredVal = 0;
-                for (const p of points) {
-                    if (p.predicted === null) continue;
-                    const x = xPos(p.time), y = yPos(p.predicted);
-                    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
-                    lastPredX = x; lastPredY = y; lastPredVal = p.predicted;
-                }
-                ctx.stroke();
-                ctx.setLineDash([]);
-                // Label the predicted price endpoint
-                if (started && lastPredVal) {
-                    ctx.fillStyle = '#f0883e';
-                    ctx.font = 'bold 9px monospace';
-                    ctx.textAlign = 'left';
-                    ctx.fillText('$' + lastPredVal.toFixed(2), lastPredX + 4, lastPredY - 4);
+                // Kalshi YES price line (secondary axis, 0-100¢)
+                if (hasKalshi) {
+                    function kalshiYPos(v) { return pad.top + (1 - (v - kalshiMin) / (kalshiMax - kalshiMin)) * cH; }
+                    // Fill area under the Kalshi line
+                    ctx.fillStyle = 'rgba(240,136,62,0.08)';
+                    ctx.beginPath();
+                    let kalshiStarted = false;
+                    let firstKX = 0;
+                    for (const p of points) {
+                        if (p.kalshiYesBid === null) continue;
+                        const x = xPos(p.time), y = kalshiYPos(p.kalshiYesBid);
+                        if (!kalshiStarted) { firstKX = x; ctx.moveTo(x, kalshiYPos(kalshiMin)); ctx.lineTo(x, y); kalshiStarted = true; }
+                        else ctx.lineTo(x, y);
+                    }
+                    if (kalshiStarted) {
+                        // Find last valid point for closing the area
+                        const lastKalshi = [...points].reverse().find(p => p.kalshiYesBid !== null);
+                        if (lastKalshi) ctx.lineTo(xPos(lastKalshi.time), kalshiYPos(kalshiMin));
+                        ctx.closePath();
+                        ctx.fill();
+                    }
+                    // Kalshi line stroke
+                    ctx.strokeStyle = '#f0883e';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    let kStarted = false;
+                    let lastKX = 0, lastKY = 0, lastKVal = 0;
+                    for (const p of points) {
+                        if (p.kalshiYesBid === null) continue;
+                        const x = xPos(p.time), y = kalshiYPos(p.kalshiYesBid);
+                        if (!kStarted) { ctx.moveTo(x, y); kStarted = true; } else ctx.lineTo(x, y);
+                        lastKX = x; lastKY = y; lastKVal = p.kalshiYesBid;
+                    }
+                    ctx.stroke();
+                    // Label endpoint
+                    if (kStarted && lastKVal) {
+                        ctx.fillStyle = '#f0883e';
+                        ctx.font = 'bold 9px monospace';
+                        ctx.textAlign = 'left';
+                        ctx.fillText(lastKVal.toFixed(0) + '\u00A2', lastKX + 4, lastKY - 4);
+                    }
                 }
 
                 // P(up) overlay (secondary Y axis, drawn as area)
@@ -2236,6 +2279,276 @@
             }
 
             return suggestions;
+        }
+
+        // ── Auto-Bettor Analysis ─────────────────────────────────────
+        let analysisLoaded = false;
+        async function loadAutoBettorAnalysis() {
+            const card = document.getElementById('auto-bettor-card');
+            const content = document.getElementById('auto-bettor-content');
+            card.style.display = 'block';
+            content.innerHTML = '<div class="period-detail-loading">Loading analysis...</div>';
+            try {
+                const resp = await fetch('/api/auto-bettor-analysis');
+                const data = await resp.json();
+                if (data.error) { content.innerHTML = '<div style="color:#f85149;padding:8px">Error: ' + data.error + '</div>'; return; }
+                renderAutoBettorAnalysis(content, data);
+                analysisLoaded = true;
+            } catch (e) {
+                content.innerHTML = '<div style="color:#f85149;padding:8px">Failed to load: ' + e.message + '</div>';
+            }
+        }
+
+        function renderAutoBettorAnalysis(container, data) {
+            const s = data.summary;
+            const bvs = data.betVsSkip;
+            const pnlDollars = (s.totalPnlCents / 100).toFixed(2);
+            const pnlColor = s.totalPnlCents >= 0 ? '#3fb950' : '#f85149';
+            const avgPnlDollars = (s.avgPnlPerTrade / 100).toFixed(2);
+
+            let html = '';
+
+            // ── Overall Performance Summary ──
+            html += '<div style="margin-bottom:12px;padding:10px;background:rgba(88,166,255,0.06);border:1px solid rgba(88,166,255,0.15);border-radius:6px">';
+            html += '<div style="font-size:11px;font-weight:700;color:#58a6ff;letter-spacing:0.5px;margin-bottom:8px">OVERALL PERFORMANCE</div>';
+            html += '<div class="period-detail-stats">';
+            html += '<div class="period-detail-stat"><div class="stat-label">Win Rate</div><div class="stat-value" style="color:' + (parseFloat(s.winRate) >= 50 ? '#3fb950' : '#f85149') + '">' + s.winRate + '%</div></div>';
+            html += '<div class="period-detail-stat"><div class="stat-label">Total P&L</div><div class="stat-value" style="color:' + pnlColor + '">' + (s.totalPnlCents >= 0 ? '+' : '') + '$' + pnlDollars + '</div></div>';
+            html += '<div class="period-detail-stat"><div class="stat-label">Trades</div><div class="stat-value">' + s.wins + 'W / ' + s.losses + 'L</div></div>';
+            html += '<div class="period-detail-stat"><div class="stat-label">Avg P&L/Trade</div><div class="stat-value" style="color:' + (s.avgPnlPerTrade >= 0 ? '#3fb950' : '#f85149') + '">' + (s.avgPnlPerTrade >= 0 ? '+' : '') + '$' + avgPnlDollars + '</div></div>';
+            html += '<div class="period-detail-stat"><div class="stat-label">Pred Accuracy</div><div class="stat-value">' + s.predictionAccuracy + '%</div></div>';
+            html += '<div class="period-detail-stat"><div class="stat-label">Streaks</div><div class="stat-value" style="font-size:10px"><span style="color:#3fb950">' + s.maxWinStreak + 'W</span> / <span style="color:#f85149">' + s.maxLossStreak + 'L</span></div></div>';
+            html += '</div></div>';
+
+            // ── Bet vs Skip Analysis ──
+            html += '<div style="margin-bottom:12px;padding:10px;background:rgba(163,113,247,0.06);border:1px solid rgba(163,113,247,0.15);border-radius:6px">';
+            html += '<div style="font-size:11px;font-weight:700;color:#a371f7;letter-spacing:0.5px;margin-bottom:8px">BET vs SKIP QUALITY</div>';
+            html += '<div class="period-detail-stats">';
+            html += '<div class="period-detail-stat"><div class="stat-label">Periods Bet</div><div class="stat-value">' + bvs.betPeriods + ' (' + bvs.betAccuracy + '% correct)</div></div>';
+            html += '<div class="period-detail-stat"><div class="stat-label">Periods Skipped</div><div class="stat-value">' + bvs.skipPeriods + ' (' + bvs.skipAccuracy + '% correct)</div></div>';
+            const betterSkip = parseFloat(bvs.skipAccuracy) > parseFloat(bvs.betAccuracy);
+            if (bvs.betPeriods > 0 && bvs.skipPeriods > 0) {
+                html += '<div class="period-detail-stat"><div class="stat-label">Filter Quality</div><div class="stat-value" style="color:' + (betterSkip ? '#f85149' : '#3fb950') + '">' +
+                    (betterSkip ? 'Betting on wrong ones' : 'Good filter') + '</div></div>';
+            }
+            html += '</div></div>';
+
+            // ── Strategy Breakdown ──
+            const strats = data.convictionTrades;
+            const stratKeys = Object.keys(strats).filter(k => strats[k].count > 0);
+            if (stratKeys.length > 0) {
+                html += '<div style="margin-bottom:12px;padding:10px;background:rgba(240,136,62,0.06);border:1px solid rgba(240,136,62,0.15);border-radius:6px">';
+                html += '<div style="font-size:11px;font-weight:700;color:#f0883e;letter-spacing:0.5px;margin-bottom:8px">STRATEGY BREAKDOWN</div>';
+                for (const k of stratKeys) {
+                    const st = strats[k];
+                    const wr = (st.wins + st.losses) > 0 ? ((st.wins / (st.wins + st.losses)) * 100).toFixed(0) : '-';
+                    const stPnl = (st.pnl / 100).toFixed(2);
+                    html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:11px">';
+                    html += '<span style="color:#e6edf3;font-weight:600;text-transform:uppercase">' + k + '</span>';
+                    html += '<span>' + st.count + ' trades &middot; ' + st.wins + 'W/' + st.losses + 'L &middot; ' + wr + '% &middot; <span style="color:' + (st.pnl >= 0 ? '#3fb950' : '#f85149') + '">' + (st.pnl >= 0 ? '+' : '') + '$' + stPnl + '</span></span>';
+                    html += '</div>';
+                }
+                html += '</div>';
+            }
+
+            // ── Direction Performance ──
+            if (data.winByDirection && data.winByDirection.length > 0) {
+                html += '<div style="margin-bottom:12px;padding:10px;background:rgba(63,185,80,0.06);border:1px solid rgba(63,185,80,0.15);border-radius:6px">';
+                html += '<div style="font-size:11px;font-weight:700;color:#3fb950;letter-spacing:0.5px;margin-bottom:8px">DIRECTION PERFORMANCE</div>';
+                for (const d of data.winByDirection) {
+                    const wr = d.total > 0 ? ((d.wins / d.total) * 100).toFixed(0) : '0';
+                    const dpnl = ((d.totalPnlCents || 0) / 100).toFixed(2);
+                    const isUp = (d.direction || '').toLowerCase().includes('up') || (d.direction || '').toLowerCase().includes('yes');
+                    html += '<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.05)">';
+                    html += '<span style="color:' + (isUp ? '#3fb950' : '#f85149') + ';font-weight:700">' + (d.direction || 'unknown').toUpperCase() + '</span>';
+                    html += '<span>' + d.wins + '/' + d.total + ' (' + wr + '%) &middot; <span style="color:' + ((d.totalPnlCents || 0) >= 0 ? '#3fb950' : '#f85149') + '">' + ((d.totalPnlCents || 0) >= 0 ? '+' : '') + '$' + dpnl + '</span></span>';
+                    html += '</div>';
+                }
+                html += '</div>';
+            }
+
+            // ── Hourly Performance ──
+            if (data.winByHour && data.winByHour.length > 0) {
+                html += '<div style="margin-bottom:12px;padding:10px;background:rgba(210,153,34,0.06);border:1px solid rgba(210,153,34,0.15);border-radius:6px">';
+                html += '<div style="font-size:11px;font-weight:700;color:#d29922;letter-spacing:0.5px;margin-bottom:8px">PERFORMANCE BY HOUR</div>';
+                const bestHour = data.winByHour.reduce((best, h) => h.total > 0 && (h.wins / h.total) > (best.rate || 0) ? { hour: h.hour, rate: h.wins / h.total } : best, {});
+                const worstHour = data.winByHour.reduce((worst, h) => h.total >= 2 && (h.wins / h.total) < (worst.rate || 1) ? { hour: h.hour, rate: h.wins / h.total } : worst, { rate: 1 });
+                for (const h of data.winByHour) {
+                    const wr = h.total > 0 ? ((h.wins / h.total) * 100).toFixed(0) : '0';
+                    const isBest = h.hour === bestHour.hour;
+                    const isWorst = h.hour === worstHour.hour;
+                    const hourLabel = (h.hour % 12 || 12) + (h.hour >= 12 ? 'PM' : 'AM');
+                    html += '<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:10px;border-bottom:1px solid rgba(255,255,255,0.03)">';
+                    html += '<span style="color:#b0b8c1">' + hourLabel + (isBest ? ' \u2B50' : '') + (isWorst ? ' \u26A0' : '') + '</span>';
+                    html += '<span>' + h.wins + '/' + h.total + ' (' + wr + '%)</span>';
+                    html += '</div>';
+                }
+                html += '</div>';
+            }
+
+            // ── Recent Cycle Details ──
+            const cycles = data.cycleDetails || [];
+            if (cycles.length > 0) {
+                html += '<div style="margin-bottom:12px;padding:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px">';
+                html += '<div style="font-size:11px;font-weight:700;color:#e6edf3;letter-spacing:0.5px;margin-bottom:8px">RECENT CYCLE ANALYSIS (' + cycles.length + ' cycles)</div>';
+
+                // Aggregate cycle patterns
+                const tradedCycles = cycles.filter(c => c.traded);
+                const untradedCycles = cycles.filter(c => !c.traded);
+                const highConfCycles = cycles.filter(c => c.avgConf > 0.7);
+                const lowConfCycles = cycles.filter(c => c.avgConf < 0.5);
+                const flipCycles = cycles.filter(c => c.directionFlips > 0);
+                const volatileCycles = cycles.filter(c => Math.abs(c.priceMove) > 500);
+
+                html += '<div class="period-detail-stats">';
+                html += '<div class="period-detail-stat"><div class="stat-label">Avg Ticks/Cycle</div><div class="stat-value">' + Math.round(cycles.reduce((s, c) => s + c.tickCount, 0) / cycles.length) + '</div></div>';
+                html += '<div class="period-detail-stat"><div class="stat-label">Avg Confidence</div><div class="stat-value">' + (cycles.reduce((s, c) => s + c.avgConf, 0) / cycles.length * 100).toFixed(0) + '%</div></div>';
+                html += '<div class="period-detail-stat"><div class="stat-label">Cycles w/ Flips</div><div class="stat-value">' + flipCycles.length + '/' + cycles.length + '</div></div>';
+                html += '<div class="period-detail-stat"><div class="stat-label">High Volatility</div><div class="stat-value">' + volatileCycles.length + '/' + cycles.length + '</div></div>';
+                html += '</div>';
+                html += '</div>';
+            }
+
+            // ── AI Analysis & Recommendations ──
+            html += '<div style="padding:10px;background:rgba(88,166,255,0.08);border:1px solid rgba(88,166,255,0.2);border-radius:6px">';
+            html += '<div style="font-size:11px;font-weight:700;color:#58a6ff;letter-spacing:0.5px;margin-bottom:10px">SYSTEM ANALYSIS & RECOMMENDATIONS</div>';
+
+            const insights = generateSystemInsights(data);
+            for (const insight of insights) {
+                const icon = insight.type === 'good' ? '\u2713' : insight.type === 'bad' ? '\u2717' : insight.type === 'warn' ? '\u26A0' : '\u25CB';
+                const color = insight.type === 'good' ? '#3fb950' : insight.type === 'bad' ? '#f85149' : insight.type === 'warn' ? '#d29922' : '#b0b8c1';
+                html += '<div style="padding:4px 0;font-size:11px;color:' + color + ';line-height:1.4">';
+                html += '<span style="font-weight:700;margin-right:5px">' + icon + '</span>' + insight.msg;
+                html += '</div>';
+            }
+            html += '</div>';
+
+            container.innerHTML = html;
+        }
+
+        function generateSystemInsights(data) {
+            const insights = [];
+            const s = data.summary;
+            const bvs = data.betVsSkip;
+            const cycles = data.cycleDetails || [];
+
+            if (s.totalTrades === 0) {
+                insights.push({ type: 'info', msg: 'No trades recorded yet. The auto-bettor needs more data to analyze.' });
+                return insights;
+            }
+
+            // Win rate assessment
+            const wr = parseFloat(s.winRate);
+            if (wr >= 60) {
+                insights.push({ type: 'good', msg: 'Strong win rate of ' + s.winRate + '%. The model is correctly identifying profitable setups.' });
+            } else if (wr >= 50) {
+                insights.push({ type: 'info', msg: 'Win rate at ' + s.winRate + '% is marginal. Need edge on entry pricing or better conviction filtering.' });
+            } else {
+                insights.push({ type: 'bad', msg: 'Win rate of ' + s.winRate + '% is below breakeven. The bet selection criteria need significant tightening.' });
+            }
+
+            // P&L per trade
+            if (s.avgPnlPerTrade > 0) {
+                insights.push({ type: 'good', msg: 'Averaging +$' + (s.avgPnlPerTrade / 100).toFixed(2) + ' per trade. Strategy is net profitable.' });
+            } else {
+                insights.push({ type: 'bad', msg: 'Averaging -$' + (Math.abs(s.avgPnlPerTrade) / 100).toFixed(2) + ' per trade. Losses outweigh wins — consider reducing position size or tightening entry criteria.' });
+            }
+
+            // Loss streaks
+            if (s.maxLossStreak >= 4) {
+                insights.push({ type: 'bad', msg: 'Max loss streak of ' + s.maxLossStreak + ' is concerning. Recommend implementing a cooling-off period after 3 consecutive losses to prevent tilt trading.' });
+            } else if (s.maxLossStreak >= 2) {
+                insights.push({ type: 'warn', msg: 'Max loss streak of ' + s.maxLossStreak + '. Current risk management is containing drawdowns reasonably well.' });
+            }
+
+            // Bet filter quality
+            const betAcc = parseFloat(bvs.betAccuracy);
+            const skipAcc = parseFloat(bvs.skipAccuracy);
+            if (bvs.betPeriods > 3 && bvs.skipPeriods > 3) {
+                if (skipAcc > betAcc + 10) {
+                    insights.push({ type: 'bad', msg: 'Critical: Prediction accuracy on SKIPPED periods (' + bvs.skipAccuracy + '%) is higher than on BET periods (' + bvs.betAccuracy + '%). The bet quality filter is selecting WORSE setups. Invert or recalibrate shouldBet logic.' });
+                } else if (betAcc > skipAcc + 10) {
+                    insights.push({ type: 'good', msg: 'Bet filter is working well — betting on better setups (' + bvs.betAccuracy + '% accuracy) vs skipped ones (' + bvs.skipAccuracy + '%).' });
+                } else {
+                    insights.push({ type: 'warn', msg: 'Bet filter shows no clear edge — bet accuracy (' + bvs.betAccuracy + '%) vs skip accuracy (' + bvs.skipAccuracy + '%) are similar. The shouldBet criteria aren\'t distinguishing good from bad setups.' });
+                }
+            }
+
+            // Direction bias
+            if (data.winByDirection && data.winByDirection.length >= 2) {
+                const sorted = [...data.winByDirection].sort((a, b) => {
+                    const wrA = a.total > 0 ? a.wins / a.total : 0;
+                    const wrB = b.total > 0 ? b.wins / b.total : 0;
+                    return wrB - wrA;
+                });
+                const best = sorted[0];
+                const worst = sorted[sorted.length - 1];
+                const bestWr = best.total > 0 ? (best.wins / best.total * 100).toFixed(0) : '0';
+                const worstWr = worst.total > 0 ? (worst.wins / worst.total * 100).toFixed(0) : '0';
+                if (parseFloat(bestWr) - parseFloat(worstWr) > 20 && best.total >= 3 && worst.total >= 3) {
+                    insights.push({ type: 'warn', msg: 'Strong directional bias: ' + (best.direction || '').toUpperCase() + ' trades win ' + bestWr + '% vs ' + (worst.direction || '').toUpperCase() + ' at ' + worstWr + '%. Consider adjusting confidence thresholds for the weaker direction or only trading the stronger one.' });
+                }
+            }
+
+            // Hourly patterns
+            if (data.winByHour && data.winByHour.length > 0) {
+                const goodHours = data.winByHour.filter(h => h.total >= 3 && (h.wins / h.total) >= 0.6);
+                const badHours = data.winByHour.filter(h => h.total >= 3 && (h.wins / h.total) < 0.4);
+                if (badHours.length > 0) {
+                    const badLabels = badHours.map(h => (h.hour % 12 || 12) + (h.hour >= 12 ? 'PM' : 'AM')).join(', ');
+                    insights.push({ type: 'warn', msg: 'Poor performance at: ' + badLabels + '. Consider pausing auto-betting during these hours or requiring higher conviction.' });
+                }
+                if (goodHours.length > 0) {
+                    const goodLabels = goodHours.map(h => (h.hour % 12 || 12) + (h.hour >= 12 ? 'PM' : 'AM')).join(', ');
+                    insights.push({ type: 'good', msg: 'Best performing hours: ' + goodLabels + '. These show consistently profitable setups.' });
+                }
+            }
+
+            // Early exits & flips
+            if (s.earlyExits > 0) {
+                const exitPct = s.totalTrades > 0 ? (s.earlyExits / s.totalTrades * 100).toFixed(0) : '0';
+                if (parseFloat(exitPct) > 30) {
+                    insights.push({ type: 'warn', msg: 'High early exit rate (' + exitPct + '%). Frequent sell signals suggest the initial entry conviction was too low. Consider raising the minimum quality threshold for entry.' });
+                } else {
+                    insights.push({ type: 'info', msg: s.earlyExits + ' early exits (' + exitPct + '%). Sell signal system is actively managing risk.' });
+                }
+            }
+            if (s.flips > 0) {
+                insights.push({ type: 'warn', msg: s.flips + ' position flips recorded. Each flip locks in a loss. Consider widening the flip threshold to reduce whipsawing.' });
+            }
+
+            // Cycle-level analysis
+            if (cycles.length >= 5) {
+                const flipPct = cycles.filter(c => c.directionFlips > 0).length / cycles.length;
+                if (flipPct > 0.4) {
+                    insights.push({ type: 'bad', msg: (flipPct * 100).toFixed(0) + '% of recent cycles had direction flips. The model is indecisive — increase the vol-distance threshold for flips or lock direction earlier.' });
+                }
+
+                const avgProb = cycles.reduce((s, c) => s + c.avgProb, 0) / cycles.length;
+                if (avgProb > 0.45 && avgProb < 0.55) {
+                    insights.push({ type: 'warn', msg: 'Average P(up) across cycles is ' + (avgProb * 100).toFixed(1) + '% — very close to 50/50. The model lacks strong directional conviction. Consider adding more signals or increasing signal weights.' });
+                }
+            }
+
+            // Entry price analysis
+            if (s.avgEntryPrice > 0) {
+                if (s.avgEntryPrice > 50) {
+                    insights.push({ type: 'warn', msg: 'Average entry price of ' + s.avgEntryPrice + '\u00A2 is expensive. Look for entry improvements via limit orders or waiting for dips in Kalshi pricing.' });
+                } else if (s.avgEntryPrice < 35) {
+                    insights.push({ type: 'good', msg: 'Average entry price of ' + s.avgEntryPrice + '\u00A2 provides good risk/reward on each trade.' });
+                }
+            }
+
+            // Overall verdict
+            if (insights.filter(i => i.type === 'bad').length >= 3) {
+                insights.push({ type: 'bad', msg: 'VERDICT: Multiple critical issues detected. Recommend pausing auto-betting and reviewing the bet quality filter, entry timing, and confidence calibration before continuing.' });
+            } else if (insights.filter(i => i.type === 'good').length > insights.filter(i => i.type === 'bad').length) {
+                insights.push({ type: 'good', msg: 'VERDICT: System is performing reasonably well. Focus on the warnings above for incremental improvements.' });
+            } else {
+                insights.push({ type: 'info', msg: 'VERDICT: Mixed results. The system needs refinement — prioritize fixing the issues flagged above before scaling up position sizes.' });
+            }
+
+            return insights;
         }
 
         // ── Time helpers ──────────────────────────────────────────────
@@ -4046,6 +4359,9 @@
         startCountdown();
         startLiveRefresh();
         startFastUITicker();
+        // Load auto-bettor analysis on boot + refresh every 5 minutes
+        setTimeout(loadAutoBettorAnalysis, 2000);
+        setInterval(loadAutoBettorAnalysis, 5 * 60 * 1000);
     </script>
     </div><!-- end dashboard-content -->
 

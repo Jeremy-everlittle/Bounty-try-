@@ -1601,6 +1601,157 @@ app.get('/api/cycle-data', async (req, res) => {
     }
 });
 
+// ── Auto-Bettor Performance Analysis Endpoint ────────────────
+app.get('/api/auto-bettor-analysis', async (req, res) => {
+    try {
+        const predictions = store.getPredictionLog();
+        const trades = tradeExecutor.getStatus().recentTrades || [];
+        const dailyStats = await db.getDailyStatsHistory(30);
+        const winByStrategy = await db.getWinRateByStrategy();
+        const winByDirection = await db.getWinRateByDirection();
+        const winByHour = await db.getWinRateByHour();
+        const cumulativePnl = await db.getCumulativePnl();
+
+        // Aggregate trade stats
+        const settles = trades.filter(t => t.type === 'settle');
+        const buys = trades.filter(t => ['buy', 'dip_buy', 'late_lock', 'late_lock_add', 're_entry'].includes(t.type));
+        const sells = trades.filter(t => t.type === 'sell' || t.type === 'flip');
+        const wins = settles.filter(t => t.correct);
+        const losses = settles.filter(t => t.correct === false);
+        const totalPnlCents = settles.reduce((s, t) => s + (t.pnlCents || 0), 0);
+
+        // Win/loss streaks
+        let maxWinStreak = 0, maxLossStreak = 0, curWin = 0, curLoss = 0;
+        for (const s of settles) {
+            if (s.correct) { curWin++; curLoss = 0; maxWinStreak = Math.max(maxWinStreak, curWin); }
+            else { curLoss++; curWin = 0; maxLossStreak = Math.max(maxLossStreak, curLoss); }
+        }
+
+        // Prediction accuracy
+        const graded = predictions.filter(p => p.correct !== null && p.correct !== undefined);
+        const predCorrect = graded.filter(p => p.correct).length;
+
+        // Entry price analysis
+        const entryPrices = buys.map(t => t.entryPrice || t.limitPrice).filter(Boolean);
+        const avgEntry = entryPrices.length > 0 ? entryPrices.reduce((s, v) => s + v, 0) / entryPrices.length : 0;
+
+        // Avg contracts per trade
+        const contractCounts = buys.map(t => t.contracts).filter(Boolean);
+        const avgContracts = contractCounts.length > 0 ? contractCounts.reduce((s, v) => s + v, 0) / contractCounts.length : 0;
+
+        // Conviction tier breakdown
+        const convictionTrades = {};
+        for (const t of buys) {
+            const tier = t.strategy || 'standard';
+            if (!convictionTrades[tier]) convictionTrades[tier] = { count: 0, wins: 0, losses: 0, pnl: 0 };
+            convictionTrades[tier].count++;
+        }
+        // Match settles to strategies
+        for (const s of settles) {
+            const matchingBuy = buys.find(b => b.periodKey === s.periodKey);
+            const tier = matchingBuy?.strategy || 'standard';
+            if (!convictionTrades[tier]) convictionTrades[tier] = { count: 0, wins: 0, losses: 0, pnl: 0 };
+            if (s.correct) convictionTrades[tier].wins++;
+            else convictionTrades[tier].losses++;
+            convictionTrades[tier].pnl += (s.pnlCents || 0);
+        }
+
+        // Periods where we bet vs didn't
+        const tradedPeriods = new Set(buys.map(t => t.periodKey));
+        const betPeriods = graded.filter(p => tradedPeriods.has(p.periodKey));
+        const skipPeriods = graded.filter(p => !tradedPeriods.has(p.periodKey));
+        const betCorrect = betPeriods.filter(p => p.correct).length;
+        const skipCorrect = skipPeriods.filter(p => p.correct).length;
+
+        // Sell signal analysis
+        const earlyExits = sells.filter(t => t.reason && t.reason !== 'settlement');
+        const flipTrades = trades.filter(t => t.type === 'flip');
+
+        // Per-cycle data for deep analysis (last 20 cycles)
+        const recentPeriodKeys = [...new Set(predictions.slice(-20).map(p => p.periodKey))];
+        const cycleDetails = [];
+        for (const pk of recentPeriodKeys) {
+            try {
+                const rows = await db.getCycleData(pk);
+                if (rows.length === 0) continue;
+                const pred = predictions.find(p => p.periodKey === pk);
+                const periodTrades = trades.filter(t => t.periodKey === pk);
+                const settle = periodTrades.find(t => t.type === 'settle');
+                const firstTick = rows[0];
+                const lastTick = rows[rows.length - 1];
+                const prices = rows.map(r => parseFloat(r.btc_price));
+                const strike = parseFloat(firstTick.strike);
+                const probs = rows.map(r => parseFloat(r.probability) || 0);
+                const confs = rows.map(r => parseFloat(r.confidence) || 0);
+
+                // Direction changes
+                let dirFlips = 0;
+                for (let i = 1; i < rows.length; i++) {
+                    if (rows[i].direction && rows[i - 1].direction && rows[i].direction !== rows[i - 1].direction) dirFlips++;
+                }
+
+                cycleDetails.push({
+                    periodKey: pk,
+                    tickCount: rows.length,
+                    priceStart: prices[0],
+                    priceEnd: prices[prices.length - 1],
+                    priceMin: Math.min(...prices),
+                    priceMax: Math.max(...prices),
+                    priceMove: prices[prices.length - 1] - prices[0],
+                    strike,
+                    endedAboveStrike: prices[prices.length - 1] >= strike,
+                    avgProb: probs.reduce((s, v) => s + v, 0) / probs.length,
+                    avgConf: confs.reduce((s, v) => s + v, 0) / confs.length,
+                    directionFlips: dirFlips,
+                    finalDirection: lastTick.direction,
+                    predicted: pred ? pred.predictedDirection : null,
+                    correct: pred ? pred.correct : null,
+                    traded: periodTrades.length > 0,
+                    pnlCents: settle ? settle.pnlCents : null,
+                    strategy: periodTrades.find(t => t.strategy)?.strategy || null,
+                });
+            } catch (e) { /* skip */ }
+        }
+
+        res.json({
+            summary: {
+                totalPredictions: graded.length,
+                predictionAccuracy: graded.length > 0 ? (predCorrect / graded.length * 100).toFixed(1) : '0',
+                totalTrades: settles.length,
+                wins: wins.length,
+                losses: losses.length,
+                winRate: settles.length > 0 ? (wins.length / settles.length * 100).toFixed(1) : '0',
+                totalPnlCents,
+                avgPnlPerTrade: settles.length > 0 ? Math.round(totalPnlCents / settles.length) : 0,
+                maxWinStreak,
+                maxLossStreak,
+                avgEntryPrice: Math.round(avgEntry),
+                avgContracts: Math.round(avgContracts),
+                earlyExits: earlyExits.length,
+                flips: flipTrades.length,
+            },
+            betVsSkip: {
+                betPeriods: betPeriods.length,
+                betCorrect,
+                betAccuracy: betPeriods.length > 0 ? (betCorrect / betPeriods.length * 100).toFixed(1) : '0',
+                skipPeriods: skipPeriods.length,
+                skipCorrect,
+                skipAccuracy: skipPeriods.length > 0 ? (skipCorrect / skipPeriods.length * 100).toFixed(1) : '0',
+            },
+            convictionTrades,
+            winByStrategy,
+            winByDirection,
+            winByHour,
+            dailyStats,
+            cumulativePnl,
+            cycleDetails,
+        });
+    } catch (e) {
+        console.error('[auto-bettor-analysis] Error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ── Snapshot / Cycle Analysis API Endpoints ──────────────────
 
 app.get('/api/snapshots/predictions', async (req, res) => {
