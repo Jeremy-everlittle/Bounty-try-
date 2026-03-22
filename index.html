@@ -856,46 +856,6 @@
             <div id="position-advice"></div>
         </div>
 
-        <!-- ═══ Crumb Sniper Section ═══ -->
-        <div id="crumb-sniper-section">
-            <div id="crumb-sniper-header" onclick="toggleCrumbSniper()">
-                <h3>&#x1F3AF; Crumb Sniper</h3>
-                <div style="display:flex;align-items:center;gap:10px;">
-                    <span id="crumb-sniper-status-badge" style="font-size:12px;color:#484f58;">OFF</span>
-                    <button id="crumb-sniper-toggle" onclick="event.stopPropagation(); toggleCrumbSniperRunning()">Start</button>
-                </div>
-            </div>
-            <div id="crumb-sniper-body" style="display:none;">
-                <div class="crumb-stats">
-                    <div class="crumb-stat">P&L: <span id="crumb-pnl">$0.00</span></div>
-                    <div class="crumb-stat">Bets: <span id="crumb-bets">0</span></div>
-                    <div class="crumb-stat">W/L: <span id="crumb-wl">0/0</span></div>
-                    <div class="crumb-stat">Balance: <span id="crumb-balance">$100.00</span></div>
-                </div>
-
-                <div class="crumb-panel">
-                    <div class="crumb-panel-title watching">Watching</div>
-                    <div id="crumb-watch-list" class="crumb-list">
-                        <div class="crumb-empty">Scanning for opportunities...</div>
-                    </div>
-                </div>
-
-                <div class="crumb-panel">
-                    <div class="crumb-panel-title betting">Betting</div>
-                    <div id="crumb-bet-list" class="crumb-list">
-                        <div class="crumb-empty">No active bets</div>
-                    </div>
-                </div>
-
-                <div class="crumb-panel">
-                    <div class="crumb-panel-title settled">Recent Settled</div>
-                    <div id="crumb-settled-list" class="crumb-list">
-                        <div class="crumb-empty">No settled bets yet</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <!-- Wallet removed - will be re-added later -->
 
         <!-- Next Period Preview Card -->
@@ -934,6 +894,46 @@
             <span class="countdown-time" id="countdown-time">--:--</span>
         </div>
 
+    </div>
+
+    <!-- ═══ Crumb Sniper Section ═══ -->
+    <div id="crumb-sniper-section">
+        <div id="crumb-sniper-header" onclick="toggleCrumbSniper()">
+            <h3>&#x1F3AF; Crumb Sniper</h3>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <span id="crumb-sniper-status-badge" style="font-size:12px;color:#484f58;">OFF</span>
+                <button id="crumb-sniper-toggle" onclick="event.stopPropagation(); toggleCrumbSniperRunning()">Start</button>
+            </div>
+        </div>
+        <div id="crumb-sniper-body" style="display:none;">
+            <div class="crumb-stats">
+                <div class="crumb-stat">P&L: <span id="crumb-pnl">$0.00</span></div>
+                <div class="crumb-stat">Bets: <span id="crumb-bets">0</span></div>
+                <div class="crumb-stat">W/L: <span id="crumb-wl">0/0</span></div>
+                <div class="crumb-stat">Balance: <span id="crumb-balance">$100.00</span></div>
+            </div>
+
+            <div class="crumb-panel">
+                <div class="crumb-panel-title watching">Watching</div>
+                <div id="crumb-watch-list" class="crumb-list">
+                    <div class="crumb-empty">Scanning for opportunities...</div>
+                </div>
+            </div>
+
+            <div class="crumb-panel">
+                <div class="crumb-panel-title betting">Betting</div>
+                <div id="crumb-bet-list" class="crumb-list">
+                    <div class="crumb-empty">No active bets</div>
+                </div>
+            </div>
+
+            <div class="crumb-panel">
+                <div class="crumb-panel-title settled">Recent Settled</div>
+                <div id="crumb-settled-list" class="crumb-list">
+                    <div class="crumb-empty">No settled bets yet</div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div class="card">
