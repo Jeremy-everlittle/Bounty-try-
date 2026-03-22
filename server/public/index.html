@@ -1481,6 +1481,9 @@
             const statsEl = document.getElementById('history-stats');
             if (!container) return;
 
+            // Don't rebuild the DOM while a detail panel is open — it would destroy the chart
+            if (openDetailPanels.size > 0) return;
+
             const graded = predictionLog.filter(p => p.correct !== null);
             const trades = (serverData && serverData.tradingStatus && serverData.tradingStatus.recentTrades) || [];
 
@@ -1788,6 +1791,7 @@
 
         // ── Period Detail Chart ─────────────────────────────────────
         const periodDetailCache = {};
+        const openDetailPanels = new Set(); // track which panels are open
 
         async function togglePeriodDetail(periodKey, safeKey) {
             const container = document.getElementById('detail-' + safeKey);
@@ -1798,11 +1802,13 @@
             if (isOpen) {
                 container.classList.remove('open');
                 arrow.classList.remove('open');
+                openDetailPanels.delete(periodKey);
                 return;
             }
 
             container.classList.add('open');
             arrow.classList.add('open');
+            openDetailPanels.add(periodKey);
 
             // Load data if not cached
             if (!periodDetailCache[periodKey]) {
