@@ -1979,7 +1979,7 @@ server.listen(PORT, () => {
     // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
     async function fetchLoop() {
         await fetchAllData();
-        setTimeout(fetchLoop, 5000);
+        setTimeout(fetchLoop, 2000);
     }
     fetchLoop();
 });

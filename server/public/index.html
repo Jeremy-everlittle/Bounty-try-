@@ -2021,21 +2021,7 @@
                     ctx.fillText('Strike', pad.left + 4, yPos(strike) - 3);
                 }
 
-                // Predicted price line
-                ctx.strokeStyle = '#f0883e';
-                ctx.lineWidth = 1.5;
-                ctx.globalAlpha = 0.7;
-                ctx.beginPath();
-                let started = false;
-                for (const p of points) {
-                    if (p.predicted === null) continue;
-                    const x = xPos(p.time), y = yPos(p.predicted);
-                    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
-                }
-                ctx.stroke();
-                ctx.globalAlpha = 1;
-
-                // BTC price line
+                // BTC price line (draw first, below predicted)
                 ctx.strokeStyle = '#58a6ff';
                 ctx.lineWidth = 2;
                 ctx.beginPath();
@@ -2044,6 +2030,29 @@
                     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
                 }
                 ctx.stroke();
+
+                // Predicted price line (drawn on top, dashed so visible when overlapping BTC)
+                ctx.strokeStyle = '#f0883e';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([6, 3]);
+                ctx.beginPath();
+                let started = false;
+                let lastPredX = 0, lastPredY = 0, lastPredVal = 0;
+                for (const p of points) {
+                    if (p.predicted === null) continue;
+                    const x = xPos(p.time), y = yPos(p.predicted);
+                    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+                    lastPredX = x; lastPredY = y; lastPredVal = p.predicted;
+                }
+                ctx.stroke();
+                ctx.setLineDash([]);
+                // Label the predicted price endpoint
+                if (started && lastPredVal) {
+                    ctx.fillStyle = '#f0883e';
+                    ctx.font = 'bold 9px monospace';
+                    ctx.textAlign = 'left';
+                    ctx.fillText('$' + lastPredVal.toFixed(2), lastPredX + 4, lastPredY - 4);
+                }
 
                 // P(up) overlay (secondary Y axis, drawn as area)
                 ctx.fillStyle = 'rgba(163,113,247,0.1)';
