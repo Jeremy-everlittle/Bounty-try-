@@ -15,9 +15,12 @@ const { getBaseUrl } = require('./kalshi-auth');
 const CONFIG = {
     // Scan interval — how often we look for new candidates
     scanIntervalMs: 8000,        // 8 seconds between full scans
-    // Time window — only consider markets closing within this window
-    maxSecondsToExpiry: 60,      // 1 minute — only markets about to close
-    minSecondsToExpiry: 5,       // at least 5 seconds left to place order
+    // Time window — consider markets closing within this window
+    // Widened from 60s to 5 minutes: the old 5-60s window was too narrow,
+    // causing "Scan returned no markets" most of the time because markets
+    // rarely close within a 55-second window at any given moment.
+    maxSecondsToExpiry: 300,     // 5 minutes — scan markets closing soon
+    minSecondsToExpiry: 3,       // at least 3 seconds left to place order
     // Price thresholds — what counts as "near guaranteed"
     // A YES at 95¢ means 95% implied probability → 5¢ profit if correct
     watchMinPrice: 80,           // watch list: ≥80¢ implied probability (cents)
@@ -75,13 +78,16 @@ async function scanForCandidates() {
     const maxClose = new Date(now.getTime() + CONFIG.maxSecondsToExpiry * 1000);
 
     try {
-        // Fetch ALL markets closing within our window across ALL categories
-        // Uses cursor-based pagination to get beyond the 200-per-page limit
+        // Fetch markets closing within our window using multiple strategies:
+        // 1. Try timestamp-based filtering (may not work on all API versions)
+        // 2. Fall back to fetching open markets from known series and filtering locally
         const allMarkets = [];
         let cursor = null;
+
+        // Strategy 1: Timestamp-based query (use ISO strings — Kalshi API expects ISO format)
         const params = {
-            min_close_ts: Math.floor(minClose.getTime() / 1000),
-            max_close_ts: Math.floor(maxClose.getTime() / 1000),
+            min_close_ts: minClose.toISOString(),
+            max_close_ts: maxClose.toISOString(),
             limit: '200',
         };
 
@@ -97,8 +103,41 @@ async function scanForCandidates() {
             if (!cursor) break; // no more pages
         }
 
+        // Strategy 2: If timestamp query returned nothing, scan known series tickers
+        // for open markets and filter by close time locally
         if (allMarkets.length === 0) {
-            console.log('[crumb-sniper] Scan returned no markets');
+            // Scan all known crypto series in parallel for speed
+            const SERIES_TICKERS = [
+                'KXBTC15M', 'KXBTC5M', 'KXBTC1H', 'KXBTC1D',
+                'KXETH15M', 'KXETH5M', 'KXETH1H',
+                'KXSOL15M', 'KXSOL5M',
+                'KXDOGE15M', 'KXADA15M', 'KXXRP15M',
+            ];
+            const seriesResults = await Promise.allSettled(
+                SERIES_TICKERS.map(series =>
+                    fetchJSON(PUBLIC_API + '/markets?series_ticker=' + series + '&status=open&limit=50')
+                )
+            );
+            const seenTickers = new Set();
+            for (const result of seriesResults) {
+                if (result.status !== 'fulfilled' || !result.value || !result.value.markets) continue;
+                for (const m of result.value.markets) {
+                    if (seenTickers.has(m.ticker)) continue;
+                    const ct = new Date(m.close_time || m.expiration_time);
+                    const secsLeft = (ct - now) / 1000;
+                    if (secsLeft >= CONFIG.minSecondsToExpiry && secsLeft <= CONFIG.maxSecondsToExpiry) {
+                        allMarkets.push(m);
+                        seenTickers.add(m.ticker);
+                    }
+                }
+            }
+        }
+
+        if (allMarkets.length === 0) {
+            // Log the time window for debugging — helps identify if we're querying the right range
+            const minTs = Math.floor(minClose.getTime() / 1000);
+            const maxTs = Math.floor(maxClose.getTime() / 1000);
+            console.log(`[crumb-sniper] Scan returned no markets (window: ${minClose.toISOString()} to ${maxClose.toISOString()}, ts: ${minTs}-${maxTs})`);
             return [];
         }
 
