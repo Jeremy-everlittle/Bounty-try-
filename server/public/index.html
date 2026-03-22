@@ -1329,6 +1329,7 @@
 
             // Aggregate stats
             let totalWins = 0, totalLosses = 0, totalPnlCents = 0, predCorrect = 0, predTotal = 0;
+            let userWins = 0, userLosses = 0, userPnlCents = 0, algoWins = 0, algoLosses = 0, algoPnlCents = 0;
 
             let html = '';
             for (const period of periods) {
@@ -1366,6 +1367,7 @@
                 const sells = periodTrades.filter(t => t.type === 'sell');
                 const errors = periodTrades.filter(t => t.type && (t.type.includes('error') || t.type.includes('failed') || t.type.includes('unfilled') || t.type.includes('phantom')));
                 const hasTrades = buys.length > 0 || sells.length > 0 || settlement;
+                const isManualBet = periodTrades.some(t => t.strategy === 'force_bet' || t.strategy === 'press_bet');
 
                 // Determine outcome
                 let outcomeLabel, outcomeCls, periodCls;
@@ -1374,11 +1376,14 @@
                     if (periodPnl >= 0) {
                         outcomeLabel = 'WIN'; outcomeCls = 'period-outcome-win'; periodCls = 'period-win';
                         totalWins++;
+                        if (isManualBet) userWins++; else algoWins++;
                     } else {
                         outcomeLabel = 'LOSS'; outcomeCls = 'period-outcome-loss'; periodCls = 'period-loss';
                         totalLosses++;
+                        if (isManualBet) userLosses++; else algoLosses++;
                     }
                     totalPnlCents += periodPnl;
+                    if (isManualBet) userPnlCents += periodPnl; else algoPnlCents += periodPnl;
                 } else if (!hasTrades) {
                     outcomeLabel = 'NO BET'; outcomeCls = 'period-outcome-nobet'; periodCls = 'period-no-bet';
                 } else {
@@ -1391,11 +1396,32 @@
                 }
 
                 html += '<div class="period-item ' + periodCls + '">';
-                // Header: time + outcome badge
+                // Header: time + outcome badge + manual indicator
                 html += '<div class="period-header">' +
                     '<span class="period-time">' + displayTime + '</span>' +
+                    '<span style="display:flex;align-items:center;gap:4px">' +
+                    (isManualBet ? '<span style="font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(136,87,255,0.25);color:#a371f7;font-weight:600;letter-spacing:0.3px">MANUAL</span>' : '') +
                     '<span class="period-outcome ' + outcomeCls + '">' + outcomeLabel + '</span>' +
-                    '</div>';
+                    '</span></div>';
+
+                // Roast the user if their manual bet lost
+                if (isManualBet && settlement && (settlement.pnlCents || 0) < 0) {
+                    const roasts = [
+                        'Nice one, genius. The algorithm would have skipped this.',
+                        'You overrode the bot for THIS? Truly inspiring stupidity.',
+                        'Congratulations, you absolute idiot. You played yourself.',
+                        'The algorithm was right to skip this. You were wrong. As usual.',
+                        'Manual override = manual L. You\'re an idiot.',
+                        'Imagine overriding a perfectly good algorithm just to lose money. Couldn\'t be you... oh wait.',
+                        'Stupid bet. Stupid result. The bot is smarter than you.',
+                        'You forced this bet and it blew up in your face. Shocking. Nobody saw that coming.',
+                        'Hey idiot, maybe let the algorithm do its job next time?',
+                        'Another manual bet, another L. You\'re on a roll... of stupidity.',
+                    ];
+                    const roast = roasts[Math.abs(settlement.pnlCents * displayTime.length) % roasts.length];
+                    html += '<div style="padding:4px 8px;margin:2px 0;border-radius:4px;background:rgba(248,81,73,0.12);border-left:3px solid #f85149;font-size:10px;color:#ff6b6b;font-style:italic">' +
+                        '\uD83E\uDD21 ' + roast + '</div>';
+                }
 
                 // Prediction details (from prediction log OR inferred from trades)
                 if (p) {
@@ -1587,6 +1613,24 @@
                             '<span style="color:#f85149;font-weight:700">' + totalLosses + 'L</span>';
                         statsHtml += ' &middot; P&L: <span style="color:' + pnlColor + ';font-weight:700">' +
                             (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2) + '</span>';
+                        // User vs Algorithm breakdown
+                        if (userWins + userLosses > 0 || algoWins + algoLosses > 0) {
+                            statsHtml += '<br>';
+                            if (algoWins + algoLosses > 0) {
+                                const algoPnl = algoPnlCents / 100;
+                                statsHtml += '<span style="color:#58a6ff">Algo:</span> <span style="color:#3fb950">' + algoWins + 'W</span>/<span style="color:#f85149">' + algoLosses + 'L</span>' +
+                                    ' <span style="color:' + (algoPnl >= 0 ? '#3fb950' : '#f85149') + '">' + (algoPnl >= 0 ? '+' : '') + '$' + algoPnl.toFixed(2) + '</span>';
+                            }
+                            if (userWins + userLosses > 0) {
+                                if (algoWins + algoLosses > 0) statsHtml += ' &middot; ';
+                                const uPnl = userPnlCents / 100;
+                                statsHtml += '<span style="color:#a371f7">You:</span> <span style="color:#3fb950">' + userWins + 'W</span>/<span style="color:#f85149">' + userLosses + 'L</span>' +
+                                    ' <span style="color:' + (uPnl >= 0 ? '#3fb950' : '#f85149') + '">' + (uPnl >= 0 ? '+' : '') + '$' + uPnl.toFixed(2) + '</span>';
+                                if (userLosses > userWins) {
+                                    statsHtml += ' <span style="color:#ff6b6b;font-size:9px">\uD83E\uDD21 stop manual betting</span>';
+                                }
+                            }
+                        }
                     }
                     statsEl.innerHTML = statsHtml;
                     statsEl.style.display = 'block';
@@ -2409,6 +2453,35 @@
                     insights.push({ type: 'warn', msg: 'Average entry price of ' + s.avgEntryPrice + '\u00A2 is expensive. Look for entry improvements via limit orders or waiting for dips in Kalshi pricing.' });
                 } else if (s.avgEntryPrice < 35) {
                     insights.push({ type: 'good', msg: 'Average entry price of ' + s.avgEntryPrice + '\u00A2 provides good risk/reward on each trade.' });
+                }
+            }
+
+            // Manual bet analysis — separate user from algorithm performance
+            const manualTrades = (data.cycleDetails || []).filter(c => c.trades && c.trades.some(t => t.strategy === 'force_bet' || t.strategy === 'press_bet'));
+            const algoOnlyTrades = (data.cycleDetails || []).filter(c => c.trades && c.trades.length > 0 && !c.trades.some(t => t.strategy === 'force_bet' || t.strategy === 'press_bet'));
+            if (manualTrades.length > 0) {
+                const mWins = manualTrades.filter(c => c.pnl > 0).length;
+                const mLosses = manualTrades.filter(c => c.pnl < 0).length;
+                const mTotal = mWins + mLosses;
+                const mPnl = manualTrades.reduce((s, c) => s + (c.pnl || 0), 0);
+                if (mTotal > 0) {
+                    const mWr = (mWins / mTotal * 100).toFixed(0);
+                    if (mLosses > mWins) {
+                        insights.push({ type: 'bad', msg: 'USER MANUAL BETS: ' + mWins + 'W/' + mLosses + 'L (' + mWr + '% win rate). You are an idiot. Your manual overrides are losing money. Stop pressing buttons and let the algorithm work, you absolute clown.' });
+                    } else if (mWins > mLosses) {
+                        insights.push({ type: 'good', msg: 'USER MANUAL BETS: ' + mWins + 'W/' + mLosses + 'L (' + mWr + '% win rate). Okay fine, your manual bets are actually working. Don\'t let it go to your head.' });
+                    } else {
+                        insights.push({ type: 'info', msg: 'USER MANUAL BETS: ' + mWins + 'W/' + mLosses + 'L — break-even. You\'re not adding value with manual overrides. Let the bot cook.' });
+                    }
+                }
+                if (algoOnlyTrades.length > 0) {
+                    const aWins = algoOnlyTrades.filter(c => c.pnl > 0).length;
+                    const aLosses = algoOnlyTrades.filter(c => c.pnl < 0).length;
+                    const aTotal = aWins + aLosses;
+                    if (aTotal > 0) {
+                        const aWr = (aWins / aTotal * 100).toFixed(0);
+                        insights.push({ type: 'info', msg: 'ALGORITHM BETS: ' + aWins + 'W/' + aLosses + 'L (' + aWr + '% win rate). This is the bot\'s record WITHOUT your interference.' });
+                    }
                 }
             }
 
