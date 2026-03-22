@@ -1161,7 +1161,7 @@ async function fetchAllData() {
                         predictedPrice: updated.predictedPrice,
                         probability: updated.probability,
                         confidence: updated.confidence,
-                        direction: updated.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN',
+                        direction: updated.predictedPrice >= state.kalshiStrike ? 'up' : 'down',
                         rawSignals: { ...(updated._rawSignals || {}), predictedHigh: updated.predictedHigh, predictedLow: updated.predictedLow },
                         marketContext: {
                             fundingRate: state.fundingRate,

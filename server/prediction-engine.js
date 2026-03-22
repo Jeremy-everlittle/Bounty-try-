@@ -2810,6 +2810,26 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
         // Reset smoothed probability toward the new direction
         stabilityState.smoothedProbability = raw.probability;
         didFlip = true;
+
+        // Update prediction log and Bayesian record to reflect the new direction
+        // so grading compares the FINAL predicted direction, not the initial one
+        store.updatePredictionLog(log => {
+            for (let i = log.length - 1; i >= 0; i--) {
+                if (log[i].periodKey === periodKey) {
+                    log[i].predictedDirection = rawDir;
+                    log[i]._directionUpdated = true;
+                    break;
+                }
+            }
+        });
+        store.updateBayesianState(bs => {
+            for (let i = bs.records.length - 1; i >= 0; i--) {
+                if (bs.records[i].periodKey === periodKey) {
+                    bs.records[i].predictedDirection = rawDir;
+                    break;
+                }
+            }
+        });
     }
 
     // If direction still conflicts with raw (no flip happened), adjust predicted price

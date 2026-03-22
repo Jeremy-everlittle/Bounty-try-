@@ -1703,7 +1703,7 @@
                     strike: parseFloat(t.strike) || null,
                     prob: parseFloat(t.probability) || null,
                     conf: parseFloat(t.confidence) || null,
-                    dir: t.direction,
+                    dir: t.direction ? t.direction.toLowerCase() : null,
                     minsLeft: parseFloat(t.minutes_remaining) || 0,
                     kalshiYesBid: parseFloat(t.kalshi_yes_bid) || null,
                     kalshiYesAsk: parseFloat(t.kalshi_yes_ask) || null,

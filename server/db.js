@@ -1247,6 +1247,7 @@ async function savePredictionLogEntry(entry) {
                 predicted_direction, actual_price, actual_direction, correct, confidence, probability, data)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT(period_key) DO UPDATE SET
+                predicted_direction = COALESCE($6, prediction_log.predicted_direction),
                 actual_price = COALESCE($7, prediction_log.actual_price),
                 actual_direction = COALESCE($8, prediction_log.actual_direction),
                 correct = COALESCE($9, prediction_log.correct),

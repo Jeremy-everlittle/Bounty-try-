@@ -311,13 +311,14 @@ function updatePredictionLog(updater) {
     updater(state.predictionLog);
     save();
 
-    // Sync updated entries to DB (find recently graded ones)
+    // Sync updated entries to DB (graded entries + direction flip updates)
     const db = getDb();
     if (db) {
         for (const entry of state.predictionLog) {
-            if (entry.actualPrice != null) {
+            if (entry.actualPrice != null || entry._directionUpdated) {
                 db.savePredictionLogEntry(entry).catch(e =>
                     console.error('[store] Failed to update prediction in DB:', e.message));
+                delete entry._directionUpdated;
             }
         }
     }
