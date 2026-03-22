@@ -1162,7 +1162,7 @@ async function fetchAllData() {
                         probability: updated.probability,
                         confidence: updated.confidence,
                         direction: updated.predictedPrice >= state.kalshiStrike ? 'UP' : 'DOWN',
-                        rawSignals: updated._rawSignals || null,
+                        rawSignals: { ...(updated._rawSignals || {}), predictedHigh: updated.predictedHigh, predictedLow: updated.predictedLow },
                         marketContext: {
                             fundingRate: state.fundingRate,
                             ethPrice: state.ethPriceHistory ? state.ethPriceHistory[state.ethPriceHistory.length - 1] : null,

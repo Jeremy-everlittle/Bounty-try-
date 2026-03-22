@@ -2343,6 +2343,15 @@ function predictPrice(marketData, minutesAhead, strike) {
     const drift = maxDrift * confidenceDistance;
     const predictedPrice = predictUp ? current + Math.max(drift, 0.01) : current - Math.max(drift, 0.01);
     const changePercent = ((predictedPrice - current) / current) * 100;
+
+    // ── Mathematical high/low bounds (2σ confidence interval) ──
+    // Represents the range of mathematically possible prices by settlement.
+    // Uses adjusted remaining vol × settlement compression.
+    // Wide early in the period, converges to current price as time runs out.
+    const boundsVol = adjustedRemainingVol * settlementVolAdj;
+    const boundsSigma = 2.0; // 95% confidence interval
+    const predictedHigh = current * Math.exp(boundsSigma * boundsVol);
+    const predictedLow = current * Math.exp(-boundsSigma * boundsVol);
     const sigmoidInput = (confidenceDistance - 0.35) * 8;
     const sigmoidVal = 1 / (1 + Math.exp(-sigmoidInput));
     const confidence = Math.max(0.20, Math.min(0.96, 0.40 + sigmoidVal * 0.56));
@@ -2353,7 +2362,7 @@ function predictPrice(marketData, minutesAhead, strike) {
     const volLabel = volRegime.regime === 'volatile' ? 'High' : volRegime.regime === 'quiet' ? 'Low' : 'Medium';
 
     return {
-        predictedPrice, changePercent, confidence, probability: finalProb,
+        predictedPrice, predictedHigh, predictedLow, changePercent, confidence, probability: finalProb,
         _remainingVol: remainingVol, ensembleConfidence: ensConf,
         signals: { momentum: momentumLabel, volatility: volLabel, trend: trendLabel, rsi: rsiLabel },
         _regimeInfo: { volRegime: volRegime.regime, trendRegime: getBayesTrendLabel(trendRegime) },

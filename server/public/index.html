@@ -938,6 +938,28 @@
             </div>
         </div>
 
+        <!-- Mathematical High/Low Bounds -->
+        <div id="bounds-row" style="display:none;margin-top:8px;padding:8px 10px;border:1px solid rgba(139,148,158,0.1);border-radius:8px;background:rgba(0,0,0,0.2);">
+            <div style="font-size:9px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;font-weight:600;">Mathematical Range (2σ)</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <div style="text-align:left;">
+                    <div style="font-size:9px;color:#f85149;font-weight:600;">LOW</div>
+                    <div id="bounds-low" style="font-size:16px;color:#f85149;font-weight:700;font-family:monospace;">--</div>
+                </div>
+                <div style="text-align:center;flex:1;padding:0 8px;">
+                    <div id="bounds-bar" style="position:relative;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;margin:4px 0;">
+                        <div id="bounds-fill" style="position:absolute;height:100%;background:linear-gradient(90deg,#f85149,#8b949e,#3fb950);border-radius:3px;width:100%;opacity:0.4;"></div>
+                        <div id="bounds-marker" style="position:absolute;top:-3px;width:12px;height:12px;background:#58a6ff;border-radius:50%;border:2px solid #0d1117;transform:translateX(-50%);left:50%;"></div>
+                    </div>
+                    <div id="bounds-spread" style="font-size:9px;color:#8b949e;">Range: --</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:9px;color:#3fb950;font-weight:600;">HIGH</div>
+                    <div id="bounds-high" style="font-size:16px;color:#3fb950;font-weight:700;font-family:monospace;">--</div>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <!-- Auto-Trading Card (separate) -->
@@ -1850,21 +1872,29 @@
 
         function renderPeriodDetailChart(container, ticks, periodKey) {
             // Parse timestamps and values
-            const points = ticks.map(t => ({
-                time: new Date(t.timestamp),
-                price: parseFloat(t.btc_price),
-                predicted: parseFloat(t.predicted_price) || null,
-                strike: parseFloat(t.strike) || null,
-                prob: parseFloat(t.probability) || null,
-                conf: parseFloat(t.confidence) || null,
-                dir: t.direction,
-                minsLeft: parseFloat(t.minutes_remaining) || 0,
-                kalshiYesBid: parseFloat(t.kalshi_yes_bid) || null,
-                kalshiYesAsk: parseFloat(t.kalshi_yes_ask) || null,
-                rawSignals: typeof t.raw_signals === 'string' ? JSON.parse(t.raw_signals || '{}') : (t.raw_signals || {}),
-                betQuality: typeof t.bet_quality === 'string' ? JSON.parse(t.bet_quality || '{}') : (t.bet_quality || {}),
-                sellSignal: typeof t.sell_signal === 'string' ? JSON.parse(t.sell_signal || '{}') : (t.sell_signal || {}),
-            })).sort((a, b) => a.time - b.time);
+            const points = ticks.map(t => {
+                let rawSignals = {}, betQuality = {}, sellSignal = {};
+                try { rawSignals = typeof t.raw_signals === 'string' ? JSON.parse(t.raw_signals || '{}') : (t.raw_signals || {}); } catch(e) {}
+                try { betQuality = typeof t.bet_quality === 'string' ? JSON.parse(t.bet_quality || '{}') : (t.bet_quality || {}); } catch(e) {}
+                try { sellSignal = typeof t.sell_signal === 'string' ? JSON.parse(t.sell_signal || '{}') : (t.sell_signal || {}); } catch(e) {}
+                return {
+                    time: new Date(t.timestamp),
+                    price: parseFloat(t.btc_price),
+                    predicted: parseFloat(t.predicted_price) || null,
+                    strike: parseFloat(t.strike) || null,
+                    prob: parseFloat(t.probability) || null,
+                    conf: parseFloat(t.confidence) || null,
+                    dir: t.direction,
+                    minsLeft: parseFloat(t.minutes_remaining) || 0,
+                    kalshiYesBid: parseFloat(t.kalshi_yes_bid) || null,
+                    kalshiYesAsk: parseFloat(t.kalshi_yes_ask) || null,
+                    predHigh: rawSignals.predictedHigh || null,
+                    predLow: rawSignals.predictedLow || null,
+                    rawSignals,
+                    betQuality,
+                    sellSignal,
+                };
+            }).sort((a, b) => a.time - b.time);
 
             if (points.length === 0) {
                 container.innerHTML = '<div class="period-detail-loading">No data points.</div>';
@@ -1961,11 +1991,12 @@
 
             container.innerHTML = html;
 
-            // Draw chart on canvas
-            requestAnimationFrame(() => {
+            // Draw chart on canvas (double-rAF to ensure layout is computed after display:block)
+            requestAnimationFrame(() => { requestAnimationFrame(() => {
                 const canvas = document.getElementById(canvasId);
                 if (!canvas) return;
                 const rect = canvas.parentElement.getBoundingClientRect();
+                if (rect.width < 10) return; // container not yet laid out
                 canvas.width = rect.width * dpr;
                 canvas.height = chartHeight * dpr;
                 canvas.style.width = rect.width + 'px';
@@ -1978,9 +2009,13 @@
                 const cW = W - pad.left - pad.right;
                 const cH = H - pad.top - pad.bottom;
 
-                // Price range for Y axis (BTC price + strike only, not predicted which overlaps)
+                // Price range for Y axis (BTC price + strike + bounds)
                 const allPrices = points.map(p => p.price);
                 if (strike) allPrices.push(strike);
+                for (const p of points) {
+                    if (p.predHigh) allPrices.push(p.predHigh);
+                    if (p.predLow) allPrices.push(p.predLow);
+                }
                 let yMin = Math.min(...allPrices);
                 let yMax = Math.max(...allPrices);
                 const yPad = (yMax - yMin) * 0.1 || 10;
@@ -2046,6 +2081,26 @@
                     ctx.setLineDash([]);
                     ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = '8px monospace'; ctx.textAlign = 'left';
                     ctx.fillText('Strike', pad.left + 4, yPos(strike) - 3);
+                }
+
+                // High/Low bounds shaded band
+                const hasBounds = points.some(p => p.predHigh && p.predLow);
+                if (hasBounds) {
+                    ctx.fillStyle = 'rgba(88,166,255,0.06)';
+                    ctx.beginPath();
+                    let started = false;
+                    for (let i = 0; i < points.length; i++) {
+                        if (!points[i].predHigh) continue;
+                        const x = xPos(points[i].time);
+                        if (!started) { ctx.moveTo(x, yPos(points[i].predHigh)); started = true; }
+                        else ctx.lineTo(x, yPos(points[i].predHigh));
+                    }
+                    for (let i = points.length - 1; i >= 0; i--) {
+                        if (!points[i].predLow) continue;
+                        ctx.lineTo(xPos(points[i].time), yPos(points[i].predLow));
+                    }
+                    ctx.closePath();
+                    ctx.fill();
                 }
 
                 // BTC price line (draw first, below predicted)
@@ -2142,7 +2197,7 @@
                 ctx.setLineDash([]);
                 ctx.fillStyle = 'rgba(163,113,247,0.4)'; ctx.font = '7px monospace'; ctx.textAlign = 'right';
                 ctx.fillText('50%', W - pad.right - 2, y50 - 2);
-            });
+            }); });
         }
 
         // ── Period Self-Analysis ────────────────────────────────────
@@ -3576,7 +3631,7 @@
 
         // ── Chart ─────────────────────────────────────────────────────
 
-        function drawChart(history, currentPrice, predictedPrice, targetLabel) {
+        function drawChart(history, currentPrice, predictedPrice, targetLabel, bounds) {
             const canvas = document.getElementById('chart');
             const ctx = canvas.getContext('2d');
             const dpr = window.devicePixelRatio || 1;
@@ -3593,6 +3648,8 @@
 
             const prices = history.map(p => p.price);
             const allPrices = [...prices, predictedPrice];
+            if (bounds && bounds.high) allPrices.push(bounds.high);
+            if (bounds && bounds.low) allPrices.push(bounds.low);
             const minP = Math.min(...allPrices) * 0.9999;
             const maxP = Math.max(...allPrices) * 1.0001;
             const range = maxP - minP;
@@ -3645,9 +3702,40 @@
             ctx.lineWidth = 2;
             ctx.stroke();
 
-            // Prediction dashed line
+            // High/Low bounds shaded area
             const lastIdx = prices.length - 1;
             const predIdx = prices.length + 2;
+            if (bounds && bounds.high && bounds.low) {
+                ctx.fillStyle = 'rgba(88,166,255,0.08)';
+                ctx.beginPath();
+                ctx.moveTo(toX(lastIdx), toY(bounds.high));
+                ctx.lineTo(toX(predIdx), toY(bounds.high));
+                ctx.lineTo(toX(predIdx), toY(bounds.low));
+                ctx.lineTo(toX(lastIdx), toY(bounds.low));
+                ctx.closePath();
+                ctx.fill();
+                // Dashed border lines for high and low
+                ctx.strokeStyle = 'rgba(88,166,255,0.25)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+                ctx.beginPath();
+                ctx.moveTo(toX(lastIdx), toY(bounds.high));
+                ctx.lineTo(toX(predIdx), toY(bounds.high));
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(toX(lastIdx), toY(bounds.low));
+                ctx.lineTo(toX(predIdx), toY(bounds.low));
+                ctx.stroke();
+                ctx.setLineDash([]);
+                // Labels
+                ctx.fillStyle = 'rgba(88,166,255,0.5)';
+                ctx.font = '8px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText(formatPrice(bounds.high), toX(predIdx) - 2, toY(bounds.high) - 3);
+                ctx.fillText(formatPrice(bounds.low), toX(predIdx) - 2, toY(bounds.low) + 10);
+            }
+
+            // Prediction dashed line
             ctx.beginPath();
             ctx.moveTo(toX(lastIdx), toY(prices[lastIdx]));
             ctx.lineTo(toX(predIdx), toY(predictedPrice));
@@ -3780,6 +3868,23 @@
                 document.getElementById('updated-row').style.display = 'none';
             }
 
+            // Mathematical high/low bounds
+            const activePredForBounds = updatedPrediction || originalPrediction;
+            if (activePredForBounds && activePredForBounds.predictedHigh && activePredForBounds.predictedLow) {
+                document.getElementById('bounds-row').style.display = 'block';
+                const high = activePredForBounds.predictedHigh;
+                const low = activePredForBounds.predictedLow;
+                document.getElementById('bounds-high').textContent = formatPrice(high);
+                document.getElementById('bounds-low').textContent = formatPrice(low);
+                const spread = high - low;
+                document.getElementById('bounds-spread').textContent = 'Range: $' + spread.toFixed(2);
+                // Position marker showing current price within the range
+                const pct = Math.max(0, Math.min(100, ((data.currentPrice - low) / (high - low)) * 100));
+                document.getElementById('bounds-marker').style.left = pct + '%';
+            } else {
+                document.getElementById('bounds-row').style.display = 'none';
+            }
+
             // Trading advisor signals
             renderPreBuySignal('prebuy-signal-badge');
             renderSellSignal('sell-signal-badge');
@@ -3793,7 +3898,8 @@
             // Chart
             const chartPred = originalPrediction ? originalPrediction.predictedPrice : data.currentPrice;
             const targetLabel = formatTargetTime(periodEnd);
-            drawChart(data.history, data.currentPrice, chartPred, targetLabel);
+            const chartBounds = activePredForBounds ? { high: activePredForBounds.predictedHigh, low: activePredForBounds.predictedLow } : null;
+            drawChart(data.history, data.currentPrice, chartPred, targetLabel, chartBounds);
 
             // Status — show data source
             document.getElementById('status-bar').innerHTML =
