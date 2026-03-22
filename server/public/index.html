@@ -2003,12 +2003,11 @@
                     }
                 }
 
-                // Predicted price line
+                // Predicted price line (solid)
                 const hasPredicted = points.some(p => p.predicted);
                 if (hasPredicted) {
                     ctx.strokeStyle = '#3fb950';
                     ctx.lineWidth = 1.5;
-                    ctx.setLineDash([4, 3]);
                     ctx.beginPath();
                     let pStarted = false;
                     for (let i = 0; i < points.length; i++) {
@@ -2017,7 +2016,6 @@
                         if (!pStarted) { ctx.moveTo(x, y); pStarted = true; } else ctx.lineTo(x, y);
                     }
                     ctx.stroke();
-                    ctx.setLineDash([]);
                     // Predicted label at end
                     const lastPred = [...points].reverse().find(p => p.predicted);
                     if (lastPred) {
