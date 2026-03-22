@@ -1252,6 +1252,7 @@
         let latestData = null;
         let boundsHistory = []; // accumulated {time, high, low} for drawing bounds lines
         let kalshiHistory = []; // accumulated {time, yesBid, noBid} for drawing Kalshi lines
+        let livePredHistory = []; // accumulated {time, price} for drawing prediction evolution line
 
         // ── Prediction history (server DB-backed) ──────────
         // Prediction log — populated entirely from server (DB-backed)
@@ -3769,7 +3770,7 @@
         // ── Chart ─────────────────────────────────────────────────────
 
         let mainChartZoomSetup = false;
-        function drawChart(history, currentPrice, predictedPrice, targetLabel, bounds, bHistory, kHistory) {
+        function drawChart(history, currentPrice, predictedPrice, targetLabel, bounds, bHistory, kHistory, pHistory) {
             const canvas = document.getElementById('chart');
             const ctx = canvas.getContext('2d');
             const dpr = window.devicePixelRatio || 1;
@@ -3809,15 +3810,15 @@
                 mainChartZoomSetup = true;
                 const lastArgs = {};
                 window._mainChartRedraw = function() {
-                    if (lastArgs.h) drawChart(lastArgs.h, lastArgs.cp, lastArgs.pp, lastArgs.tl, lastArgs.b, lastArgs.bh, lastArgs.kh);
+                    if (lastArgs.h) drawChart(lastArgs.h, lastArgs.cp, lastArgs.pp, lastArgs.tl, lastArgs.b, lastArgs.bh, lastArgs.kh, lastArgs.ph);
                 };
                 setupChartZoom(canvas, function() { window._mainChartRedraw(); });
             }
             // Store args for redraw on zoom/pan
-            window._mainChartLastArgs = { h: history, cp: currentPrice, pp: predictedPrice, tl: targetLabel, b: bounds, bh: bHistory, kh: kHistory };
+            window._mainChartLastArgs = { h: history, cp: currentPrice, pp: predictedPrice, tl: targetLabel, b: bounds, bh: bHistory, kh: kHistory, ph: pHistory };
             window._mainChartRedraw = function() {
                 const a = window._mainChartLastArgs;
-                if (a) drawChart(a.h, a.cp, a.pp, a.tl, a.b, a.bh, a.kh);
+                if (a) drawChart(a.h, a.cp, a.pp, a.tl, a.b, a.bh, a.kh, a.ph);
             };
 
             // Update cursor based on zoom
@@ -3833,6 +3834,10 @@
             // Include all historical bounds so the chart never clips
             if (bHistory && bHistory.length) {
                 for (const b of bHistory) { allPrices.push(b.high, b.low); }
+            }
+            // Include prediction history prices in Y range
+            if (pHistory && pHistory.length) {
+                for (const p of pHistory) { allPrices.push(p.price); }
             }
             const minP = Math.min(...allPrices) * 0.9999;
             const maxP = Math.max(...allPrices) * 1.0001;
@@ -4179,9 +4184,24 @@
                 }
             }
 
-            // Prediction dashed line (from now to period end)
+            // Prediction history line — shows how the predicted price evolved over the cycle
+            if (pHistory && pHistory.length > 1) {
+                ctx.strokeStyle = '#3fb950';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                for (let i = 0; i < pHistory.length; i++) {
+                    const x = toX(pHistory[i].time);
+                    const y = toY(pHistory[i].price);
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            // Prediction dashed line (from latest prediction history point to period end)
+            const predLineStartX = pHistory && pHistory.length > 0 ? toX(pHistory[pHistory.length - 1].time) : toX(nowT);
+            const predLineStartY = pHistory && pHistory.length > 0 ? toY(pHistory[pHistory.length - 1].price) : toY(lastPoint.price);
             ctx.beginPath();
-            ctx.moveTo(toX(nowT), toY(lastPoint.price));
+            ctx.moveTo(predLineStartX, predLineStartY);
             ctx.lineTo(toX(tMax), toY(predictedPrice));
             ctx.strokeStyle = predictedPrice >= currentPrice ? '#3fb950' : '#f85149';
             ctx.lineWidth = 2;
@@ -4358,6 +4378,13 @@
                     boundsHistory.push({ time: now, high: chartBounds.high, low: chartBounds.low });
                 }
             }
+            // Accumulate prediction history for drawing prediction evolution line
+            if (chartPred && chartPred !== data.currentPrice) {
+                const now = Date.now();
+                if (!livePredHistory.length || now - livePredHistory[livePredHistory.length - 1].time > 500) {
+                    livePredHistory.push({ time: now, price: chartPred });
+                }
+            }
             // Accumulate Kalshi YES/NO bid history for live chart
             const ob = serverData && serverData.kalshiOrderBook;
             if (ob) {
@@ -4375,7 +4402,7 @@
                     }
                 }
             }
-            drawChart(data.history, data.currentPrice, chartPred, targetLabel, chartBounds, boundsHistory, kalshiHistory);
+            drawChart(data.history, data.currentPrice, chartPred, targetLabel, chartBounds, boundsHistory, kalshiHistory, livePredHistory);
 
             // Status — show data source
             document.getElementById('status-bar').innerHTML =
@@ -4426,6 +4453,7 @@
             resetAdvisorHistory();
             boundsHistory = [];
             kalshiHistory = [];
+            livePredHistory = [];
             periodStartPrice = null;
             kalshiStrike = null;
             kalshiCloseTime = null;
@@ -4691,7 +4719,7 @@
         window.addEventListener('resize', () => {
             if (priceHistory.length && predictionPoint && currentTarget) {
                 const targetLabel = formatTargetTime(currentTarget);
-                drawChart(priceHistory, priceHistory[priceHistory.length - 1].price, predictionPoint, targetLabel, null, null, kalshiHistory);
+                drawChart(priceHistory, priceHistory[priceHistory.length - 1].price, predictionPoint, targetLabel, null, null, kalshiHistory, livePredHistory);
             }
         });
 
