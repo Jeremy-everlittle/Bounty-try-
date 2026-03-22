@@ -1578,9 +1578,9 @@
                     html += '<div class="period-no-trades">No bets placed this period</div>';
                 }
 
-                // Expandable detail chart toggle (only for graded periods)
+                // Expandable detail chart toggle (for any period with data)
                 const pk = p ? p.periodKey : (periodTrades[0] && periodTrades[0].periodKey);
-                if (pk && p && p.correct !== null) {
+                if (pk) {
                     const safeKey = pk.replace(/[^a-zA-Z0-9_-]/g, '_');
                     html += '<div class="period-detail-toggle" onclick="togglePeriodDetail(\'' + pk + '\', \'' + safeKey + '\')">' +
                         '<span class="toggle-arrow" id="arrow-' + safeKey + '">\u25B6</span>' +
