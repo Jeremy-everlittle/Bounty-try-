@@ -3576,17 +3576,19 @@
                 ctx.lineTo(toX(nowT), toY(bounds.low));
                 ctx.closePath();
                 ctx.fill();
-                // Dashed border lines
-                ctx.strokeStyle = 'rgba(88,166,255,0.25)';
+                // High line — full width
+                ctx.strokeStyle = 'rgba(63,185,80,0.35)';
                 ctx.lineWidth = 1;
-                ctx.setLineDash([3, 3]);
+                ctx.setLineDash([4, 4]);
                 ctx.beginPath();
-                ctx.moveTo(toX(nowT), toY(bounds.high));
-                ctx.lineTo(toX(tMax), toY(bounds.high));
+                ctx.moveTo(pad.left, toY(bounds.high));
+                ctx.lineTo(w - pad.right, toY(bounds.high));
                 ctx.stroke();
+                // Low line — full width
+                ctx.strokeStyle = 'rgba(248,81,73,0.35)';
                 ctx.beginPath();
-                ctx.moveTo(toX(nowT), toY(bounds.low));
-                ctx.lineTo(toX(tMax), toY(bounds.low));
+                ctx.moveTo(pad.left, toY(bounds.low));
+                ctx.lineTo(w - pad.right, toY(bounds.low));
                 ctx.stroke();
                 ctx.setLineDash([]);
                 // High label
