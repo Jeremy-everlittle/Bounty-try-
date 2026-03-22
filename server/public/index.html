@@ -1207,7 +1207,7 @@
                         if (msg.kalshiTicker) {
                             kalshiMarketTicker = msg.kalshiTicker;
                         }
-                        // Merge server prediction history with local (localStorage survives deploys)
+                        // Sync prediction history from server (DB-backed, authoritative)
                         if (msg.predictionLog && msg.predictionLog.length > 0) {
                             mergePredictionLogs(msg.predictionLog);
                             renderPredictionHistory();
@@ -1239,36 +1239,22 @@
         let currentPrediction = null;
         let latestData = null;
 
-        // ── Prediction history (persisted in localStorage) ──────────
+        // ── Prediction history (server DB-backed) ──────────
+        // Prediction log — populated entirely from server (DB-backed)
+        // Clean up legacy localStorage keys from previous client-side storage
+        localStorage.removeItem('btcPredLog');
+        localStorage.removeItem('btcBayesianState');
+        localStorage.removeItem('btcPredSession');
         let predictionLog = [];
-        try {
-            predictionLog = JSON.parse(localStorage.getItem('btcPredLog') || '[]');
-        } catch(e) { predictionLog = []; }
 
-        function savePredictionLog() {
-            localStorage.setItem('btcPredLog', JSON.stringify(predictionLog));
-        }
-
-        // Merge server log into local log, dedup by periodKey, keep all entries
+        // Replace local log with server's authoritative copy
         function mergePredictionLogs(serverLog) {
-            const byKey = new Map();
-            // Local entries first
-            for (const p of predictionLog) {
-                if (p.periodKey) byKey.set(p.periodKey, p);
-            }
-            // Server entries overwrite (they have grading from server)
-            for (const p of serverLog) {
-                if (p.periodKey) byKey.set(p.periodKey, p);
-            }
-            predictionLog = Array.from(byKey.values())
-                .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-            savePredictionLog();
+            predictionLog = (serverLog || []).slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         }
 
         function clearHistory() {
             if (!confirm('This will permanently purge ALL data from the database — predictions, trades, cycle data, snapshots, daily stats, and balances. Continue?')) return;
             predictionLog = [];
-            localStorage.removeItem('btcPredLog');
             // Clear cached trade data so period history doesn't show stale trades
             recentTradesCache = { timestamp: 0, trades: [] };
             // Purge all server-side data (DB + in-memory)
@@ -1281,233 +1267,7 @@
             if (analysisContent) analysisContent.innerHTML = '<div class="period-detail-loading">Data purged. Analysis will rebuild as new data arrives.</div>';
         }
 
-        function recordPrediction(periodKey, startPrice, predictedPrice, targetTimeStr) {
-            if (predictionLog.length && predictionLog[predictionLog.length - 1].periodKey === periodKey) return;
-            predictionLog.push({
-                time: targetTimeStr,
-                timestamp: Date.now(),
-                periodKey,
-                startPrice,
-                predictedPrice,
-                predictedDirection: predictedPrice >= startPrice ? 'up' : 'down',
-                actualPrice: null,
-                actualDirection: null,
-                correct: null
-            });
-            savePredictionLog();
-        }
-
-        function gradePreviousPrediction(currentPrice) {
-            for (let i = predictionLog.length - 1; i >= 0; i--) {
-                if (predictionLog[i].actualPrice === null && predictionLog[i].periodKey !== currentPeriodKey) {
-                    predictionLog[i].actualPrice = currentPrice;
-                    predictionLog[i].actualDirection = currentPrice >= predictionLog[i].startPrice ? 'up' : 'down';
-                    predictionLog[i].correct = predictionLog[i].predictedDirection === predictionLog[i].actualDirection;
-                }
-            }
-            savePredictionLog();
-        }
-
-        // ════════════════════════════════════════════════════════════════
-        // BAYESIAN LEARNING SYSTEM
-        // Beta-Binomial conjugate models tracking accuracy by direction,
-        // regime, time-of-day, and calibration bucket.
-        // ════════════════════════════════════════════════════════════════
-
-        let bayesianState = {
-            records: [],
-            directionBeta: { up: { a: 1, b: 1 }, down: { a: 1, b: 1 } },
-            regimeBeta: {
-                volatile: { a: 1, b: 1 }, expanding: { a: 1, b: 1 },
-                normal: { a: 1, b: 1 }, quiet: { a: 1, b: 1 }, contracting: { a: 1, b: 1 }
-            },
-            trendBeta: {
-                trending: { a: 1, b: 1 }, meanReverting: { a: 1, b: 1 }, neutral: { a: 1, b: 1 }
-            },
-            timeBeta: { 0: { a: 1, b: 1 }, 1: { a: 1, b: 1 }, 2: { a: 1, b: 1 }, 3: { a: 1, b: 1 } },
-            calibrationBins: {
-                0: { a: 1, b: 1 }, 1: { a: 1, b: 1 }, 2: { a: 1, b: 1 },
-                3: { a: 1, b: 1 }, 4: { a: 1, b: 1 }, 5: { a: 1, b: 1 }
-            }
-        };
-
-        function loadBayesianState() {
-            try {
-                const raw = localStorage.getItem('btcBayesianState');
-                if (raw) bayesianState = { ...bayesianState, ...JSON.parse(raw) };
-            } catch (e) { console.warn('Failed to load Bayesian state:', e); }
-        }
-
-        function saveBayesianState() {
-            bayesianState.records = bayesianState.records.slice(-200);
-            localStorage.setItem('btcBayesianState', JSON.stringify(bayesianState));
-        }
-
-        function getCalibrationBin(prob) {
-            if (prob < 0.20) return 0;
-            if (prob < 0.35) return 1;
-            if (prob < 0.50) return 2;
-            if (prob < 0.65) return 3;
-            if (prob < 0.80) return 4;
-            return 5;
-        }
-
-        function getTimeBucket() { return Math.floor(new Date().getHours() / 6); }
-        function betaMean(beta) { return beta.a / (beta.a + beta.b); }
-        function betaN(beta) { return beta.a + beta.b - 2; }
-        function betaUpdate(beta, success) {
-            const decay = 0.98;
-            return {
-                a: beta.a * decay + (success ? 1 : 0),
-                b: beta.b * decay + (success ? 0 : 1)
-            };
-        }
-        function getBayesTrendLabel(trendRegime) {
-            if (trendRegime.trending) return 'trending';
-            if (trendRegime.meanReverting) return 'meanReverting';
-            return 'neutral';
-        }
-
-        function computeDirectionalPrior(direction, windowSize = 5) {
-            const graded = bayesianState.records.filter(
-                r => r.predictedDirection === direction && r.correct !== null
-            );
-            if (graded.length < 2) return { adjustment: 0, confidence: 0, n: 0 };
-            const recent = graded.slice(-windowSize);
-            const successes = recent.filter(r => r.correct).length;
-            const a = 1 + successes, b = 1 + recent.length - successes;
-            const adjustment = a / (a + b) - 0.5;
-            const confidence = Math.min(0.7, 0.2 * Math.sqrt(recent.length));
-            return { adjustment, confidence, n: recent.length };
-        }
-
-        function computeRegimeAdjustment(volRegimeLabel, trendRegimeLabel) {
-            const timeBucket = getTimeBucket();
-            const volBeta = bayesianState.regimeBeta[volRegimeLabel] || { a: 1, b: 1 };
-            const trendBeta = bayesianState.trendBeta[trendRegimeLabel] || { a: 1, b: 1 };
-            const timeBeta = bayesianState.timeBeta[timeBucket] || { a: 1, b: 1 };
-            const volN = betaN(volBeta), trendN = betaN(trendBeta), timeN = betaN(timeBeta);
-            const volWeight = Math.min(0.4, volN * 0.05);
-            const trendWeight = Math.min(0.4, trendN * 0.05);
-            const timeWeight = Math.min(0.2, timeN * 0.03);
-            const totalWeight = volWeight + trendWeight + timeWeight;
-            if (totalWeight < 0.05) return { multiplier: 1.0 };
-            const weightedAccuracy = (
-                betaMean(volBeta) * volWeight + betaMean(trendBeta) * trendWeight + betaMean(timeBeta) * timeWeight
-            ) / totalWeight;
-            return { multiplier: Math.max(0.5, Math.min(1.5, 0.5 + weightedAccuracy)) };
-        }
-
-        function computeCalibrationAdjustment(rawProb) {
-            const bin = getCalibrationBin(rawProb);
-            const beta = bayesianState.calibrationBins[bin];
-            if (!beta) return { calibratedProb: rawProb, adjustment: 0 };
-            const n = betaN(beta);
-            if (n < 3) return { calibratedProb: rawProb, adjustment: 0, n };
-            const empiricalAccuracy = betaMean(beta);
-            const calibratedProb = rawProb < 0.5 ? (1 - empiricalAccuracy) : empiricalAccuracy;
-            const blendWeight = Math.min(0.7, 0.1 * Math.sqrt(n));
-            const blendedProb = rawProb * (1 - blendWeight) + calibratedProb * blendWeight;
-            return { calibratedProb: blendedProb, adjustment: blendedProb - rawProb, n };
-        }
-
-        function detectPredictionStreak() {
-            const graded = bayesianState.records.filter(r => r.actualDirection !== null);
-            if (graded.length < 2) return { streakDirection: null, streakLength: 0, adjustment: 0 };
-            let streakDir = graded[graded.length - 1].actualDirection;
-            let streakLen = 1;
-            for (let i = graded.length - 2; i >= 0; i--) {
-                if (graded[i].actualDirection === streakDir) streakLen++;
-                else break;
-            }
-            if (streakLen < 2) return { streakDirection: streakDir, streakLength: streakLen, adjustment: 0 };
-            const streakRecords = graded.slice(-streakLen);
-            const modelAccuracy = streakRecords.filter(r => r.correct).length / streakLen;
-            const missedTrendFactor = Math.max(0, 1 - modelAccuracy * 1.2);
-            const baseAdjustment = 0.04 * Math.log2(streakLen);
-            const sign = streakDir === 'up' ? 1 : -1;
-            return { streakDirection: streakDir, streakLength: streakLen,
-                     adjustment: sign * baseAdjustment * (0.3 + 0.7 * missedTrendFactor) };
-        }
-
-        function recordBayesianPrediction(periodKey, startPrice, predictedPrice, rawProb, volRegimeLabel, trendRegimeLabel) {
-            if (bayesianState.records.length > 0 &&
-                bayesianState.records[bayesianState.records.length - 1].periodKey === periodKey) return;
-            bayesianState.records.push({
-                periodKey, startPrice, predictedPrice,
-                predictedDirection: predictedPrice >= startPrice ? 'up' : 'down',
-                rawProbability: rawProb,
-                volRegime: volRegimeLabel, trendRegime: trendRegimeLabel,
-                timeBucket: getTimeBucket(), calibrationBin: getCalibrationBin(rawProb),
-                timestamp: Date.now(), actualPrice: null, actualDirection: null, correct: null
-            });
-            saveBayesianState();
-        }
-
-        function gradeBayesianPrediction(currentPrice) {
-            let updated = false;
-            for (let i = bayesianState.records.length - 1; i >= 0; i--) {
-                const rec = bayesianState.records[i];
-                if (rec.actualPrice !== null) continue;
-                if (rec.periodKey === currentPeriodKey) continue;
-                rec.actualPrice = currentPrice;
-                rec.actualDirection = currentPrice >= rec.startPrice ? 'up' : 'down';
-                rec.correct = rec.predictedDirection === rec.actualDirection;
-                updated = true;
-                const success = rec.correct;
-                bayesianState.directionBeta[rec.predictedDirection] = betaUpdate(
-                    bayesianState.directionBeta[rec.predictedDirection], success);
-                if (rec.volRegime && bayesianState.regimeBeta[rec.volRegime])
-                    bayesianState.regimeBeta[rec.volRegime] = betaUpdate(bayesianState.regimeBeta[rec.volRegime], success);
-                if (rec.trendRegime && bayesianState.trendBeta[rec.trendRegime])
-                    bayesianState.trendBeta[rec.trendRegime] = betaUpdate(bayesianState.trendBeta[rec.trendRegime], success);
-                if (rec.timeBucket !== undefined && bayesianState.timeBeta[rec.timeBucket])
-                    bayesianState.timeBeta[rec.timeBucket] = betaUpdate(bayesianState.timeBeta[rec.timeBucket], success);
-                if (rec.calibrationBin !== undefined && bayesianState.calibrationBins[rec.calibrationBin])
-                    bayesianState.calibrationBins[rec.calibrationBin] = betaUpdate(bayesianState.calibrationBins[rec.calibrationBin], success);
-            }
-            if (updated) saveBayesianState();
-        }
-
-        function bayesianAdjust(rawProb, volRegimeLabel, trendRegimeLabel) {
-            const predictedDirection = rawProb >= 0.5 ? 'up' : 'down';
-            const dirPrior = computeDirectionalPrior(predictedDirection);
-            const regimeAdj = computeRegimeAdjustment(volRegimeLabel, trendRegimeLabel);
-            const calibration = computeCalibrationAdjustment(rawProb);
-            const streak = detectPredictionStreak();
-            let adjustedProb = calibration.calibratedProb;
-            adjustedProb += dirPrior.adjustment * dirPrior.confidence * 0.15;
-            adjustedProb += streak.adjustment;
-            const deviation = adjustedProb - 0.5;
-            adjustedProb = 0.5 + deviation * regimeAdj.multiplier;
-            adjustedProb = Math.max(0.05, Math.min(0.95, adjustedProb));
-            console.log(`Bayesian: raw=${(rawProb*100).toFixed(1)}% cal=${(calibration.calibratedProb*100).toFixed(1)}% dir=${(dirPrior.adjustment*100).toFixed(1)}%(n=${dirPrior.n}) regime=${regimeAdj.multiplier.toFixed(2)} streak=${streak.streakLength}x${streak.streakDirection||'-'} => ${(adjustedProb*100).toFixed(1)}%`);
-            return { adjustedProb, rawProb };
-        }
-
-        // Bootstrap from existing predictionLog on first load
-        function bootstrapBayesianFromHistory() {
-            loadBayesianState();
-            if (bayesianState.records.length > 0) return;
-            const graded = predictionLog.filter(p => p.correct !== null);
-            if (graded.length === 0) return;
-            console.log(`Bootstrapping Bayesian state from ${graded.length} historical predictions`);
-            for (const p of graded) {
-                bayesianState.records.push({
-                    periodKey: p.periodKey, startPrice: p.startPrice,
-                    predictedPrice: p.predictedPrice,
-                    predictedDirection: p.predictedDirection,
-                    rawProbability: 0.5, volRegime: 'normal', trendRegime: 'neutral',
-                    timeBucket: getTimeBucket(), calibrationBin: 3,
-                    timestamp: Date.now(), actualPrice: p.actualPrice,
-                    actualDirection: p.actualDirection, correct: p.correct
-                });
-                bayesianState.directionBeta[p.predictedDirection] = betaUpdate(
-                    bayesianState.directionBeta[p.predictedDirection], p.correct);
-            }
-            saveBayesianState();
-        }
-        bootstrapBayesianFromHistory();
+        // Bayesian learning is handled entirely on the server (prediction-engine.js)
 
         // For backward compat — old callers still reference this
         function renderPredictionHistory() { renderPeriodHistory(); }
@@ -3926,42 +3686,7 @@
         let strikeIsPending = false;       // true when using kline open as fallback strike
 
         // ── Persist original prediction across page reloads ──────────
-        function saveSessionState() {
-            const state = {
-                currentPeriodKey,
-                periodStartPrice,
-                originalPrediction,
-                kalshiMarketTicker,
-                kalshiCloseTime
-            };
-            localStorage.setItem('btcPredSession', JSON.stringify(state));
-        }
-
-        function loadSessionState() {
-            try {
-                const raw = localStorage.getItem('btcPredSession');
-                if (!raw) return;
-                const state = JSON.parse(raw);
-                // Only restore if we're still in the same period
-                const nowPeriodKey = getPeriodKey();
-                if (state.currentPeriodKey === nowPeriodKey) {
-                    currentPeriodKey = state.currentPeriodKey;
-                    periodStartPrice = state.periodStartPrice;
-                    originalPrediction = state.originalPrediction;
-                    kalshiMarketTicker = state.kalshiMarketTicker;
-                    kalshiCloseTime = state.kalshiCloseTime;
-                    console.log('Restored session state for period', currentPeriodKey);
-                } else {
-                    // Period has changed since last visit — grade old prediction
-                    currentPeriodKey = state.currentPeriodKey;
-                    console.log('Period changed since last visit, will grade old prediction');
-                }
-            } catch(e) {
-                console.warn('Failed to restore session state:', e);
-            }
-        }
-
-        loadSessionState();
+        // Session state is provided by the server on WebSocket connect — no localStorage needed
 
         function getPeriodKey() {
             const start = getPeriodStartTime();
@@ -3990,7 +3715,6 @@
             strikeIsPending = false;
 
             clearNextPeriodPreview();
-            saveSessionState();
 
             // Update UI to show transition
             document.getElementById('current-price').textContent = '---';
