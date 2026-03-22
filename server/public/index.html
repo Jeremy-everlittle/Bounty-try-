@@ -706,6 +706,101 @@
         .login-error { color: #f85149; font-size: 12px; margin-top: 8px; display: none; }
         #dashboard-content { display: none; }
         #dashboard-content.visible { display: block; }
+
+        /* ── Crumb Sniper ── */
+        #crumb-sniper-section {
+            margin: 18px 16px 0 16px;
+            border: 1px solid #f0883e;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #0d1117;
+        }
+        #crumb-sniper-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 16px;
+            background: linear-gradient(135deg, #161b22, #1a2233);
+            border-bottom: 1px solid #30363d;
+            border-left: 3px solid #f0883e;
+            cursor: pointer;
+        }
+        #crumb-sniper-header h3 {
+            margin: 0;
+            font-size: 16px;
+            font-weight: 700;
+            color: #f0883e;
+            letter-spacing: 0.5px;
+        }
+        #crumb-sniper-toggle {
+            padding: 4px 14px;
+            border-radius: 6px;
+            border: 1px solid #30363d;
+            background: #21262d;
+            color: #8b949e;
+            font-size: 12px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.15s;
+        }
+        #crumb-sniper-toggle.active {
+            background: #1a7f37;
+            color: #fff;
+            border-color: #238636;
+        }
+        #crumb-sniper-body {
+            padding: 12px 16px;
+        }
+        .crumb-stats {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+        .crumb-stat {
+            font-size: 12px;
+            color: #8b949e;
+        }
+        .crumb-panel {
+            margin-top: 10px;
+            border: 1px solid #21262d;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .crumb-panel-title {
+            padding: 6px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            background: #161b22;
+        }
+        .crumb-panel-title.watching { color: #58a6ff; }
+        .crumb-panel-title.betting { color: #f0883e; }
+        .crumb-panel-title.settled { color: #8b949e; }
+        .crumb-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .crumb-empty {
+            padding: 12px;
+            text-align: center;
+            color: #484f58;
+            font-size: 12px;
+        }
+        .crumb-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            border-bottom: 1px solid #21262d;
+            font-size: 12px;
+        }
+        .crumb-item:last-child { border-bottom: none; }
+        .crumb-item .ticker { color: #e6edf3; font-weight: 600; }
+        .crumb-item .price { color: #8b949e; }
+        .crumb-item .profit { color: #3fb950; }
+        .crumb-item .loss { color: #f85149; }
     </style>
 </head>
 <body>
@@ -742,6 +837,46 @@
             <span class="period-label" id="period-label">Period open (strike)</span>
             <span class="period-value" id="period-start-price">--</span>
             <span class="period-delta" id="period-delta"></span>
+        </div>
+    </div>
+
+    <!-- ═══ Crumb Sniper Section ═══ -->
+    <div id="crumb-sniper-section">
+        <div id="crumb-sniper-header" onclick="toggleCrumbSniper()">
+            <h3>&#x1F3AF; Crumb Sniper</h3>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <span id="crumb-sniper-status-badge" style="font-size:12px;color:#484f58;">OFF</span>
+                <button id="crumb-sniper-toggle" onclick="event.stopPropagation(); toggleCrumbSniperRunning()">Start</button>
+            </div>
+        </div>
+        <div id="crumb-sniper-body" style="display:none;">
+            <div class="crumb-stats">
+                <div class="crumb-stat">P&L: <span id="crumb-pnl">$0.00</span></div>
+                <div class="crumb-stat">Bets: <span id="crumb-bets">0</span></div>
+                <div class="crumb-stat">W/L: <span id="crumb-wl">0/0</span></div>
+                <div class="crumb-stat">Balance: <span id="crumb-balance">$100.00</span></div>
+            </div>
+
+            <div class="crumb-panel">
+                <div class="crumb-panel-title watching">Watching</div>
+                <div id="crumb-watch-list" class="crumb-list">
+                    <div class="crumb-empty">Scanning for opportunities...</div>
+                </div>
+            </div>
+
+            <div class="crumb-panel">
+                <div class="crumb-panel-title betting">Betting</div>
+                <div id="crumb-bet-list" class="crumb-list">
+                    <div class="crumb-empty">No active bets</div>
+                </div>
+            </div>
+
+            <div class="crumb-panel">
+                <div class="crumb-panel-title settled">Recent Settled</div>
+                <div id="crumb-settled-list" class="crumb-list">
+                    <div class="crumb-empty">No settled bets yet</div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -1023,6 +1158,7 @@
                             mergePredictionLogs(msg.predictionLog);
                             renderPredictionHistory();
                         }
+                        if (msg.crumbSniperStatus) updateCrumbSniperUI(msg.crumbSniperStatus);
                     } else if (msg.type === 'trade') {
                         handleTradeNotification(msg.trade);
                     }
@@ -2362,6 +2498,77 @@
                 btn.textContent = 'FORCE SELL';
                 btn.disabled = false;
             }
+        }
+
+        // ── Crumb Sniper UI ──
+        let crumbSniperExpanded = false;
+        let crumbSniperRunning = false;
+
+        function toggleCrumbSniper() {
+            crumbSniperExpanded = !crumbSniperExpanded;
+            const body = document.getElementById('crumb-sniper-body');
+            if (body) body.style.display = crumbSniperExpanded ? 'block' : 'none';
+        }
+
+        async function toggleCrumbSniperRunning() {
+            const btn = document.getElementById('crumb-sniper-toggle');
+            try {
+                if (crumbSniperRunning) {
+                    await authFetch('/api/crumb-sniper/stop', { method: 'POST' });
+                    crumbSniperRunning = false;
+                } else {
+                    await authFetch('/api/crumb-sniper/start', { method: 'POST' });
+                    crumbSniperRunning = true;
+                    crumbSniperExpanded = true;
+                    const body = document.getElementById('crumb-sniper-body');
+                    if (body) body.style.display = 'block';
+                }
+                if (btn) { btn.textContent = crumbSniperRunning ? 'Stop' : 'Start'; btn.classList.toggle('active', crumbSniperRunning); }
+            } catch (err) {
+                console.error('Crumb sniper toggle error:', err);
+            }
+        }
+
+        function updateCrumbSniperUI(status) {
+            if (!status) return;
+
+            crumbSniperRunning = status.isRunning;
+            const btn = document.getElementById('crumb-sniper-toggle');
+            const badge = document.getElementById('crumb-sniper-status-badge');
+            if (btn) { btn.textContent = crumbSniperRunning ? 'Stop' : 'Start'; btn.classList.toggle('active', crumbSniperRunning); }
+            if (badge) { badge.textContent = crumbSniperRunning ? 'LIVE' : 'OFF'; badge.style.color = crumbSniperRunning ? '#3fb950' : '#484f58'; }
+
+            if (status.pnl !== undefined) {
+                const pnlEl = document.getElementById('crumb-pnl');
+                if (pnlEl) { pnlEl.textContent = '$' + status.pnl.toFixed(2); pnlEl.style.color = status.pnl >= 0 ? '#3fb950' : '#f85149'; }
+            }
+            const betsEl = document.getElementById('crumb-bets');
+            if (betsEl && status.totalBets !== undefined) betsEl.textContent = status.totalBets;
+            const wlEl = document.getElementById('crumb-wl');
+            if (wlEl && status.wins !== undefined) wlEl.textContent = status.wins + '/' + status.losses;
+            const balEl = document.getElementById('crumb-balance');
+            if (balEl && status.balance !== undefined) balEl.textContent = '$' + status.balance.toFixed(2);
+
+            const emptyMessages = { watch: 'Scanning for opportunities...', bet: 'No active bets', settled: 'No settled bets yet' };
+            renderCrumbList('crumb-watch-list', status.watching || [], 'watch');
+            renderCrumbList('crumb-bet-list', status.activeBets || [], 'bet');
+            renderCrumbList('crumb-settled-list', status.settled || [], 'settled');
+        }
+
+        function renderCrumbList(id, items, type) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const emptyMessages = { watch: 'Scanning for opportunities...', bet: 'No active bets', settled: 'No settled bets yet' };
+            if (!items.length) {
+                el.innerHTML = '<div class="crumb-empty">' + (crumbSniperRunning ? emptyMessages[type] : 'Sniper not running') + '</div>';
+                return;
+            }
+            el.innerHTML = items.map(item => {
+                const profitClass = (item.profit || 0) >= 0 ? 'profit' : 'loss';
+                const profitStr = item.profit !== undefined ? '<span class="' + profitClass + '">$' + item.profit.toFixed(2) + '</span>' : '';
+                return '<div class="crumb-item"><span class="ticker">' + (item.ticker || item.market || '?') + '</span>' +
+                       '<span class="price">' + (item.price || '') + '</span>' + profitStr + '</div>';
+            }).join('');
         }
 
         async function toggleKillSwitch() {
