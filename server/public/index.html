@@ -1107,7 +1107,9 @@
             <span><span class="dot" style="background:rgba(247,147,26,0.4)"></span>Prev Cycle</span>
             <span><span class="dot" style="background:rgba(255,255,255,0.25);border:1px dashed rgba(255,255,255,0.4)"></span>Strike</span>
             <span><span class="dot" style="background:#3fb950"></span>Prediction</span>
-            <span><span class="dot" style="background:rgba(88,166,255,0.3)"></span>Bounds (2σ)</span>
+            <span><span class="dot" style="background:#3fb950"></span>▲ High</span>
+            <span><span class="dot" style="background:#f85149"></span>▼ Low</span>
+            <span><span class="dot" style="background:rgba(88,166,255,0.3)"></span>Range (2σ)</span>
         </div>
     </div>
 
@@ -3587,12 +3589,14 @@
                 ctx.lineTo(toX(tMax), toY(bounds.low));
                 ctx.stroke();
                 ctx.setLineDash([]);
-                // Labels
-                ctx.fillStyle = 'rgba(88,166,255,0.5)';
-                ctx.font = '8px monospace';
+                // High label
+                ctx.fillStyle = '#3fb950';
+                ctx.font = 'bold 8px monospace';
                 ctx.textAlign = 'left';
-                ctx.fillText(formatPrice(bounds.high), toX(tMax) + 3, toY(bounds.high) + 3);
-                ctx.fillText(formatPrice(bounds.low), toX(tMax) + 3, toY(bounds.low) + 3);
+                ctx.fillText('\u25B2 High ' + formatPrice(bounds.high), toX(tMax) + 3, toY(bounds.high) + 3);
+                // Low label
+                ctx.fillStyle = '#f85149';
+                ctx.fillText('\u25BC Low ' + formatPrice(bounds.low), toX(tMax) + 3, toY(bounds.low) + 3);
             }
 
             // Prediction dashed line (from now to period end)
