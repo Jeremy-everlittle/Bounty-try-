@@ -91,13 +91,24 @@ async function scanForCandidates() {
             return [];
         }
 
-        console.log(`[crumb-sniper] Scan found ${data.markets.length} markets closing in ${CONFIG.minSecondsToExpiry}-${CONFIG.maxSecondsToExpiry}s window`);
+        // Log all market statuses to debug filtering
+        const statusCounts = {};
+        for (const m of data.markets) {
+            statusCounts[m.status] = (statusCounts[m.status] || 0) + 1;
+        }
+        console.log(`[crumb-sniper] Scan found ${data.markets.length} markets closing in ${CONFIG.minSecondsToExpiry}-${CONFIG.maxSecondsToExpiry}s window | statuses: ${JSON.stringify(statusCounts)}`);
+        if (data.markets.length > 0 && data.markets.length <= 10) {
+            for (const m of data.markets) {
+                console.log(`[crumb-sniper]   → ${m.ticker} | status=${m.status} | close=${m.close_time || m.expiration_time}`);
+            }
+        }
 
         const candidates = [];
 
         for (const market of data.markets) {
-            // Skip non-open markets since we can't filter by status with close_ts
-            if (market.status !== 'open') continue;
+            // Skip non-tradeable markets — accept 'open', 'active', or anything that isn't clearly closed
+            const closedStatuses = new Set(['closed', 'settled', 'finalized', 'cancelled', 'canceled']);
+            if (closedStatuses.has(market.status)) continue;
 
             const closeTime = new Date(market.close_time || market.expiration_time);
             const secsLeft = (closeTime - now) / 1000;
