@@ -16,7 +16,7 @@ const CONFIG = {
     // Scan interval — how often we look for new candidates
     scanIntervalMs: 8000,        // 8 seconds between full scans
     // Time window — only consider markets closing within this window
-    maxSecondsToExpiry: 3600,    // 60 minutes — scan across ALL Kalshi markets closing within the hour
+    maxSecondsToExpiry: 60,      // 1 minute — only markets about to close
     minSecondsToExpiry: 5,       // at least 5 seconds left to place order
     // Price thresholds — what counts as "near guaranteed"
     // A YES at 95¢ means 95% implied probability → 5¢ profit if correct
@@ -164,40 +164,45 @@ async function evaluateCandidate(candidate) {
 
         const orderbook = ob.orderbook;
 
-        // Look for YES side: cheap YES asks (near 95-98¢) → profit = 100 - price
-        // Look for NO side: cheap NO asks → same logic inverted
-        // We want to find the side where the price implies near-certainty
+        // Kalshi API returns orderbook in two possible formats:
+        // 1. Dollar format: { yes_dollars: [["0.95", "10.00"], ...], no_dollars: [...] }
+        // 2. Cent format: { yes: [[95, 10], ...], no: [...] }
+        // We normalize everything to cents for comparison
+        const isDollarFormat = !!(orderbook.yes_dollars || orderbook.no_dollars);
+        const yesData = orderbook.yes_dollars || orderbook.yes || [];
+        const noData = orderbook.no_dollars || orderbook.no || [];
+
+        function parseLevels(levels, isDollar) {
+            return levels.map(([price, qty]) => ({
+                priceCents: isDollar ? Math.round(parseFloat(price) * 100) : Number(price),
+                available: isDollar ? Math.round(parseFloat(qty)) : Number(qty),
+            }));
+        }
+
+        const yesLevels = parseLevels(yesData, isDollarFormat);
+        const noLevels = parseLevels(noData, isDollarFormat);
 
         const opportunities = [];
 
-        // Check YES asks (we'd BUY YES — profit if outcome is YES)
-        if (orderbook.yes && orderbook.yes.length > 0) {
-            // yes array contains [price_cents, quantity] pairs, sorted by price ascending
-            for (const [priceCents, qty] of orderbook.yes) {
-                if (priceCents >= CONFIG.watchMinPrice && priceCents <= CONFIG.betMaxPrice && qty >= CONFIG.minAvailableContracts) {
-                    opportunities.push({
-                        side: 'yes',
-                        priceCents,
-                        available: qty,
-                        profitPerContract: 100 - priceCents,
-                        impliedProb: priceCents / 100,
-                    });
-                }
+        // Check YES side (BUY YES — profit if outcome is YES)
+        for (const { priceCents, available } of yesLevels) {
+            if (priceCents >= CONFIG.watchMinPrice && priceCents <= CONFIG.betMaxPrice && available >= CONFIG.minAvailableContracts) {
+                opportunities.push({
+                    side: 'yes', priceCents, available,
+                    profitPerContract: 100 - priceCents,
+                    impliedProb: priceCents / 100,
+                });
             }
         }
 
-        // Check NO asks (we'd BUY NO — profit if outcome is NO)
-        if (orderbook.no && orderbook.no.length > 0) {
-            for (const [priceCents, qty] of orderbook.no) {
-                if (priceCents >= CONFIG.watchMinPrice && priceCents <= CONFIG.betMaxPrice && qty >= CONFIG.minAvailableContracts) {
-                    opportunities.push({
-                        side: 'no',
-                        priceCents,
-                        available: qty,
-                        profitPerContract: 100 - priceCents,
-                        impliedProb: priceCents / 100,
-                    });
-                }
+        // Check NO side (BUY NO — profit if outcome is NO)
+        for (const { priceCents, available } of noLevels) {
+            if (priceCents >= CONFIG.watchMinPrice && priceCents <= CONFIG.betMaxPrice && available >= CONFIG.minAvailableContracts) {
+                opportunities.push({
+                    side: 'no', priceCents, available,
+                    profitPerContract: 100 - priceCents,
+                    impliedProb: priceCents / 100,
+                });
             }
         }
 
@@ -438,15 +443,27 @@ async function runScanCycle() {
             if (closeTime <= now) watchList.delete(ticker);
         }
 
-        // 4. Evaluate each candidate
-        for (const candidate of candidates) {
-            if (bettedTickers.has(candidate.ticker)) continue;
-            if (bettingList.has(candidate.ticker)) continue;
+        // 4. Sort by time left (closest to expiry first) and limit evaluations
+        //    to avoid rate limiting — only check orderbooks for top candidates
+        candidates.sort((a, b) => a.secsLeft - b.secsLeft);
+        const toEvaluate = candidates.filter(c => !bettedTickers.has(c.ticker) && !bettingList.has(c.ticker)).slice(0, 25);
+
+        console.log(`[crumb-sniper] Evaluating ${toEvaluate.length} of ${candidates.length} candidates (closest to expiry first)`);
+
+        for (const candidate of toEvaluate) {
+            // Add a small delay between orderbook fetches to avoid rate limiting
+            if (toEvaluate.indexOf(candidate) > 0) await new Promise(r => setTimeout(r, 200));
 
             const opportunity = await evaluateCandidate(candidate);
 
             if (!opportunity) {
-                watchList.delete(candidate.ticker);
+                // Still add to watch list so UI shows we're tracking it
+                watchList.set(candidate.ticker, {
+                    ...candidate,
+                    status: 'scanning',
+                    evaluatedAt: now.toISOString(),
+                    priceCents: candidate.lastYesPrice || 0,
+                });
                 continue;
             }
 
@@ -460,9 +477,10 @@ async function runScanCycle() {
             if (opportunity.priceCents >= CONFIG.betMinPrice && candidate.secsLeft >= CONFIG.minSecondsToExpiry) {
                 entry.status = 'betting';
                 watchList.set(candidate.ticker, entry);
+                console.log(`[crumb-sniper] 🎯 HIT: ${candidate.ticker} @ ${opportunity.priceCents}¢ ${opportunity.side} | ${candidate.secsLeft}s left`);
                 await placeCrumbBet(candidate, opportunity);
             } else {
-                // Just watching
+                // Watching — has opportunity but not at bet threshold
                 entry.status = 'watching';
                 watchList.set(candidate.ticker, entry);
             }
@@ -521,15 +539,36 @@ function stop() {
 
 function getStatus() {
     resetDailyStatsIfNeeded();
+    // Update secsLeft for watch entries
+    const now = new Date();
+    const watchEntries = [...watchList.values()].map(e => {
+        const ct = new Date(e.closeTime);
+        return { ...e, secsLeft: Math.round((ct - now) / 1000), price: `${e.priceCents}¢` };
+    }).sort((a, b) => a.secsLeft - b.secsLeft);
+
+    const betEntries = [...bettingList.values()].map(e => {
+        const ct = new Date(e.closeTime);
+        return { ...e, secsLeft: Math.round((ct - now) / 1000), price: `${e.priceCents}¢` };
+    });
+
+    const settledEntries = settledList.slice(0, 20).map(e => ({
+        ...e,
+        profit: (e.pnlCents || 0) / 100,
+        price: `${e.priceCents}¢`,
+    }));
+
     return {
         isRunning,
         paperMode,
-        paperBalanceCents,
-        config: CONFIG,
-        watchList: [...watchList.values()].sort((a, b) => a.secsLeft - b.secsLeft),
-        bettingList: [...bettingList.values()],
-        settledList: settledList.slice(0, 20),
-        dailyStats: { ...dailyStats },
+        // UI expects these field names:
+        pnl: dailyStats.pnlCents / 100,
+        totalBets: dailyStats.bets,
+        wins: dailyStats.wins,
+        losses: dailyStats.losses,
+        balance: paperBalanceCents / 100,
+        watching: watchEntries,
+        activeBets: betEntries,
+        settled: settledEntries,
         totalBetted: bettedTickers.size,
     };
 }
