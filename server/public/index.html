@@ -1787,7 +1787,19 @@
             html += '<div class="period-detail-signals" style="border-top:1px solid rgba(255,255,255,0.08)">';
             html += '<div class="period-detail-signals-title" style="color:#58a6ff">Period Analysis</div>';
 
-            const analysis = analyzePeriod(points, flips, strike);
+            // Look up actual outcome from prediction log or trades
+            const predLogEntry = predictionLog.find(p => p.periodKey === periodKey);
+            const periodTradesForAnalysis = ((serverData && serverData.tradingStatus && serverData.tradingStatus.recentTrades) || [])
+                .filter(t => t.periodKey === periodKey);
+            const settleEntry = periodTradesForAnalysis.find(t => t.type === 'settle');
+            let knownOutcome = null;
+            if (predLogEntry && predLogEntry.correct !== null) {
+                // Use the actual price from the prediction log
+                knownOutcome = predLogEntry.actualPrice >= strike ? 'up' : 'down';
+            } else if (settleEntry) {
+                knownOutcome = settleEntry.correct ? (settleEntry.direction || null) : (settleEntry.direction === 'up' ? 'down' : 'up');
+            }
+            const analysis = analyzePeriod(points, flips, strike, knownOutcome);
             for (const item of analysis) {
                 const icon = item.type === 'good' ? '\u2713' : item.type === 'bad' ? '\u2717' : '\u25CB';
                 const color = item.type === 'good' ? '#3fb950' : item.type === 'bad' ? '#f85149' : '#d29922';
@@ -1796,7 +1808,7 @@
             }
 
             // Improvement suggestions
-            const improvements = suggestImprovements(points, flips, strike);
+            const improvements = suggestImprovements(points, flips, strike, knownOutcome);
             if (improvements.length > 0) {
                 html += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05)">';
                 html += '<div style="font-size:9px;color:#d29922;font-weight:600;letter-spacing:0.5px;margin-bottom:3px">IMPROVEMENTS</div>';
@@ -2122,12 +2134,13 @@
         }
 
         // ── Period Self-Analysis ────────────────────────────────────
-        function analyzePeriod(points, flips, strike) {
+        function analyzePeriod(points, flips, strike, knownOutcome) {
             const analysis = [];
             if (points.length < 3) return [{ type: 'info', msg: 'Too few data points for analysis.' }];
 
             const first = points[0], last = points[points.length - 1];
-            const actualDir = last.price >= strike ? 'up' : 'down';
+            // Use known settlement outcome if available, otherwise fall back to last tick vs strike
+            const actualDir = knownOutcome || (last.price >= strike ? 'up' : 'down');
             const predictedDir = first.dir;
             const finalPredDir = last.dir;
 
@@ -2207,12 +2220,12 @@
             return analysis;
         }
 
-        function suggestImprovements(points, flips, strike) {
+        function suggestImprovements(points, flips, strike, knownOutcome) {
             const suggestions = [];
             if (points.length < 3) return suggestions;
 
             const last = points[points.length - 1];
-            const actualDir = last.price >= strike ? 'up' : 'down';
+            const actualDir = knownOutcome || (last.price >= strike ? 'up' : 'down');
             const finalPredDir = last.dir;
             const avgConf = points.reduce((s, p) => s + (p.conf || 0), 0) / points.length;
             const avgProb = points.reduce((s, p) => s + (p.prob || 0.5), 0) / points.length;
