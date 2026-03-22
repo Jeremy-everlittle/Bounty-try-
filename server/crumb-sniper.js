@@ -251,7 +251,25 @@ async function evaluateCandidate(candidate) {
             }
         }
 
-        if (opportunities.length === 0) return null;
+        if (opportunities.length === 0) {
+            // No opportunities in the 80-98¢ range, but still return the best
+            // available price on each side for display purposes
+            const bestYes = yesLevels.length > 0 ? yesLevels.reduce((best, l) => l.priceCents > best.priceCents ? l : best) : null;
+            const bestNo = noLevels.length > 0 ? noLevels.reduce((best, l) => l.priceCents > best.priceCents ? l : best) : null;
+            // Return the higher-priced side as "best available" (closer to guaranteed)
+            const best = (bestYes && bestNo) ? (bestYes.priceCents >= bestNo.priceCents ? bestYes : bestNo)
+                       : bestYes || bestNo;
+            if (best) {
+                const side = best === bestYes ? 'yes' : 'no';
+                return {
+                    side, priceCents: best.priceCents, available: best.available,
+                    profitPerContract: 100 - best.priceCents,
+                    impliedProb: best.priceCents / 100,
+                    belowThreshold: true, // flag: not bettable yet
+                };
+            }
+            return null;
+        }
 
         // Pick the best opportunity (highest implied probability = most likely to pay out)
         opportunities.sort((a, b) => b.impliedProb - a.impliedProb);
@@ -507,7 +525,8 @@ async function runScanCycle() {
                     ...candidate,
                     status: 'scanning',
                     evaluatedAt: now.toISOString(),
-                    priceCents: candidate.lastYesPrice || 0,
+                    priceCents: 0,
+                    side: null,
                 });
                 continue;
             }
@@ -517,6 +536,13 @@ async function runScanCycle() {
                 ...opportunity,
                 evaluatedAt: now.toISOString(),
             };
+
+            // Below threshold — show on watch list with actual price but don't bet
+            if (opportunity.belowThreshold) {
+                entry.status = 'watching';
+                watchList.set(candidate.ticker, entry);
+                continue;
+            }
 
             // Meets bet threshold? → auto-bet
             if (opportunity.priceCents >= CONFIG.betMinPrice && candidate.secsLeft >= CONFIG.minSecondsToExpiry) {

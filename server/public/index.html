@@ -802,7 +802,7 @@
         .crumb-panel-title.betting { color: #f0883e; }
         .crumb-panel-title.settled { color: #8b949e; }
         .crumb-list {
-            max-height: 200px;
+            max-height: 350px;
             overflow-y: auto;
         }
         .crumb-empty {
@@ -813,17 +813,43 @@
         }
         .crumb-item {
             display: flex;
-            justify-content: space-between;
-            align-items: center;
+            flex-direction: column;
+            gap: 4px;
             padding: 8px 12px;
             border-bottom: 1px solid #21262d;
             font-size: 12px;
         }
         .crumb-item:last-child { border-bottom: none; }
-        .crumb-item .ticker { color: #e6edf3; font-weight: 600; }
-        .crumb-item .price { color: #8b949e; }
-        .crumb-item .profit { color: #3fb950; }
-        .crumb-item .loss { color: #f85149; }
+        .crumb-item-row1 {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .crumb-item-row2 {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 6px;
+        }
+        .crumb-item .ticker { color: #e6edf3; font-weight: 600; font-size: 11px; }
+        .crumb-item .title { color: #8b949e; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+        .crumb-item .countdown {
+            font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
+            padding: 1px 6px; border-radius: 4px; min-width: 36px; text-align: center;
+        }
+        .crumb-item .countdown.urgent { background: rgba(248,81,73,0.2); color: #f85149; }
+        .crumb-item .countdown.soon { background: rgba(210,153,34,0.2); color: #e3b341; }
+        .crumb-item .countdown.normal { background: rgba(56,139,253,0.15); color: #58a6ff; }
+        .crumb-item .side-badge {
+            font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
+            text-transform: uppercase; letter-spacing: 0.3px;
+        }
+        .crumb-item .side-badge.yes { background: rgba(63,185,80,0.2); color: #3fb950; }
+        .crumb-item .side-badge.no { background: rgba(248,81,73,0.2); color: #f85149; }
+        .crumb-item .side-badge.none { background: rgba(139,148,158,0.15); color: #484f58; }
+        .crumb-item .price { color: #e6edf3; font-weight: 600; }
+        .crumb-item .profit { color: #3fb950; font-weight: 600; }
+        .crumb-item .loss { color: #f85149; font-weight: 600; }
     </style>
 </head>
 <body>
@@ -3605,10 +3631,47 @@
                 return;
             }
             el.innerHTML = items.map(item => {
+                // Countdown timer
+                const secs = item.secsLeft || 0;
+                const countdownClass = secs <= 30 ? 'urgent' : secs <= 120 ? 'soon' : 'normal';
+                const mins = Math.floor(Math.abs(secs) / 60);
+                const remSecs = Math.abs(secs) % 60;
+                const countdownStr = secs <= 0 ? 'CLOSED'
+                    : mins > 0 ? mins + ':' + remSecs.toString().padStart(2, '0')
+                    : remSecs + 's';
+
+                // Market title — use title if available, otherwise extract from ticker
+                const title = item.title || item.ticker || '?';
+                const ticker = item.ticker || '?';
+
+                // Resolution side and price
+                const side = item.side || null;
+                const sideBadge = side
+                    ? '<span class="side-badge ' + side + '">' + side.toUpperCase() + '</span>'
+                    : '<span class="side-badge none">--</span>';
+                const priceCents = item.priceCents || 0;
+                const priceStr = priceCents > 0 ? priceCents + '\u00A2' : '--';
+
+                // Profit for settled items
                 const profitClass = (item.profit || 0) >= 0 ? 'profit' : 'loss';
-                const profitStr = item.profit !== undefined ? '<span class="' + profitClass + '">$' + item.profit.toFixed(2) + '</span>' : '';
-                return '<div class="crumb-item"><span class="ticker">' + (item.ticker || item.market || '?') + '</span>' +
-                       '<span class="price">' + (item.price || '') + '</span>' + profitStr + '</div>';
+                const profitStr = item.profit !== undefined
+                    ? '<span class="' + profitClass + '">' + (item.profit >= 0 ? '+' : '') + '$' + item.profit.toFixed(2) + '</span>'
+                    : '';
+
+                return '<div class="crumb-item">' +
+                    '<div class="crumb-item-row1">' +
+                        '<span class="ticker">' + ticker + '</span>' +
+                        '<span class="countdown ' + countdownClass + '">' + countdownStr + '</span>' +
+                    '</div>' +
+                    '<div class="crumb-item-row2">' +
+                        '<span class="title" title="' + title.replace(/"/g, '&quot;') + '">' + title + '</span>' +
+                        '<span style="display:flex;align-items:center;gap:6px">' +
+                            sideBadge +
+                            '<span class="price">' + priceStr + '</span>' +
+                            profitStr +
+                        '</span>' +
+                    '</div>' +
+                '</div>';
             }).join('');
         }
 
