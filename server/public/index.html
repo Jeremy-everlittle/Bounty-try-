@@ -236,7 +236,7 @@
         .chart-container {
             position: relative;
             width: 100%;
-            height: 200px;
+            height: 220px;
             margin-top: 12px;
         }
 
@@ -1098,7 +1098,7 @@
     </div>
 
     <div class="card">
-        <div class="card-label">Price History &amp; Prediction</div>
+        <div class="card-label">Live Cycle Chart</div>
         <div class="chart-container">
             <canvas id="chart"></canvas>
         </div>
@@ -3402,29 +3402,50 @@
 
             const w = canvas.offsetWidth;
             const h = canvas.offsetHeight;
-            const pad = { top: 15, right: 10, bottom: 25, left: 60 };
+            const pad = { top: 15, right: 50, bottom: 25, left: 60 };
 
             ctx.clearRect(0, 0, w, h);
 
-            const prices = history.map(p => p.price);
+            // Calculate period boundaries — show previous + current cycle only
+            const periodStart = getPeriodStartTime();
+            const periodEnd = getPeriodEndTime();
+            const prevPeriodStart = new Date(periodStart.getTime() - 15 * 60 * 1000);
+
+            // Filter history to previous period start through now
+            const filtered = history.filter(p => p.time >= prevPeriodStart.getTime());
+            if (filtered.length === 0) return;
+
+            // Use time-based X axis spanning from prevPeriodStart to periodEnd
+            const tMin = prevPeriodStart.getTime();
+            const tMax = periodEnd.getTime();
+            const tRange = tMax - tMin;
+            const cW = w - pad.left - pad.right;
+            const cH = h - pad.top - pad.bottom;
+
+            function toX(t) { return pad.left + ((t - tMin) / tRange) * cW; }
+
+            // Compute price range including strike, prediction, bounds
+            const prices = filtered.map(p => p.price);
+            const strike = periodStartPrice || null;
             const allPrices = [...prices, predictedPrice];
+            if (strike) allPrices.push(strike);
             if (bounds && bounds.high) allPrices.push(bounds.high);
             if (bounds && bounds.low) allPrices.push(bounds.low);
             const minP = Math.min(...allPrices) * 0.9999;
             const maxP = Math.max(...allPrices) * 1.0001;
             const range = maxP - minP;
 
-            const totalPoints = prices.length + 3;
-            const xStep = (w - pad.left - pad.right) / (totalPoints - 1);
+            function toY(p) { return pad.top + (1 - (p - minP) / range) * cH; }
 
-            function toX(i) { return pad.left + i * xStep; }
-            function toY(p) { return pad.top + (1 - (p - minP) / range) * (h - pad.top - pad.bottom); }
+            // Background
+            ctx.fillStyle = 'rgba(0,0,0,0.2)';
+            ctx.fillRect(0, 0, w, h);
 
-            // Grid
+            // Grid lines
             ctx.strokeStyle = '#21262d';
             ctx.lineWidth = 1;
             for (let i = 0; i < 4; i++) {
-                const y = pad.top + (i / 3) * (h - pad.top - pad.bottom);
+                const y = pad.top + (i / 3) * cH;
                 ctx.beginPath();
                 ctx.moveTo(pad.left, y);
                 ctx.lineTo(w - pad.right, y);
@@ -3437,92 +3458,167 @@
                 ctx.fillText(formatPrice(priceLabel), pad.left - 6, y + 3);
             }
 
-            // Gradient fill
-            ctx.beginPath();
-            ctx.moveTo(toX(0), toY(prices[0]));
-            for (let i = 1; i < prices.length; i++) {
-                ctx.lineTo(toX(i), toY(prices[i]));
+            // X-axis time labels
+            const timeMarks = [prevPeriodStart.getTime(), periodStart.getTime(), periodEnd.getTime()];
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '9px monospace';
+            ctx.textAlign = 'center';
+            for (const t of timeMarks) {
+                const d = new Date(t);
+                const label = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+                ctx.fillText(label, toX(t), h - 4);
             }
-            ctx.lineTo(toX(prices.length - 1), h - pad.bottom);
-            ctx.lineTo(toX(0), h - pad.bottom);
+
+            // Period boundary vertical line (separating previous and current cycle)
+            const boundaryX = toX(periodStart.getTime());
+            ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(boundaryX, pad.top);
+            ctx.lineTo(boundaryX, h - pad.bottom);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            // Period labels
+            ctx.fillStyle = 'rgba(255,255,255,0.25)';
+            ctx.font = '8px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('PREV CYCLE', (pad.left + boundaryX) / 2, pad.top + 12);
+            ctx.fillText('CURRENT CYCLE', (boundaryX + toX(periodEnd.getTime())) / 2, pad.top + 12);
+
+            // Strike price horizontal line
+            if (strike) {
+                ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(pad.left, toY(strike));
+                ctx.lineTo(w - pad.right, toY(strike));
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = 'rgba(255,255,255,0.35)';
+                ctx.font = '8px monospace';
+                ctx.textAlign = 'left';
+                ctx.fillText('Strike $' + strike.toFixed(0), pad.left + 4, toY(strike) - 3);
+            }
+
+            // Split history into previous period and current period for different colors
+            const prevPoints = filtered.filter(p => p.time < periodStart.getTime());
+            const currPoints = filtered.filter(p => p.time >= periodStart.getTime());
+
+            // Gradient fill under entire price line
+            ctx.beginPath();
+            ctx.moveTo(toX(filtered[0].time), toY(filtered[0].price));
+            for (let i = 1; i < filtered.length; i++) {
+                ctx.lineTo(toX(filtered[i].time), toY(filtered[i].price));
+            }
+            ctx.lineTo(toX(filtered[filtered.length - 1].time), h - pad.bottom);
+            ctx.lineTo(toX(filtered[0].time), h - pad.bottom);
             ctx.closePath();
             const gradient = ctx.createLinearGradient(0, pad.top, 0, h - pad.bottom);
-            gradient.addColorStop(0, 'rgba(247, 147, 26, 0.15)');
+            gradient.addColorStop(0, 'rgba(247, 147, 26, 0.12)');
             gradient.addColorStop(1, 'rgba(247, 147, 26, 0)');
             ctx.fillStyle = gradient;
             ctx.fill();
 
-            // Price line
-            ctx.beginPath();
-            ctx.moveTo(toX(0), toY(prices[0]));
-            for (let i = 1; i < prices.length; i++) {
-                ctx.lineTo(toX(i), toY(prices[i]));
+            // Previous period price line (dimmer)
+            if (prevPoints.length > 1) {
+                ctx.beginPath();
+                ctx.moveTo(toX(prevPoints[0].time), toY(prevPoints[0].price));
+                for (let i = 1; i < prevPoints.length; i++) {
+                    ctx.lineTo(toX(prevPoints[i].time), toY(prevPoints[i].price));
+                }
+                ctx.strokeStyle = 'rgba(247, 147, 26, 0.4)';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
             }
-            ctx.strokeStyle = '#f7931a';
-            ctx.lineWidth = 2;
-            ctx.stroke();
 
-            // High/Low bounds shaded area
-            const lastIdx = prices.length - 1;
-            const predIdx = prices.length + 2;
+            // Connect previous to current with bridging segment
+            if (prevPoints.length > 0 && currPoints.length > 0) {
+                ctx.beginPath();
+                ctx.moveTo(toX(prevPoints[prevPoints.length - 1].time), toY(prevPoints[prevPoints.length - 1].price));
+                ctx.lineTo(toX(currPoints[0].time), toY(currPoints[0].price));
+                ctx.strokeStyle = 'rgba(247, 147, 26, 0.5)';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+
+            // Current period price line (bright)
+            if (currPoints.length > 1) {
+                ctx.beginPath();
+                ctx.moveTo(toX(currPoints[0].time), toY(currPoints[0].price));
+                for (let i = 1; i < currPoints.length; i++) {
+                    ctx.lineTo(toX(currPoints[i].time), toY(currPoints[i].price));
+                }
+                ctx.strokeStyle = '#f7931a';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+
+            // High/Low bounds shaded area (from now to period end)
+            const lastPoint = filtered[filtered.length - 1];
+            const nowT = lastPoint.time;
             if (bounds && bounds.high && bounds.low) {
                 ctx.fillStyle = 'rgba(88,166,255,0.08)';
                 ctx.beginPath();
-                ctx.moveTo(toX(lastIdx), toY(bounds.high));
-                ctx.lineTo(toX(predIdx), toY(bounds.high));
-                ctx.lineTo(toX(predIdx), toY(bounds.low));
-                ctx.lineTo(toX(lastIdx), toY(bounds.low));
+                ctx.moveTo(toX(nowT), toY(bounds.high));
+                ctx.lineTo(toX(tMax), toY(bounds.high));
+                ctx.lineTo(toX(tMax), toY(bounds.low));
+                ctx.lineTo(toX(nowT), toY(bounds.low));
                 ctx.closePath();
                 ctx.fill();
-                // Dashed border lines for high and low
+                // Dashed border lines
                 ctx.strokeStyle = 'rgba(88,166,255,0.25)';
                 ctx.lineWidth = 1;
                 ctx.setLineDash([3, 3]);
                 ctx.beginPath();
-                ctx.moveTo(toX(lastIdx), toY(bounds.high));
-                ctx.lineTo(toX(predIdx), toY(bounds.high));
+                ctx.moveTo(toX(nowT), toY(bounds.high));
+                ctx.lineTo(toX(tMax), toY(bounds.high));
                 ctx.stroke();
                 ctx.beginPath();
-                ctx.moveTo(toX(lastIdx), toY(bounds.low));
-                ctx.lineTo(toX(predIdx), toY(bounds.low));
+                ctx.moveTo(toX(nowT), toY(bounds.low));
+                ctx.lineTo(toX(tMax), toY(bounds.low));
                 ctx.stroke();
                 ctx.setLineDash([]);
                 // Labels
                 ctx.fillStyle = 'rgba(88,166,255,0.5)';
                 ctx.font = '8px monospace';
-                ctx.textAlign = 'right';
-                ctx.fillText(formatPrice(bounds.high), toX(predIdx) - 2, toY(bounds.high) - 3);
-                ctx.fillText(formatPrice(bounds.low), toX(predIdx) - 2, toY(bounds.low) + 10);
+                ctx.textAlign = 'left';
+                ctx.fillText(formatPrice(bounds.high), toX(tMax) + 3, toY(bounds.high) + 3);
+                ctx.fillText(formatPrice(bounds.low), toX(tMax) + 3, toY(bounds.low) + 3);
             }
 
-            // Prediction dashed line
+            // Prediction dashed line (from now to period end)
             ctx.beginPath();
-            ctx.moveTo(toX(lastIdx), toY(prices[lastIdx]));
-            ctx.lineTo(toX(predIdx), toY(predictedPrice));
+            ctx.moveTo(toX(nowT), toY(lastPoint.price));
+            ctx.lineTo(toX(tMax), toY(predictedPrice));
             ctx.strokeStyle = predictedPrice >= currentPrice ? '#3fb950' : '#f85149';
             ctx.lineWidth = 2;
             ctx.setLineDash([6, 4]);
             ctx.stroke();
             ctx.setLineDash([]);
 
-            // Current dot
+            // Predicted dot at period end
             ctx.beginPath();
-            ctx.arc(toX(lastIdx), toY(prices[lastIdx]), 5, 0, Math.PI * 2);
-            ctx.fillStyle = '#f7931a';
-            ctx.fill();
-
-            // Predicted dot
-            ctx.beginPath();
-            ctx.arc(toX(predIdx), toY(predictedPrice), 5, 0, Math.PI * 2);
+            ctx.arc(toX(tMax), toY(predictedPrice), 4, 0, Math.PI * 2);
             ctx.fillStyle = predictedPrice >= currentPrice ? '#3fb950' : '#f85149';
             ctx.fill();
+            // Predicted price label
+            ctx.font = '9px monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText(formatPrice(predictedPrice), toX(tMax) + 6, toY(predictedPrice) + 3);
 
-            // Labels
-            ctx.font = '10px -apple-system, sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillStyle = '#b0b8c1';
-            ctx.fillText('Now', toX(lastIdx), h - 6);
-            ctx.fillText(targetLabel, toX(predIdx), h - 6);
+            // Current price dot (pulsing "now")
+            ctx.beginPath();
+            ctx.arc(toX(nowT), toY(lastPoint.price), 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#f7931a';
+            ctx.fill();
+            // Glow effect
+            ctx.beginPath();
+            ctx.arc(toX(nowT), toY(lastPoint.price), 8, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(247, 147, 26, 0.3)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
         }
 
         // ── UI update ─────────────────────────────────────────────────
