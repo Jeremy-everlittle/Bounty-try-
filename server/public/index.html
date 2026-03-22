@@ -1107,8 +1107,8 @@
             <span><span class="dot" style="background:rgba(247,147,26,0.4)"></span>Prev Cycle</span>
             <span><span class="dot" style="background:rgba(255,255,255,0.25);border:1px dashed rgba(255,255,255,0.4)"></span>Strike</span>
             <span><span class="dot" style="background:#3fb950"></span>Prediction</span>
-            <span><span class="dot" style="background:#3fb950"></span>▲ High</span>
-            <span><span class="dot" style="background:#f85149"></span>▼ Low</span>
+            <span><span class="dot" style="background:#3fb950"></span>Cycle High</span>
+            <span><span class="dot" style="background:#f85149"></span>Cycle Low</span>
             <span><span class="dot" style="background:rgba(88,166,255,0.3)"></span>Range (2σ)</span>
         </div>
     </div>
@@ -3567,6 +3567,75 @@
                 ctx.strokeStyle = '#f7931a';
                 ctx.lineWidth = 2;
                 ctx.stroke();
+            }
+
+            // Running high/low lines — track highest and lowest price seen so far in each cycle
+            // Previous cycle
+            if (prevPoints.length > 1) {
+                let runHigh = prevPoints[0].price, runLow = prevPoints[0].price;
+                const prevHighLine = [], prevLowLine = [];
+                for (const p of prevPoints) {
+                    if (p.price > runHigh) runHigh = p.price;
+                    if (p.price < runLow) runLow = p.price;
+                    prevHighLine.push({ time: p.time, val: runHigh });
+                    prevLowLine.push({ time: p.time, val: runLow });
+                }
+                // Prev high
+                ctx.strokeStyle = 'rgba(63,185,80,0.25)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+                ctx.beginPath();
+                for (let i = 0; i < prevHighLine.length; i++) {
+                    const x = toX(prevHighLine[i].time), y = toY(prevHighLine[i].val);
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                // Prev low
+                ctx.strokeStyle = 'rgba(248,81,73,0.25)';
+                ctx.beginPath();
+                for (let i = 0; i < prevLowLine.length; i++) {
+                    const x = toX(prevLowLine[i].time), y = toY(prevLowLine[i].val);
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+            // Current cycle
+            if (currPoints.length > 1) {
+                let runHigh = currPoints[0].price, runLow = currPoints[0].price;
+                const currHighLine = [], currLowLine = [];
+                for (const p of currPoints) {
+                    if (p.price > runHigh) runHigh = p.price;
+                    if (p.price < runLow) runLow = p.price;
+                    currHighLine.push({ time: p.time, val: runHigh });
+                    currLowLine.push({ time: p.time, val: runLow });
+                }
+                // Current high
+                ctx.strokeStyle = 'rgba(63,185,80,0.6)';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                for (let i = 0; i < currHighLine.length; i++) {
+                    const x = toX(currHighLine[i].time), y = toY(currHighLine[i].val);
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                // Current high label
+                ctx.fillStyle = '#3fb950';
+                ctx.font = '8px monospace';
+                ctx.textAlign = 'left';
+                ctx.fillText('High ' + formatPrice(runHigh), toX(currHighLine[currHighLine.length - 1].time) + 4, toY(runHigh) + 3);
+                // Current low
+                ctx.strokeStyle = 'rgba(248,81,73,0.6)';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                for (let i = 0; i < currLowLine.length; i++) {
+                    const x = toX(currLowLine[i].time), y = toY(currLowLine[i].val);
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                // Current low label
+                ctx.fillStyle = '#f85149';
+                ctx.fillText('Low ' + formatPrice(runLow), toX(currLowLine[currLowLine.length - 1].time) + 4, toY(runLow) + 3);
             }
 
             // High/Low bounds shaded area (from now to period end)
