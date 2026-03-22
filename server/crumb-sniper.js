@@ -16,11 +16,11 @@ const CONFIG = {
     // Scan interval — how often we look for new candidates
     scanIntervalMs: 8000,        // 8 seconds between full scans
     // Time window — only consider markets closing within this window
-    maxSecondsToExpiry: 900,     // 15 minutes before close — ensures we always catch BTC 15m markets
+    maxSecondsToExpiry: 3600,    // 60 minutes — scan across ALL Kalshi markets closing within the hour
     minSecondsToExpiry: 5,       // at least 5 seconds left to place order
     // Price thresholds — what counts as "near guaranteed"
     // A YES at 95¢ means 95% implied probability → 5¢ profit if correct
-    watchMinPrice: 85,           // watch list: ≥85¢ implied probability (cents)
+    watchMinPrice: 80,           // watch list: ≥80¢ implied probability (cents)
     betMinPrice: 94,             // auto-bet: ≥94¢ implied probability (cents)
     betMaxPrice: 98,             // don't bet above 98¢ (only 2¢ profit, not worth fees)
     // Sizing
@@ -75,37 +75,50 @@ async function scanForCandidates() {
     const maxClose = new Date(now.getTime() + CONFIG.maxSecondsToExpiry * 1000);
 
     try {
-        // Fetch markets closing soon
-        // Note: min_close_ts/max_close_ts are NOT compatible with status=open
-        // so we omit the status filter and check market status in code
-        const data = await fetchJSON(
-            PUBLIC_API + '/markets?' + new URLSearchParams({
-                min_close_ts: Math.floor(minClose.getTime() / 1000),
-                max_close_ts: Math.floor(maxClose.getTime() / 1000),
-                limit: '200',
-            }).toString()
-        );
+        // Fetch ALL markets closing within our window across ALL categories
+        // Uses cursor-based pagination to get beyond the 200-per-page limit
+        const allMarkets = [];
+        let cursor = null;
+        const params = {
+            min_close_ts: Math.floor(minClose.getTime() / 1000),
+            max_close_ts: Math.floor(maxClose.getTime() / 1000),
+            limit: '200',
+        };
 
-        if (!data || !data.markets) {
+        for (let page = 0; page < 10; page++) { // max 10 pages = 2000 markets
+            const qp = new URLSearchParams(params);
+            if (cursor) qp.set('cursor', cursor);
+
+            const data = await fetchJSON(PUBLIC_API + '/markets?' + qp.toString());
+            if (!data || !data.markets || data.markets.length === 0) break;
+
+            allMarkets.push(...data.markets);
+            cursor = data.cursor;
+            if (!cursor) break; // no more pages
+        }
+
+        if (allMarkets.length === 0) {
             console.log('[crumb-sniper] Scan returned no markets');
             return [];
         }
 
         // Log all market statuses to debug filtering
         const statusCounts = {};
-        for (const m of data.markets) {
+        for (const m of allMarkets) {
             statusCounts[m.status] = (statusCounts[m.status] || 0) + 1;
         }
-        console.log(`[crumb-sniper] Scan found ${data.markets.length} markets closing in ${CONFIG.minSecondsToExpiry}-${CONFIG.maxSecondsToExpiry}s window | statuses: ${JSON.stringify(statusCounts)}`);
-        if (data.markets.length > 0 && data.markets.length <= 10) {
-            for (const m of data.markets) {
-                console.log(`[crumb-sniper]   → ${m.ticker} | status=${m.status} | close=${m.close_time || m.expiration_time}`);
+        console.log(`[crumb-sniper] Scan found ${allMarkets.length} markets closing in ${CONFIG.minSecondsToExpiry}-${CONFIG.maxSecondsToExpiry}s window | statuses: ${JSON.stringify(statusCounts)}`);
+        if (allMarkets.length > 0 && allMarkets.length <= 20) {
+            for (const m of allMarkets) {
+                const ct = new Date(m.close_time || m.expiration_time);
+                const secs = Math.round((ct - now) / 1000);
+                console.log(`[crumb-sniper]   → ${m.ticker} | status=${m.status} | ${secs}s left | ${m.title || ''}`);
             }
         }
 
         const candidates = [];
 
-        for (const market of data.markets) {
+        for (const market of allMarkets) {
             // Skip non-tradeable markets — accept 'open', 'active', or anything that isn't clearly closed
             const closedStatuses = new Set(['closed', 'settled', 'finalized', 'cancelled', 'canceled']);
             if (closedStatuses.has(market.status)) continue;
@@ -130,7 +143,7 @@ async function scanForCandidates() {
             });
         }
 
-        console.log(`[crumb-sniper] ${candidates.length} open candidates found (${data.markets.length - candidates.length} filtered out)`);
+        console.log(`[crumb-sniper] ${candidates.length} open candidates found (${allMarkets.length - candidates.length} filtered out)`);
         return candidates;
     } catch (err) {
         console.error('[crumb-sniper] Scan error:', err.message);
