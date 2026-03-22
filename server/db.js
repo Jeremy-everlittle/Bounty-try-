@@ -1312,6 +1312,27 @@ async function clearPredictionLog() {
     }
 }
 
+async function purgeAllData() {
+    if (!ready) return;
+    try {
+        await pool.query('DELETE FROM trades');
+        await pool.query('DELETE FROM daily_stats');
+        await pool.query('DELETE FROM positions');
+        await pool.query('DELETE FROM prediction_snapshots');
+        await pool.query('DELETE FROM decision_log');
+        await pool.query('DELETE FROM price_snapshots');
+        await pool.query('DELETE FROM orderbook_snapshots');
+        await pool.query('DELETE FROM market_data_snapshots');
+        await pool.query('DELETE FROM account_balances');
+        await pool.query('DELETE FROM prediction_log');
+        await pool.query('DELETE FROM store_state');
+        await pool.query('DELETE FROM cycle_data');
+        console.log('[db] All data purged');
+    } catch (e) {
+        console.error('[db] purgeAllData error:', e.message);
+    }
+}
+
 // ── Store State (Key-Value persistence) ──────────────────────
 
 async function saveStoreState(key, value) {
@@ -1451,6 +1472,7 @@ module.exports = {
     savePredictionLogEntry,
     loadPredictionLog,
     clearPredictionLog,
+    purgeAllData,
     // Store state persistence
     saveStoreState,
     loadStoreState,

@@ -1244,15 +1244,19 @@
         }
 
         function clearHistory() {
+            if (!confirm('This will permanently purge ALL data from the database — predictions, trades, cycle data, snapshots, daily stats, and balances. Continue?')) return;
             predictionLog = [];
             localStorage.removeItem('btcPredLog');
             // Clear cached trade data so period history doesn't show stale trades
             recentTradesCache = { timestamp: 0, trades: [] };
-            // Also clear server-side history + trade log
+            // Purge all server-side data (DB + in-memory)
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'clearHistory' }));
             }
             renderPredictionHistory();
+            // Clear the analysis section
+            const analysisContent = document.getElementById('auto-bettor-content');
+            if (analysisContent) analysisContent.innerHTML = '<div class="period-detail-loading">Data purged. Analysis will rebuild as new data arrives.</div>';
         }
 
         function recordPrediction(periodKey, startPrice, predictedPrice, targetTimeStr) {

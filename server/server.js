@@ -1361,9 +1361,10 @@ wss.on('connection', (ws, req) => {
         try {
             const msg = JSON.parse(raw);
             if (msg.type === 'clearHistory') {
-                console.log('Client requested history clear');
+                console.log('Client requested FULL data purge');
                 store.clearPredictionLog();
                 tradeExecutor.clearTradeLog();
+                db.purgeAllData();
             }
         } catch (e) {}
     });
