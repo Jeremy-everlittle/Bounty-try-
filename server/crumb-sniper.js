@@ -16,11 +16,11 @@ const CONFIG = {
     // Scan interval — how often we look for new candidates
     scanIntervalMs: 8000,        // 8 seconds between full scans
     // Time window — only consider markets closing within this window
-    maxSecondsToExpiry: 90,      // 90 seconds before close
+    maxSecondsToExpiry: 300,     // 5 minutes before close
     minSecondsToExpiry: 5,       // at least 5 seconds left to place order
     // Price thresholds — what counts as "near guaranteed"
     // A YES at 95¢ means 95% implied probability → 5¢ profit if correct
-    watchMinPrice: 90,           // watch list: ≥90¢ implied probability (cents)
+    watchMinPrice: 85,           // watch list: ≥85¢ implied probability (cents)
     betMinPrice: 94,             // auto-bet: ≥94¢ implied probability (cents)
     betMaxPrice: 98,             // don't bet above 98¢ (only 2¢ profit, not worth fees)
     // Sizing
@@ -75,22 +75,30 @@ async function scanForCandidates() {
     const maxClose = new Date(now.getTime() + CONFIG.maxSecondsToExpiry * 1000);
 
     try {
-        // Fetch open markets closing soon
-        // The Kalshi API supports min_close_ts and max_close_ts for filtering
+        // Fetch markets closing soon
+        // Note: min_close_ts/max_close_ts are NOT compatible with status=open
+        // so we omit the status filter and check market status in code
         const data = await fetchJSON(
             PUBLIC_API + '/markets?' + new URLSearchParams({
-                status: 'open',
                 min_close_ts: Math.floor(minClose.getTime() / 1000),
                 max_close_ts: Math.floor(maxClose.getTime() / 1000),
                 limit: '200',
             }).toString()
         );
 
-        if (!data || !data.markets) return [];
+        if (!data || !data.markets) {
+            console.log('[crumb-sniper] Scan returned no markets');
+            return [];
+        }
+
+        console.log(`[crumb-sniper] Scan found ${data.markets.length} markets closing in ${CONFIG.minSecondsToExpiry}-${CONFIG.maxSecondsToExpiry}s window`);
 
         const candidates = [];
 
         for (const market of data.markets) {
+            // Skip non-open markets since we can't filter by status with close_ts
+            if (market.status !== 'open') continue;
+
             const closeTime = new Date(market.close_time || market.expiration_time);
             const secsLeft = (closeTime - now) / 1000;
 
@@ -111,6 +119,7 @@ async function scanForCandidates() {
             });
         }
 
+        console.log(`[crumb-sniper] ${candidates.length} open candidates found (${data.markets.length - candidates.length} filtered out)`);
         return candidates;
     } catch (err) {
         console.error('[crumb-sniper] Scan error:', err.message);
