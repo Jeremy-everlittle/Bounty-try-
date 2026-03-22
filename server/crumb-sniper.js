@@ -16,7 +16,7 @@ const CONFIG = {
     // Scan interval — how often we look for new candidates
     scanIntervalMs: 8000,        // 8 seconds between full scans
     // Time window — only consider markets closing within this window
-    maxSecondsToExpiry: 300,     // 5 minutes before close
+    maxSecondsToExpiry: 900,     // 15 minutes before close — ensures we always catch BTC 15m markets
     minSecondsToExpiry: 5,       // at least 5 seconds left to place order
     // Price thresholds — what counts as "near guaranteed"
     // A YES at 95¢ means 95% implied probability → 5¢ profit if correct
