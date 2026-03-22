@@ -1738,7 +1738,10 @@
             html += '<span><span class="dot" style="background:#58a6ff"></span>BTC Price</span>';
             html += '<span><span class="dot" style="background:#f0883e"></span>Kalshi YES \u00A2</span>';
             html += '<span><span class="dot" style="background:rgba(255,255,255,0.25)"></span>Strike</span>';
+            html += '<span><span class="dot" style="background:#3fb950"></span>Prediction</span>';
             html += '<span><span class="dot" style="background:#a371f7"></span>P(up) %</span>';
+            html += '<span><span class="dot" style="background:rgba(63,185,80,0.5);border:1px dashed #3fb950"></span>High</span>';
+            html += '<span><span class="dot" style="background:rgba(248,81,73,0.5);border:1px dashed #f85149"></span>Low</span>';
             if (flips.length > 0) html += '<span><span class="dot" style="background:#e3b341"></span>Direction Flip</span>';
             html += '</div>';
 
@@ -1835,6 +1838,7 @@
                 for (const p of points) {
                     if (p.predHigh) allPrices.push(p.predHigh);
                     if (p.predLow) allPrices.push(p.predLow);
+                    if (p.predicted) allPrices.push(p.predicted);
                 }
                 let yMin = Math.min(...allPrices);
                 let yMax = Math.max(...allPrices);
@@ -1922,9 +1926,10 @@
                     ctx.fillText('Strike', pad.left + 4, yPos(strike) - 3);
                 }
 
-                // High/Low bounds shaded band
+                // High/Low bounds shaded band + lines
                 const hasBounds = points.some(p => p.predHigh && p.predLow);
                 if (hasBounds) {
+                    // Shaded fill between high and low
                     ctx.fillStyle = 'rgba(88,166,255,0.06)';
                     ctx.beginPath();
                     let started = false;
@@ -1940,9 +1945,69 @@
                     }
                     ctx.closePath();
                     ctx.fill();
+
+                    // High bound line
+                    ctx.strokeStyle = 'rgba(63,185,80,0.5)';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([3, 3]);
+                    ctx.beginPath();
+                    let hStarted = false;
+                    for (let i = 0; i < points.length; i++) {
+                        if (!points[i].predHigh) continue;
+                        const x = xPos(points[i].time), y = yPos(points[i].predHigh);
+                        if (!hStarted) { ctx.moveTo(x, y); hStarted = true; } else ctx.lineTo(x, y);
+                    }
+                    ctx.stroke();
+                    // High label
+                    const lastHigh = [...points].reverse().find(p => p.predHigh);
+                    if (lastHigh) {
+                        ctx.fillStyle = '#3fb950'; ctx.font = 'bold 7px monospace'; ctx.textAlign = 'left';
+                        ctx.fillText('High $' + lastHigh.predHigh.toFixed(0), xPos(lastHigh.time) + 3, yPos(lastHigh.predHigh) - 2);
+                    }
+
+                    // Low bound line
+                    ctx.strokeStyle = 'rgba(248,81,73,0.5)';
+                    ctx.beginPath();
+                    let lStarted = false;
+                    for (let i = 0; i < points.length; i++) {
+                        if (!points[i].predLow) continue;
+                        const x = xPos(points[i].time), y = yPos(points[i].predLow);
+                        if (!lStarted) { ctx.moveTo(x, y); lStarted = true; } else ctx.lineTo(x, y);
+                    }
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    // Low label
+                    const lastLow = [...points].reverse().find(p => p.predLow);
+                    if (lastLow) {
+                        ctx.fillStyle = '#f85149'; ctx.font = 'bold 7px monospace'; ctx.textAlign = 'left';
+                        ctx.fillText('Low $' + lastLow.predLow.toFixed(0), xPos(lastLow.time) + 3, yPos(lastLow.predLow) + 8);
+                    }
                 }
 
-                // BTC price line (draw first, below predicted)
+                // Predicted price line
+                const hasPredicted = points.some(p => p.predicted);
+                if (hasPredicted) {
+                    ctx.strokeStyle = '#3fb950';
+                    ctx.lineWidth = 1.5;
+                    ctx.setLineDash([4, 3]);
+                    ctx.beginPath();
+                    let pStarted = false;
+                    for (let i = 0; i < points.length; i++) {
+                        if (!points[i].predicted) continue;
+                        const x = xPos(points[i].time), y = yPos(points[i].predicted);
+                        if (!pStarted) { ctx.moveTo(x, y); pStarted = true; } else ctx.lineTo(x, y);
+                    }
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    // Predicted label at end
+                    const lastPred = [...points].reverse().find(p => p.predicted);
+                    if (lastPred) {
+                        ctx.fillStyle = '#3fb950'; ctx.font = 'bold 7px monospace'; ctx.textAlign = 'left';
+                        ctx.fillText('Pred $' + lastPred.predicted.toFixed(0), xPos(lastPred.time) + 3, yPos(lastPred.predicted) - 2);
+                    }
+                }
+
+                // BTC price line
                 ctx.strokeStyle = '#58a6ff';
                 ctx.lineWidth = 2;
                 ctx.beginPath();
