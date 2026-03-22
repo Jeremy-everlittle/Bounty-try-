@@ -730,42 +730,7 @@
         #dashboard-content { display: none; }
         #dashboard-content.visible { display: block; }
 
-        /* ── Crumb Sniper ── */
-        #crumb-sniper-section {
-            margin: 18px 16px 0 16px;
-            border: 1px solid #f0883e;
-            border-radius: 10px;
-            overflow: hidden;
-            background: #0d1117;
-        }
-        #crumb-sniper-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 14px 16px;
-            background: linear-gradient(135deg, #161b22, #1a2233);
-            border-bottom: 1px solid #30363d;
-            border-left: 3px solid #f0883e;
-            cursor: pointer;
-        }
-        #crumb-sniper-header h3 {
-            margin: 0;
-            font-size: 16px;
-            font-weight: 700;
-            color: #f0883e;
-            letter-spacing: 0.5px;
-        }
-        #crumb-sniper-toggle {
-            padding: 4px 14px;
-            border-radius: 6px;
-            border: 1px solid #30363d;
-            background: #21262d;
-            color: #8b949e;
-            font-size: 12px;
-            cursor: pointer;
-            font-weight: 600;
-            transition: all 0.15s;
-        }
+        /* ── Crumb Sniper (inside Auto Trading card) ── */
         #crumb-sniper-toggle.active {
             background: #1a7f37;
             color: #fff;
@@ -890,44 +855,7 @@
     </div>
 
     <!-- ═══ Crumb Sniper Section ═══ -->
-    <div id="crumb-sniper-section">
-        <div id="crumb-sniper-header" onclick="toggleCrumbSniper()">
-            <h3>&#x1F3AF; Crumb Sniper</h3>
-            <div style="display:flex;align-items:center;gap:10px;">
-                <span id="crumb-sniper-status-badge" style="font-size:12px;color:#484f58;">OFF</span>
-                <button id="crumb-sniper-toggle" onclick="event.stopPropagation(); toggleCrumbSniperRunning()">Start</button>
-            </div>
-        </div>
-        <div id="crumb-sniper-body" style="display:none;">
-            <div class="crumb-stats">
-                <div class="crumb-stat">P&L: <span id="crumb-pnl">$0.00</span></div>
-                <div class="crumb-stat">Bets: <span id="crumb-bets">0</span></div>
-                <div class="crumb-stat">W/L: <span id="crumb-wl">0/0</span></div>
-                <div class="crumb-stat">Balance: <span id="crumb-balance">$100.00</span></div>
-            </div>
-
-            <div class="crumb-panel">
-                <div class="crumb-panel-title watching">Watching</div>
-                <div id="crumb-watch-list" class="crumb-list">
-                    <div class="crumb-empty">Scanning for opportunities...</div>
-                </div>
-            </div>
-
-            <div class="crumb-panel">
-                <div class="crumb-panel-title betting">Betting</div>
-                <div id="crumb-bet-list" class="crumb-list">
-                    <div class="crumb-empty">No active bets</div>
-                </div>
-            </div>
-
-            <div class="crumb-panel">
-                <div class="crumb-panel-title settled">Recent Settled</div>
-                <div id="crumb-settled-list" class="crumb-list">
-                    <div class="crumb-empty">No settled bets yet</div>
-                </div>
-            </div>
-        </div>
-    </div>
+    <!-- Crumb Sniper moved inside Auto Trading card -->
 
     <div class="card" id="prediction-card">
         <div class="card-label">Prediction for</div>
@@ -1067,6 +995,42 @@
                     </div>
                 </div>
                 <button class="trading-btn" id="cfg-save-btn" onclick="saveConfig()" style="width:100%;margin-top:8px;padding:6px 0;font-size:12px;font-weight:700;background:rgba(63,185,80,0.15);border-color:rgba(63,185,80,0.4);color:#3fb950;">Save Settings</button>
+            </div>
+
+            <!-- Crumb Sniper (inside Auto Trading card) -->
+            <div id="crumb-sniper-section" style="margin-top:10px;border:1px solid rgba(240,136,62,0.3);border-radius:8px;overflow:hidden;">
+                <div id="crumb-sniper-header" onclick="toggleCrumbSniper()" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(240,136,62,0.08);cursor:pointer;">
+                    <span style="font-size:12px;font-weight:700;color:#f0883e;letter-spacing:0.5px;">CRUMB SNIPER</span>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <span id="crumb-sniper-status-badge" style="font-size:10px;color:#484f58;">OFF</span>
+                        <button id="crumb-sniper-toggle" onclick="event.stopPropagation(); toggleCrumbSniperRunning()" style="padding:2px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#8b949e;font-size:10px;cursor:pointer;font-weight:600;">Start</button>
+                    </div>
+                </div>
+                <div id="crumb-sniper-body" style="display:none;padding:8px 12px;">
+                    <div class="crumb-stats">
+                        <div class="crumb-stat">P&L: <span id="crumb-pnl">$0.00</span></div>
+                        <div class="crumb-stat">Bets: <span id="crumb-bets">0</span></div>
+                        <div class="crumb-stat">W/L: <span id="crumb-wl">0/0</span></div>
+                    </div>
+                    <div class="crumb-panel">
+                        <div class="crumb-panel-title watching">Watching</div>
+                        <div id="crumb-watch-list" class="crumb-list">
+                            <div class="crumb-empty">Scanning for opportunities...</div>
+                        </div>
+                    </div>
+                    <div class="crumb-panel">
+                        <div class="crumb-panel-title betting">Betting</div>
+                        <div id="crumb-bet-list" class="crumb-list">
+                            <div class="crumb-empty">No active bets</div>
+                        </div>
+                    </div>
+                    <div class="crumb-panel">
+                        <div class="crumb-panel-title settled">Recent Settled</div>
+                        <div id="crumb-settled-list" class="crumb-list">
+                            <div class="crumb-empty">No settled bets yet</div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -3584,7 +3548,18 @@
                     await authFetch('/api/crumb-sniper/stop', { method: 'POST' });
                     crumbSniperRunning = false;
                 } else {
-                    await authFetch('/api/crumb-sniper/start', { method: 'POST' });
+                    // Check if auto-bettor is running (kill switch off)
+                    const ts = serverData && serverData.tradingStatus;
+                    if (ts && ts.killSwitch) {
+                        alert('Start the auto-bettor first (deactivate kill switch)');
+                        return;
+                    }
+                    const resp = await authFetch('/api/crumb-sniper/start', { method: 'POST' });
+                    const data = await resp.json();
+                    if (data.ok === false) {
+                        alert(data.error || 'Cannot start crumb sniper');
+                        return;
+                    }
                     crumbSniperRunning = true;
                     crumbSniperExpanded = true;
                     const body = document.getElementById('crumb-sniper-body');
@@ -3602,8 +3577,33 @@
             crumbSniperRunning = status.isRunning;
             const btn = document.getElementById('crumb-sniper-toggle');
             const badge = document.getElementById('crumb-sniper-status-badge');
-            if (btn) { btn.textContent = crumbSniperRunning ? 'Stop' : 'Start'; btn.classList.toggle('active', crumbSniperRunning); }
-            if (badge) { badge.textContent = crumbSniperRunning ? 'LIVE' : 'OFF'; badge.style.color = crumbSniperRunning ? '#3fb950' : '#484f58'; }
+            const ts = serverData && serverData.tradingStatus;
+            const autoBettorOff = ts && ts.killSwitch;
+
+            if (btn) {
+                btn.textContent = crumbSniperRunning ? 'Stop' : 'Start';
+                btn.classList.toggle('active', crumbSniperRunning);
+                // Disable start button when auto-bettor is off
+                if (autoBettorOff && !crumbSniperRunning) {
+                    btn.disabled = true;
+                    btn.style.opacity = '0.4';
+                    btn.title = 'Start the auto-bettor first';
+                } else {
+                    btn.disabled = false;
+                    btn.style.opacity = '1';
+                    btn.title = '';
+                }
+            }
+            if (badge) {
+                const modeLabel = crumbSniperRunning
+                    ? (status.paperMode ? 'PAPER' : 'LIVE')
+                    : (autoBettorOff ? 'DISABLED' : 'OFF');
+                const modeColor = crumbSniperRunning
+                    ? (status.paperMode ? '#e3b341' : '#3fb950')
+                    : '#484f58';
+                badge.textContent = modeLabel;
+                badge.style.color = modeColor;
+            }
 
             if (status.pnl !== undefined) {
                 const pnlEl = document.getElementById('crumb-pnl');
@@ -3613,8 +3613,6 @@
             if (betsEl && status.totalBets !== undefined) betsEl.textContent = status.totalBets;
             const wlEl = document.getElementById('crumb-wl');
             if (wlEl && status.wins !== undefined) wlEl.textContent = status.wins + '/' + status.losses;
-            const balEl = document.getElementById('crumb-balance');
-            if (balEl && status.balance !== undefined) balEl.textContent = '$' + status.balance.toFixed(2);
 
             const emptyMessages = { watch: 'Scanning for opportunities...', bet: 'No active bets', settled: 'No settled bets yet' };
             renderCrumbList('crumb-watch-list', status.watching || [], 'watch');
