@@ -243,6 +243,7 @@
         canvas {
             width: 100%;
             height: 100%;
+            touch-action: none;
         }
 
         .status-bar {
@@ -1767,13 +1768,18 @@
                 if (!canvas) return;
                 const rect = canvas.parentElement.getBoundingClientRect();
                 if (rect.width < 10) return; // container not yet laid out
-                canvas.width = rect.width * dpr;
-                canvas.height = chartHeight * dpr;
-                canvas.style.width = rect.width + 'px';
 
-                const ctx = canvas.getContext('2d');
-                ctx.scale(dpr, dpr);
-                const W = rect.width;
+                function drawPeriodChart() {
+                    const canvas = document.getElementById(canvasId);
+                    if (!canvas) return;
+                    const rect = canvas.parentElement.getBoundingClientRect();
+                    canvas.width = rect.width * dpr;
+                    canvas.height = chartHeight * dpr;
+                    canvas.style.width = rect.width + 'px';
+
+                    const ctx = canvas.getContext('2d');
+                    ctx.scale(dpr, dpr);
+                    const W = rect.width;
                 const H = chartHeight;
                 const pad = { top: 16, right: 45, bottom: 24, left: 55 };
                 const cW = W - pad.left - pad.right;
@@ -1800,14 +1806,27 @@
                 const tMax = points[points.length - 1].time.getTime();
                 const tRange = tMax - tMin || 1;
 
-                function xPos(t) { return pad.left + ((t.getTime() - tMin) / tRange) * cW; }
+                // Zoom-aware xPos for period chart
+                const pZState = getZoomState(canvasId);
+                const xPos = function(t) {
+                    const zoomedW = cW * pZState.zoom;
+                    return pad.left + ((t.getTime() - tMin) / tRange) * zoomedW - pZState.panX;
+                };
                 function yPos(v) { return pad.top + (1 - (v - yMin) / (yMax - yMin)) * cH; }
 
                 // Background
                 ctx.fillStyle = 'rgba(0,0,0,0.4)';
                 ctx.fillRect(0, 0, W, H);
 
-                // Grid lines
+                // Zoom indicator for period chart
+                if (pZState.zoom > 1) {
+                    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                    ctx.font = '9px monospace';
+                    ctx.textAlign = 'right';
+                    ctx.fillText(pZState.zoom.toFixed(1) + 'x  dbl-click to reset', W - 6, 12);
+                }
+
+                // Grid lines + axis labels (before clip)
                 ctx.strokeStyle = 'rgba(255,255,255,0.05)';
                 ctx.lineWidth = 0.5;
                 const ySteps = 5;
@@ -1838,6 +1857,12 @@
                     const x = xPos(t);
                     ctx.fillText(t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }), x, H - 4);
                 }
+
+                // Clip to chart area for zoomed content
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(pad.left, pad.top, cW, cH);
+                ctx.clip();
 
                 // Strike line (dashed)
                 if (strike) {
@@ -1967,6 +1992,23 @@
                 ctx.setLineDash([]);
                 ctx.fillStyle = 'rgba(163,113,247,0.4)'; ctx.font = '7px monospace'; ctx.textAlign = 'right';
                 ctx.fillText('50%', W - pad.right - 2, y50 - 2);
+
+                // Restore clip
+                ctx.restore();
+
+                // Update cursor
+                canvas.style.cursor = pZState.zoom > 1 ? 'grab' : 'default';
+                }
+                // End of drawPeriodChart function
+
+                // Initial draw
+                drawPeriodChart();
+
+                // Setup zoom handlers once
+                if (!canvas._zoomSetup) {
+                    canvas._zoomSetup = true;
+                    setupChartZoom(canvas, drawPeriodChart);
+                }
             }); });
         }
 
@@ -3399,8 +3441,137 @@
             if (card) card.classList.remove('visible');
         }
 
+        // ── Chart Zoom/Pan ────────────────────────────────────────────
+        // Per-canvas zoom/pan state keyed by canvas id
+        const chartZoom = {};
+
+        function getZoomState(canvasId) {
+            if (!chartZoom[canvasId]) {
+                chartZoom[canvasId] = { zoom: 1, panX: 0, dragging: false, lastX: 0, lastPinchDist: 0 };
+            }
+            return chartZoom[canvasId];
+        }
+
+        function clampPan(state, chartWidth) {
+            const maxPan = Math.max(0, chartWidth * (state.zoom - 1));
+            state.panX = Math.max(0, Math.min(state.panX, maxPan));
+        }
+
+        function setupChartZoom(canvas, redrawFn) {
+            const id = canvas.id;
+
+            // Mouse wheel zoom
+            canvas.addEventListener('wheel', function(e) {
+                e.preventDefault();
+                const state = getZoomState(id);
+                const rect = canvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const chartW = rect.width;
+                // Fraction of chart under mouse
+                const frac = (state.panX + mouseX) / (chartW * state.zoom);
+
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                state.zoom = Math.max(1, Math.min(10, state.zoom * delta));
+                // Adjust pan so zoom centers on mouse
+                state.panX = frac * chartW * state.zoom - mouseX;
+                clampPan(state, chartW);
+                redrawFn();
+            }, { passive: false });
+
+            // Mouse drag pan
+            canvas.addEventListener('mousedown', function(e) {
+                const state = getZoomState(id);
+                if (state.zoom <= 1) return;
+                state.dragging = true;
+                state.lastX = e.clientX;
+                canvas.style.cursor = 'grabbing';
+            });
+            window.addEventListener('mousemove', function(e) {
+                const state = getZoomState(id);
+                if (!state.dragging) return;
+                const dx = e.clientX - state.lastX;
+                state.lastX = e.clientX;
+                state.panX -= dx;
+                clampPan(state, canvas.getBoundingClientRect().width);
+                redrawFn();
+            });
+            window.addEventListener('mouseup', function() {
+                const state = getZoomState(id);
+                if (state.dragging) {
+                    state.dragging = false;
+                    canvas.style.cursor = state.zoom > 1 ? 'grab' : 'default';
+                }
+            });
+
+            // Touch: pinch zoom + single-finger pan
+            canvas.addEventListener('touchstart', function(e) {
+                const state = getZoomState(id);
+                if (e.touches.length === 2) {
+                    e.preventDefault();
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    state.lastPinchDist = Math.sqrt(dx * dx + dy * dy);
+                } else if (e.touches.length === 1 && state.zoom > 1) {
+                    e.preventDefault();
+                    state.dragging = true;
+                    state.lastX = e.touches[0].clientX;
+                }
+            }, { passive: false });
+            canvas.addEventListener('touchmove', function(e) {
+                const state = getZoomState(id);
+                const rect = canvas.getBoundingClientRect();
+                if (e.touches.length === 2) {
+                    e.preventDefault();
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (state.lastPinchDist > 0) {
+                        const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+                        const frac = (state.panX + midX) / (rect.width * state.zoom);
+                        state.zoom = Math.max(1, Math.min(10, state.zoom * (dist / state.lastPinchDist)));
+                        state.panX = frac * rect.width * state.zoom - midX;
+                        clampPan(state, rect.width);
+                    }
+                    state.lastPinchDist = dist;
+                    redrawFn();
+                } else if (e.touches.length === 1 && state.dragging) {
+                    e.preventDefault();
+                    const dx = e.touches[0].clientX - state.lastX;
+                    state.lastX = e.touches[0].clientX;
+                    state.panX -= dx;
+                    clampPan(state, rect.width);
+                    redrawFn();
+                }
+            }, { passive: false });
+            canvas.addEventListener('touchend', function(e) {
+                const state = getZoomState(id);
+                state.dragging = false;
+                state.lastPinchDist = 0;
+            });
+
+            // Double-click/tap to reset
+            canvas.addEventListener('dblclick', function() {
+                const state = getZoomState(id);
+                state.zoom = 1;
+                state.panX = 0;
+                redrawFn();
+            });
+
+            // Update cursor
+            canvas.style.cursor = 'default';
+        }
+
+        // Apply zoom transform: returns adjusted toX function
+        function makeZoomedToX(state, pad, cW, tMin, tRange) {
+            const zoomedWidth = cW * state.zoom;
+            return function(t) {
+                return pad.left + ((t - tMin) / tRange) * zoomedWidth - state.panX;
+            };
+        }
+
         // ── Chart ─────────────────────────────────────────────────────
 
+        let mainChartZoomSetup = false;
         function drawChart(history, currentPrice, predictedPrice, targetLabel, bounds, bHistory) {
             const canvas = document.getElementById('chart');
             const ctx = canvas.getContext('2d');
@@ -3432,7 +3603,28 @@
             const cW = w - pad.left - pad.right;
             const cH = h - pad.top - pad.bottom;
 
-            function toX(t) { return pad.left + ((t - tMin) / tRange) * cW; }
+            // Zoom-aware toX
+            const zState = getZoomState('chart');
+            const toX = makeZoomedToX(zState, pad, cW, tMin, tRange);
+
+            // Setup zoom handlers once
+            if (!mainChartZoomSetup) {
+                mainChartZoomSetup = true;
+                const lastArgs = {};
+                window._mainChartRedraw = function() {
+                    if (lastArgs.h) drawChart(lastArgs.h, lastArgs.cp, lastArgs.pp, lastArgs.tl, lastArgs.b, lastArgs.bh);
+                };
+                setupChartZoom(canvas, function() { window._mainChartRedraw(); });
+            }
+            // Store args for redraw on zoom/pan
+            window._mainChartLastArgs = { h: history, cp: currentPrice, pp: predictedPrice, tl: targetLabel, b: bounds, bh: bHistory };
+            window._mainChartRedraw = function() {
+                const a = window._mainChartLastArgs;
+                if (a) drawChart(a.h, a.cp, a.pp, a.tl, a.b, a.bh);
+            };
+
+            // Update cursor based on zoom
+            canvas.style.cursor = zState.zoom > 1 ? 'grab' : 'default';
 
             // Compute price range including strike, prediction, bounds
             const prices = filtered.map(p => p.price);
@@ -3455,7 +3647,15 @@
             ctx.fillStyle = 'rgba(0,0,0,0.2)';
             ctx.fillRect(0, 0, w, h);
 
-            // Grid lines
+            // Zoom indicator
+            if (zState.zoom > 1) {
+                ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                ctx.font = '9px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText(zState.zoom.toFixed(1) + 'x  dbl-click to reset', w - 6, 12);
+            }
+
+            // Grid lines + Y-axis labels (drawn before clip so labels aren't cut off)
             ctx.strokeStyle = '#21262d';
             ctx.lineWidth = 1;
             for (let i = 0; i < 4; i++) {
@@ -3482,6 +3682,12 @@
                 const label = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
                 ctx.fillText(label, toX(t), h - 4);
             }
+
+            // Clip to chart area so zoomed/panned content doesn't overflow
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(pad.left, pad.top, cW, cH);
+            ctx.clip();
 
             // Period boundary vertical line (separating previous and current cycle)
             const boundaryX = toX(periodStart.getTime());
@@ -3741,6 +3947,9 @@
             ctx.strokeStyle = 'rgba(247, 147, 26, 0.3)';
             ctx.lineWidth = 2;
             ctx.stroke();
+
+            // Restore clip
+            ctx.restore();
         }
 
         // ── UI update ─────────────────────────────────────────────────
