@@ -1883,18 +1883,21 @@
                     const zoomedW = cW * pZState.zoom;
                     return pad.left + ((t.getTime() - tMin) / tRange) * zoomedW - pZState.panX;
                 };
-                function yPos(v) { return pad.top + (1 - (v - yMin) / (yMax - yMin)) * cH; }
+                const yPos = makeZoomedToY(pZState, pad, cH, yMin, yMax - yMin);
 
                 // Background
                 ctx.fillStyle = 'rgba(0,0,0,0.4)';
                 ctx.fillRect(0, 0, W, H);
 
                 // Zoom indicator for period chart
-                if (pZState.zoom > 1) {
+                if (pZState.zoom > 1 || pZState.zoomY > 1) {
                     ctx.fillStyle = 'rgba(255,255,255,0.5)';
                     ctx.font = '9px monospace';
                     ctx.textAlign = 'right';
-                    ctx.fillText(pZState.zoom.toFixed(1) + 'x  dbl-click to reset', W - 6, 12);
+                    const zLabel = pZState.zoom > 1 && pZState.zoomY > 1
+                        ? 'X:' + pZState.zoom.toFixed(1) + 'x Y:' + pZState.zoomY.toFixed(1) + 'x'
+                        : pZState.zoomY > 1 ? 'Y:' + pZState.zoomY.toFixed(1) + 'x' : pZState.zoom.toFixed(1) + 'x';
+                    ctx.fillText(zLabel + '  Shift+scroll=Y  dbl-click=reset', W - 6, 12);
                 }
 
                 // Grid lines + axis labels (before clip)
@@ -2040,7 +2043,7 @@
 
                 // Kalshi YES price line (secondary axis, 0-100¢)
                 if (hasKalshi) {
-                    function kalshiYPos(v) { return pad.top + (1 - (v - kalshiMin) / (kalshiMax - kalshiMin)) * cH; }
+                    const kalshiYPos = makeZoomedToY(pZState, pad, cH, kalshiMin, kalshiMax - kalshiMin);
                     // Fill area under the Kalshi line
                     ctx.fillStyle = 'rgba(240,136,62,0.08)';
                     ctx.beginPath();
@@ -3966,63 +3969,81 @@
 
         function getZoomState(canvasId) {
             if (!chartZoom[canvasId]) {
-                chartZoom[canvasId] = { zoom: 1, panX: 0, dragging: false, lastX: 0, lastPinchDist: 0 };
+                chartZoom[canvasId] = { zoom: 1, zoomY: 1, panX: 0, panY: 0, dragging: false, lastX: 0, lastY: 0, lastPinchDist: 0 };
             }
             return chartZoom[canvasId];
         }
 
-        function clampPan(state, chartWidth) {
-            const maxPan = Math.max(0, chartWidth * (state.zoom - 1));
-            state.panX = Math.max(0, Math.min(state.panX, maxPan));
+        function clampPan(state, chartWidth, chartHeight) {
+            const maxPanX = Math.max(0, chartWidth * (state.zoom - 1));
+            state.panX = Math.max(0, Math.min(state.panX, maxPanX));
+            if (chartHeight) {
+                const maxPanY = Math.max(0, chartHeight * (state.zoomY - 1));
+                state.panY = Math.max(0, Math.min(state.panY, maxPanY));
+            }
         }
 
         function setupChartZoom(canvas, redrawFn) {
             const id = canvas.id;
 
-            // Mouse wheel zoom
+            // Mouse wheel zoom — Shift+wheel zooms Y axis, plain wheel zooms X axis
             canvas.addEventListener('wheel', function(e) {
                 e.preventDefault();
                 const state = getZoomState(id);
                 const rect = canvas.getBoundingClientRect();
-                const mouseX = e.clientX - rect.left;
-                const chartW = rect.width;
-                // Fraction of chart under mouse
-                const frac = (state.panX + mouseX) / (chartW * state.zoom);
-
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
-                state.zoom = Math.max(1, Math.min(10, state.zoom * delta));
-                // Adjust pan so zoom centers on mouse
-                state.panX = frac * chartW * state.zoom - mouseX;
-                clampPan(state, chartW);
+
+                if (e.shiftKey) {
+                    // Y-axis zoom centered on mouse Y
+                    const mouseY = e.clientY - rect.top;
+                    const chartH = rect.height;
+                    const fracY = (state.panY + mouseY) / (chartH * state.zoomY);
+                    state.zoomY = Math.max(1, Math.min(10, state.zoomY * delta));
+                    state.panY = fracY * chartH * state.zoomY - mouseY;
+                    clampPan(state, rect.width, chartH);
+                } else {
+                    // X-axis zoom centered on mouse X
+                    const mouseX = e.clientX - rect.left;
+                    const chartW = rect.width;
+                    const frac = (state.panX + mouseX) / (chartW * state.zoom);
+                    state.zoom = Math.max(1, Math.min(10, state.zoom * delta));
+                    state.panX = frac * chartW * state.zoom - mouseX;
+                    clampPan(state, chartW, rect.height);
+                }
                 redrawFn();
             }, { passive: false });
 
-            // Mouse drag pan
+            // Mouse drag pan (both axes)
             canvas.addEventListener('mousedown', function(e) {
                 const state = getZoomState(id);
-                if (state.zoom <= 1) return;
+                if (state.zoom <= 1 && state.zoomY <= 1) return;
                 state.dragging = true;
                 state.lastX = e.clientX;
+                state.lastY = e.clientY;
                 canvas.style.cursor = 'grabbing';
             });
             window.addEventListener('mousemove', function(e) {
                 const state = getZoomState(id);
                 if (!state.dragging) return;
+                const rect = canvas.getBoundingClientRect();
                 const dx = e.clientX - state.lastX;
+                const dy = e.clientY - state.lastY;
                 state.lastX = e.clientX;
+                state.lastY = e.clientY;
                 state.panX -= dx;
-                clampPan(state, canvas.getBoundingClientRect().width);
+                state.panY -= dy;
+                clampPan(state, rect.width, rect.height);
                 redrawFn();
             });
             window.addEventListener('mouseup', function() {
                 const state = getZoomState(id);
                 if (state.dragging) {
                     state.dragging = false;
-                    canvas.style.cursor = state.zoom > 1 ? 'grab' : 'default';
+                    canvas.style.cursor = (state.zoom > 1 || state.zoomY > 1) ? 'grab' : 'default';
                 }
             });
 
-            // Touch: pinch zoom + single-finger pan
+            // Touch: pinch zoom (both axes) + single-finger pan
             canvas.addEventListener('touchstart', function(e) {
                 const state = getZoomState(id);
                 if (e.touches.length === 2) {
@@ -4030,10 +4051,11 @@
                     const dx = e.touches[0].clientX - e.touches[1].clientX;
                     const dy = e.touches[0].clientY - e.touches[1].clientY;
                     state.lastPinchDist = Math.sqrt(dx * dx + dy * dy);
-                } else if (e.touches.length === 1 && state.zoom > 1) {
+                } else if (e.touches.length === 1 && (state.zoom > 1 || state.zoomY > 1)) {
                     e.preventDefault();
                     state.dragging = true;
                     state.lastX = e.touches[0].clientX;
+                    state.lastY = e.touches[0].clientY;
                 }
             }, { passive: false });
             canvas.addEventListener('touchmove', function(e) {
@@ -4045,20 +4067,30 @@
                     const dy = e.touches[0].clientY - e.touches[1].clientY;
                     const dist = Math.sqrt(dx * dx + dy * dy);
                     if (state.lastPinchDist > 0) {
+                        const scale = dist / state.lastPinchDist;
+                        // X zoom centered on pinch midpoint
                         const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
-                        const frac = (state.panX + midX) / (rect.width * state.zoom);
-                        state.zoom = Math.max(1, Math.min(10, state.zoom * (dist / state.lastPinchDist)));
-                        state.panX = frac * rect.width * state.zoom - midX;
-                        clampPan(state, rect.width);
+                        const fracX = (state.panX + midX) / (rect.width * state.zoom);
+                        state.zoom = Math.max(1, Math.min(10, state.zoom * scale));
+                        state.panX = fracX * rect.width * state.zoom - midX;
+                        // Y zoom centered on pinch midpoint
+                        const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+                        const fracY = (state.panY + midY) / (rect.height * state.zoomY);
+                        state.zoomY = Math.max(1, Math.min(10, state.zoomY * scale));
+                        state.panY = fracY * rect.height * state.zoomY - midY;
+                        clampPan(state, rect.width, rect.height);
                     }
                     state.lastPinchDist = dist;
                     redrawFn();
                 } else if (e.touches.length === 1 && state.dragging) {
                     e.preventDefault();
                     const dx = e.touches[0].clientX - state.lastX;
+                    const dy = e.touches[0].clientY - state.lastY;
                     state.lastX = e.touches[0].clientX;
+                    state.lastY = e.touches[0].clientY;
                     state.panX -= dx;
-                    clampPan(state, rect.width);
+                    state.panY -= dy;
+                    clampPan(state, rect.width, rect.height);
                     redrawFn();
                 }
             }, { passive: false });
@@ -4072,7 +4104,9 @@
             canvas.addEventListener('dblclick', function() {
                 const state = getZoomState(id);
                 state.zoom = 1;
+                state.zoomY = 1;
                 state.panX = 0;
+                state.panY = 0;
                 redrawFn();
             });
 
@@ -4085,6 +4119,14 @@
             const zoomedWidth = cW * state.zoom;
             return function(t) {
                 return pad.left + ((t - tMin) / tRange) * zoomedWidth - state.panX;
+            };
+        }
+
+        // Apply Y zoom transform: returns adjusted toY function
+        function makeZoomedToY(state, pad, cH, minP, range) {
+            const zoomedHeight = cH * state.zoomY;
+            return function(p) {
+                return pad.top + (1 - (p - minP) / range) * zoomedHeight - state.panY;
             };
         }
 
@@ -4143,7 +4185,7 @@
             };
 
             // Update cursor based on zoom
-            canvas.style.cursor = zState.zoom > 1 ? 'grab' : 'default';
+            canvas.style.cursor = (zState.zoom > 1 || zState.zoomY > 1) ? 'grab' : 'default';
 
             // Compute price range including strike, prediction, bounds
             const prices = filtered.map(p => p.price);
@@ -4164,18 +4206,21 @@
             const maxP = Math.max(...allPrices) * 1.0001;
             const range = maxP - minP;
 
-            function toY(p) { return pad.top + (1 - (p - minP) / range) * cH; }
+            const toY = makeZoomedToY(zState, pad, cH, minP, range);
 
             // Background
             ctx.fillStyle = 'rgba(0,0,0,0.2)';
             ctx.fillRect(0, 0, w, h);
 
             // Zoom indicator
-            if (zState.zoom > 1) {
+            if (zState.zoom > 1 || zState.zoomY > 1) {
                 ctx.fillStyle = 'rgba(255,255,255,0.5)';
                 ctx.font = '9px monospace';
                 ctx.textAlign = 'right';
-                ctx.fillText(zState.zoom.toFixed(1) + 'x  dbl-click to reset', w - 6, 12);
+                const zoomLabel = zState.zoom > 1 && zState.zoomY > 1
+                    ? 'X:' + zState.zoom.toFixed(1) + 'x Y:' + zState.zoomY.toFixed(1) + 'x'
+                    : zState.zoomY > 1 ? 'Y:' + zState.zoomY.toFixed(1) + 'x' : zState.zoom.toFixed(1) + 'x';
+                ctx.fillText(zoomLabel + '  Shift+scroll=Y  dbl-click=reset', w - 6, 12);
             }
 
             // Grid lines + Y-axis labels (drawn before clip so labels aren't cut off)
@@ -4442,7 +4487,7 @@
             // Kalshi YES/NO bid lines (secondary axis, right side 0-100¢)
             if (kHistory && kHistory.length > 1) {
                 const kMin = 0, kMax = 100;
-                function kY(v) { return pad.top + (1 - (v - kMin) / (kMax - kMin)) * cH; }
+                const kY = makeZoomedToY(zState, pad, cH, kMin, kMax - kMin);
 
                 // Right Y axis labels for Kalshi
                 ctx.restore(); // temporarily leave clip to draw labels
