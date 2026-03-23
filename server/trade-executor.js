@@ -121,6 +121,16 @@ let predictionStability = {
     totalCycles: 0,       // total prediction cycles this period
 };
 
+// ── Original prediction direction per period ──
+// The FIRST prediction of each period is correct 91% of the time.
+// Temporary price moves early in the period cause the prediction to flip,
+// leading to bets against the original direction — these are the biggest losses.
+// RULE: Never enter a bet that contradicts the original prediction direction.
+let originalPredictionDirection = {
+    periodKey: null,
+    direction: null,  // 'yes' or 'no' (the side the original prediction implies)
+};
+
 // Get the current 15-minute period key (matches server.js getPeriodKey format)
 function getCurrentPeriodKey() {
     const now = new Date();
@@ -843,12 +853,41 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         }
     }
 
+    // ── ORIGINAL PREDICTION DIRECTION LOCK ──
+    // Record the FIRST prediction direction of each period. The original prediction
+    // is correct 91% of the time. Early price moves cause the prediction to temporarily
+    // flip, leading to bets against the original — these are the biggest losses.
+    // RULE: Never enter a NEW bet that contradicts the original prediction direction.
+    if (originalPredictionDirection.periodKey !== periodKey) {
+        originalPredictionDirection = { periodKey, direction: side };
+        console.log(`[trade-executor] Original prediction for ${periodKey}: ${side.toUpperCase()}`);
+    }
+
+    const isLockTier = betQuality.convictionTier === 'LOCK';
+    const isStrongOrLock = isLockTier || betQuality.convictionTier === 'STRONG';
+
+    // Block entry if current prediction contradicts original direction.
+    // The only exception: if the prediction has been stable in the NEW direction
+    // for 6+ consecutive cycles (~60 seconds sustained flip), it's likely a genuine
+    // reversal, not noise. LOCK tier also bypasses (high conviction, late in period).
+    if (side !== originalPredictionDirection.direction && !isLockTier) {
+        const sustainedFlip = predictionStability.consecutiveSame >= 6;
+        if (!sustainedFlip) {
+            const msg = `Prediction (${side.toUpperCase()}) contradicts original direction (${originalPredictionDirection.direction.toUpperCase()}) — blocking entry (stable for ${predictionStability.consecutiveSame}/6 cycles)`;
+            console.log(`[trade-executor] ${msg}`);
+            setThought('blocked', msg);
+            decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
+            return;
+        }
+        // Sustained flip — update the original direction since prediction has genuinely changed
+        console.log(`[trade-executor] Sustained direction change: original ${originalPredictionDirection.direction.toUpperCase()} → ${side.toUpperCase()} (stable ${predictionStability.consecutiveSame} cycles). Updating original.`);
+        originalPredictionDirection.direction = side;
+    }
+
     // ── EARLY PERIOD WAIT ──
     // Wait for the first 5 minutes of a cycle (was 3 min — too aggressive).
     // Data shows most wrong-side bets entered at the 3-minute mark when prediction
     // hadn't stabilized yet. LOCK bets bypass (they only trigger in final 5 min).
-    const isLockTier = betQuality.convictionTier === 'LOCK';
-    const isStrongOrLock = isLockTier || betQuality.convictionTier === 'STRONG';
     if (minutesRemaining > 10 && !isStrongOrLock) {
         const minsIn = 15 - minutesRemaining;
         const msg = `Too early in cycle (${minsIn.toFixed(1)}m in) — waiting for prediction to stabilize`;
@@ -1702,6 +1741,7 @@ function onPeriodEnd(gradeResult) {
     flippedThisPeriod = false; // reset flip limit for new period
     syncZeroCount = 0;
     predictionStability = { periodKey: null, lastDirection: null, consecutiveSame: 0, totalCycles: 0 };
+    originalPredictionDirection = { periodKey: null, direction: null };
     // Clean up old period entries (keep last 5 for safety)
     const periodKeys = Object.keys(enteredPeriods);
     if (periodKeys.length > 5) {
@@ -2303,6 +2343,8 @@ function clearTradeLog() {
     predictionStability.lastDirection = null;
     predictionStability.consecutiveSame = 0;
     predictionStability.totalCycles = 0;
+    originalPredictionDirection.periodKey = null;
+    originalPredictionDirection.direction = null;
     dailyStats.pnlCents = 0;
     dailyStats.tradeCount = 0;
     dailyStats.wins = 0;
