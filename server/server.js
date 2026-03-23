@@ -783,6 +783,8 @@ async function fetchAllData() {
         // Macro event context (no API call needed — calendar-based)
         state.macroEvent = getMacroEventContext();
 
+        // Store previous BRTI price before updating — used for accurate period-end grading
+        const previousBrtiPrice = state.brtiPrice;
         if (brti.status === 'fulfilled' && brti.value) {
             state.brtiPrice = brti.value.price;
             state.brtiSources = brti.value.sources;
@@ -934,8 +936,12 @@ async function fetchAllData() {
                 //  treating it as "still active". We want to exclude the NEW
                 //  period, not the old one that just ended.)
                 if (currentPeriod.periodKey !== null && state.brtiPrice) {
-                    engine.gradeBayesianPrediction(state.brtiPrice, periodKey);
-                    engine.gradePreviousPrediction(state.brtiPrice, periodKey);
+                    // Use the PREVIOUS BRTI price for grading — it's the last price from
+                    // the closing period. state.brtiPrice is already updated to the new
+                    // period's first price, which can differ from the closing price.
+                    const gradingPrice = previousBrtiPrice || state.brtiPrice;
+                    engine.gradeBayesianPrediction(gradingPrice, periodKey);
+                    engine.gradePreviousPrediction(gradingPrice, periodKey);
 
                     // ── Auto-trade: settle position P&L ──
                     // Find the most recently graded entry from the PREVIOUS period

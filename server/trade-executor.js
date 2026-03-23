@@ -1458,8 +1458,15 @@ function onPeriodEnd(gradeResult) {
             return;
         }
         console.log(`[trade-executor] onPeriodEnd: no currentPosition but enteredPeriods has ${gradeResult.periodKey} — logging settlement from entry record`);
-        const positionWon = (ep.side === 'yes' && gradeResult.actualDirection === 'up') ||
-                            (ep.side === 'no' && gradeResult.actualDirection === 'down');
+        let positionWon;
+        if (gradeResult.settlementPrice && gradeResult.strikePrice) {
+            const priceAboveStrike = gradeResult.settlementPrice >= gradeResult.strikePrice;
+            positionWon = (ep.side === 'yes' && priceAboveStrike) ||
+                          (ep.side === 'no' && !priceAboveStrike);
+        } else {
+            positionWon = (ep.side === 'yes' && gradeResult.actualDirection === 'up') ||
+                          (ep.side === 'no' && gradeResult.actualDirection === 'down');
+        }
         if (positionWon) {
             dailyStats.wins++;
         } else {
@@ -1517,18 +1524,28 @@ function onPeriodEnd(gradeResult) {
     console.log(`[trade-executor] onPeriodEnd: settling position ${currentPosition.periodKey}, gradeResult:`, JSON.stringify(gradeResult));
 
     // Position auto-settles on Kalshi. Track the P&L.
-    // IMPORTANT: Win/loss is determined by POSITION SIDE vs ACTUAL DIRECTION,
-    // NOT by whether the prediction was correct. The position side may diverge
-    // from the latest prediction (e.g. bet placed on earlier prediction, then
-    // prediction direction changed mid-period).
+    // Win/loss is determined by POSITION SIDE vs ACTUAL DIRECTION.
+    // IMPORTANT: Use settlement price vs strike as the source of truth when available,
+    // since gradeResult.actualDirection can be wrong if graded using a BRTI price
+    // from after the period ended (race condition at period boundary).
     const predictionCorrect = gradeResult && gradeResult.correct;
     let positionWon;
-    if (gradeResult && gradeResult.actualDirection) {
-        // YES wins when price goes UP, NO wins when price goes DOWN
+    if (gradeResult && gradeResult.settlementPrice && gradeResult.strikePrice) {
+        // Use the actual settlement price vs strike — most reliable
+        const priceAboveStrike = gradeResult.settlementPrice >= gradeResult.strikePrice;
+        positionWon = (currentPosition.side === 'yes' && priceAboveStrike) ||
+                      (currentPosition.side === 'no' && !priceAboveStrike);
+        // Check if gradeResult.actualDirection disagrees — log if it does
+        const derivedDirection = priceAboveStrike ? 'up' : 'down';
+        if (gradeResult.actualDirection && gradeResult.actualDirection !== derivedDirection) {
+            console.warn(`[trade-executor] GRADING FIX: gradeResult said ${gradeResult.actualDirection} but settlement price ${gradeResult.settlementPrice} vs strike ${gradeResult.strikePrice} says ${derivedDirection} — using price-based result`);
+        }
+    } else if (gradeResult && gradeResult.actualDirection) {
+        // Fallback to graded direction
         positionWon = (currentPosition.side === 'yes' && gradeResult.actualDirection === 'up') ||
                       (currentPosition.side === 'no' && gradeResult.actualDirection === 'down');
     } else {
-        // Fallback if actualDirection not available
+        // Last resort fallback
         positionWon = predictionCorrect;
     }
     if (positionWon !== predictionCorrect) {
