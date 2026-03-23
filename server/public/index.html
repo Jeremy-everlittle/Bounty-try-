@@ -1260,9 +1260,12 @@
         function clearHistory() {
             if (!confirm('This will permanently purge ALL data from the database — predictions, trades, cycle data, snapshots, daily stats, and balances. Continue?')) return;
             predictionLog = [];
-            // Clear cached trade data so period history doesn't show stale trades
+            // Clear ALL client-side caches so old data doesn't reappear
             recentTradesCache = { timestamp: 0, trades: [] };
-            // Purge all server-side data (DB + in-memory)
+            Object.keys(periodDetailCache).forEach(k => delete periodDetailCache[k]);
+            Object.keys(periodTradesCache).forEach(k => delete periodTradesCache[k]);
+            openDetailPanels.clear();
+            // Purge all server-side data (DB + in-memory + JSON file)
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'clearHistory' }));
             }

@@ -359,8 +359,29 @@ function updateErrorAnalysis(updater) {
 
 // Clear prediction log from both memory and DB
 function clearPredictionLog() {
+    // Full reset: replace entire state with defaults (not just predictionLog)
+    const defaults = createDefaultState();
     state.predictionLog = [];
-    save();
+    state.bayesianState = defaults.bayesianState;
+    state.currentPeriod = defaults.currentPeriod;
+    state.errorAnalysis = defaults.errorAnalysis;
+    state.onlineML = null;
+    state.totalPredictionsMade = 0;
+    state.lastPredictionTime = null;
+    state.nextPeriodPreview = null;
+    state.sellSignal = null;
+
+    // Delete JSON file so stale data doesn't reload on restart
+    try {
+        if (fs.existsSync(STORE_FILE)) fs.unlinkSync(STORE_FILE);
+        console.log('[store] Deleted prediction-state.json');
+    } catch (e) {
+        console.error('[store] Failed to delete store file:', e.message);
+    }
+
+    // Save fresh state to both file and DB
+    _doSave();
+
     const db = getDb();
     if (db) {
         db.clearPredictionLog().catch(e =>

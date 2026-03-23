@@ -2290,7 +2290,25 @@ function resetState() {
 
 function clearTradeLog() {
     tradeLog.length = 0;
-    console.log('[trade-executor] Trade log cleared');
+    // Reset all in-memory state so old data doesn't leak back
+    currentPosition = null;
+    clearedPosition = null;
+    soldThisPeriod = null;
+    flippedThisPeriod = false;
+    syncZeroCount = 0;
+    orderInFlight = false;
+    Object.keys(fillFailedPeriods).forEach(k => delete fillFailedPeriods[k]);
+    Object.keys(enteredPeriods).forEach(k => delete enteredPeriods[k]);
+    predictionStability.periodKey = null;
+    predictionStability.lastDirection = null;
+    predictionStability.consecutiveSame = 0;
+    predictionStability.totalCycles = 0;
+    dailyStats.pnlCents = 0;
+    dailyStats.tradeCount = 0;
+    dailyStats.wins = 0;
+    dailyStats.losses = 0;
+    dailyStats.date = new Date().toISOString().slice(0, 10);
+    console.log('[trade-executor] Trade log and all in-memory state cleared');
 }
 
 // ═══════════════════════════════════════════════════════════════
