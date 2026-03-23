@@ -40,6 +40,17 @@ const stabilityState = {
     flipCount: 0,
 };
 
+// ── Flip persistence tracking for sell signals ──
+// Track how long the model has been in a "flipped" state relative to the original bet.
+// A temporary price spike shouldn't trigger a flip — require sustained reversal.
+const flipPersistence = {
+    periodKey: null,
+    consecutiveFlippedCycles: 0,  // how many cycles the model has been flipped
+    consecutiveWrongSideCycles: 0, // how many cycles price has been on wrong side
+    lastModelFlipped: false,
+    lastOnWrongSide: false,
+};
+
 // ── Online ML feature cache (for attaching to graded records) ──
 let _lastMLFeatures = null;
 let _lastSignalPredictions = null;
@@ -2505,34 +2516,57 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const noTimeLeft = minutesRemaining < 1.0;
     const almostNoTime = minutesRemaining < 2.0;
 
+    // ── FLIP PERSISTENCE TRACKING ──
+    // Track how long the model has been in a flipped state and price on wrong side.
+    // A temporary spike crossing the strike shouldn't trigger a flip — require SUSTAINED reversal.
+    if (flipPersistence.periodKey !== periodKey) {
+        flipPersistence.periodKey = periodKey;
+        flipPersistence.consecutiveFlippedCycles = 0;
+        flipPersistence.consecutiveWrongSideCycles = 0;
+        flipPersistence.lastModelFlipped = false;
+        flipPersistence.lastOnWrongSide = false;
+    }
+    if (modelFlipped) {
+        flipPersistence.consecutiveFlippedCycles++;
+    } else {
+        flipPersistence.consecutiveFlippedCycles = 0;
+    }
+    if (onWrongSide) {
+        flipPersistence.consecutiveWrongSideCycles++;
+    } else {
+        flipPersistence.consecutiveWrongSideCycles = 0;
+    }
+    flipPersistence.lastModelFlipped = modelFlipped;
+    flipPersistence.lastOnWrongSide = onWrongSide;
+
     // ── CASE 0: CONFIDENT FLIP — model strongly disagrees with position ──
-    // TIGHTENED: Data analysis shows flips are wrong ~50% of the time, and when wrong
-    // they cause the biggest losses (especially with subsequent late_lock_add).
-    // Bad flip examples: 11:45 period flipped from NO to YES at 87% confidence = -$40.64 loss.
-    // Requirements (all must be true — raised thresholds from real loss data):
-    //   1. On wrong side of strike (price confirms the model)
-    //   2. Model flipped direction AND probability strongly favors the other side (>=75%, was 70%)
-    //   3. Very high confidence (>=90%, was 80%) — most bad flips were at 80-87% confidence
-    //   4. Enough time to profit from the flip (>=5 min, was 4 min)
-    //   5. Sigma distance >= 1.2 (was 0.8) — require clear separation, not marginal crossings
-    //   6. NEW: Majority of signals must agree with flip direction (>=2 opposing signals)
+    // TIGHTENED FURTHER: Data shows flips are wrong ~50% of the time, and when wrong
+    // they cause the biggest losses (-$136 in worst case).
+    // Key insight: temporary price spikes across strike look like flips but aren't.
+    // The prediction often recovers to the original direction within 2-3 cycles.
+    // NEW: Require model to be flipped for 3+ consecutive cycles (~30s sustained reversal).
+    // This filters out temporary spikes while still catching real reversals.
     const updProbForOtherSide = betIsUp ? (1 - updPred.probability) : updPred.probability;
     const confidenceForFlip = updPred.confidence || 0;
+    const flipSustained = flipPersistence.consecutiveFlippedCycles >= 3
+        && flipPersistence.consecutiveWrongSideCycles >= 3;
     const shouldFlip = onWrongSide
         && modelFlipped                           // model must actually flip (not just probability drift)
+        && flipSustained                           // NEW: flip must be sustained for 3+ cycles
         && updProbForOtherSide >= 0.75             // raised from 0.70
         && confidenceForFlip >= 0.90               // raised from 0.80 — most bad flips were 80-87%
         && minutesRemaining >= 5                   // raised from 4 — need more time to recover sell loss
-        && sigmaDistance >= 1.2                    // raised from 0.8 — require clear separation
-        && opposing >= 2;                          // NEW: signals must agree with flip
+        && sigmaDistance >= 1.5                    // raised from 1.2 — require very clear separation
+        && opposing >= 2;                          // signals must agree with flip
 
     if (shouldFlip) {
         level = 'confident_flip'; shortLabel = 'FLIP';
         urgency = 85;
         advice = 'Model strongly predicts ' + updDirection + ' (' + (confidenceForFlip * 100).toFixed(0) +
             '% confidence) while holding ' + origDirection + '. Price is ' + sigmaDistance.toFixed(1) +
-            'σ on wrong side with ' + minutesRemaining.toFixed(1) + ' min left — selling to flip.';
-        reasons.push('High confidence flip: ' + (confidenceForFlip * 100).toFixed(0) + '% conf ' + updDirection);
+            'σ on wrong side for ' + flipPersistence.consecutiveWrongSideCycles + ' consecutive cycles with ' +
+            minutesRemaining.toFixed(1) + ' min left — sustained reversal confirmed, selling to flip.';
+        reasons.push('Sustained flip: ' + (confidenceForFlip * 100).toFixed(0) + '% conf ' + updDirection + ' for ' + flipPersistence.consecutiveFlippedCycles + ' cycles');
         reasons.push(sigmaDistance.toFixed(1) + 'σ on wrong side');
     }
 
