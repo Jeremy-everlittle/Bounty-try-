@@ -2183,11 +2183,11 @@
                     ctx.lineTo(x, pad.top + cH);
                     ctx.stroke();
                     ctx.setLineDash([]);
-                    // Label at top with price
+                    // Label inside chart at bottom
                     ctx.fillStyle = color;
                     ctx.font = 'bold 7px sans-serif';
                     ctx.textAlign = 'center';
-                    ctx.fillText(label + priceStr, x, pad.top + cH + 12);
+                    ctx.fillText(label + priceStr, x, pad.top + cH - 4);
                 }
 
                 // ── Optimal entry line (cheapest price of winning side during cycle) ──
@@ -2223,7 +2223,7 @@
                             ctx.fillStyle = 'rgba(63,185,80,0.9)';
                             ctx.font = 'bold 7px sans-serif';
                             ctx.textAlign = 'center';
-                            ctx.fillText('BEST ' + bestEntry + '\u00A2 ' + (priceWentUp ? 'YES' : 'NO'), bx, pad.top - 3);
+                            ctx.fillText('BEST ' + bestEntry + '\u00A2 ' + (priceWentUp ? 'YES' : 'NO'), bx, pad.top + 10);
                         }
                     }
                 }
@@ -4573,7 +4573,7 @@
                 ctx.fillStyle = color;
                 ctx.font = 'bold 7px sans-serif';
                 ctx.textAlign = 'center';
-                ctx.fillText(label, x, pad.top + cH + 12);
+                ctx.fillText(label, x, pad.top + cH - 4);
             }
 
             // Current price dot (pulsing "now")
