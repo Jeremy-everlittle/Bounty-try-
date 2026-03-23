@@ -2041,9 +2041,11 @@
                 }
                 ctx.stroke();
 
+                // Kalshi Y position function (shared by YES and NO lines)
+                const kalshiYPos = makeZoomedToY(pZState, pad, cH, kalshiMin, kalshiMax - kalshiMin);
+
                 // Kalshi YES price line (secondary axis, 0-100¢)
                 if (hasKalshi) {
-                    const kalshiYPos = makeZoomedToY(pZState, pad, cH, kalshiMin, kalshiMax - kalshiMin);
                     // Fill area under the Kalshi line
                     ctx.fillStyle = 'rgba(240,136,62,0.08)';
                     ctx.beginPath();
@@ -2248,7 +2250,7 @@
                 ctx.restore();
 
                 // Update cursor
-                canvas.style.cursor = pZState.zoom > 1 ? 'grab' : 'default';
+                canvas.style.cursor = (pZState.zoom > 1 || pZState.zoomY > 1) ? 'grab' : 'default';
                 }
                 // End of drawPeriodChart function
 
