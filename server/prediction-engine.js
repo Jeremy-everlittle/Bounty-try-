@@ -2848,13 +2848,15 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
         stabilityState.smoothedProbability = raw.probability;
         didFlip = true;
 
-        // Update prediction log and Bayesian record to reflect the new direction
-        // so grading compares the FINAL predicted direction, not the initial one
+        // Track the flipped direction separately — do NOT overwrite predictedDirection.
+        // predictedDirection must stay as the ORIGINAL prediction for accurate grading.
+        // The flipped direction is used by the trading engine via lockedDirection.
         store.updatePredictionLog(log => {
             for (let i = log.length - 1; i >= 0; i--) {
                 if (log[i].periodKey === periodKey) {
-                    log[i].predictedDirection = rawDir;
+                    log[i].currentDirection = rawDir;       // current (flipped) direction
                     log[i]._directionUpdated = true;
+                    log[i]._flipCount = (log[i]._flipCount || 0) + 1;
                     break;
                 }
             }
@@ -2862,7 +2864,7 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
         store.updateBayesianState(bs => {
             for (let i = bs.records.length - 1; i >= 0; i--) {
                 if (bs.records[i].periodKey === periodKey) {
-                    bs.records[i].predictedDirection = rawDir;
+                    bs.records[i].currentDirection = rawDir; // current (flipped) direction
                     break;
                 }
             }

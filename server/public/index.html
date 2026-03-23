@@ -1430,9 +1430,12 @@
                     const dirCls = p.predictedDirection === 'up' ? 'period-dir-up' : 'period-dir-down';
                     const resultIcon = p.correct === true ? ' \u2713' : p.correct === false ? ' \u2717' : '';
                     const resultColor = p.correct === true ? '#3fb950' : p.correct === false ? '#f85149' : '#8b949e';
+                    // Show if direction was flipped during the period
+                    const flipped = p.currentDirection && p.currentDirection !== p.predictedDirection;
+                    const flipNote = flipped ? ' <span style="color:#e3b341;font-size:10px">(flipped to ' + (p.currentDirection === 'up' ? 'UP' : 'DOWN') + ')</span>' : '';
 
                     html += '<div class="period-prediction">' +
-                        '<span class="period-dir-badge ' + dirCls + '">' + dirLabel + '</span>' +
+                        '<span class="period-dir-badge ' + dirCls + '">' + dirLabel + '</span>' + flipNote +
                         '<span style="font-size:14px;font-weight:700;color:' + resultColor + '">' + resultIcon + (p.correct === true ? ' Correct' : p.correct === false ? ' Wrong' : '') + '</span>' +
                         '</div>';
 
