@@ -1288,12 +1288,16 @@
             const graded = predictionLog.filter(p => p.correct !== null);
             const trades = (serverData && serverData.tradingStatus && serverData.tradingStatus.recentTrades) || [];
 
-            // Group trades by periodKey
+            // Group trades by periodKey and cache for chart rendering
             const tradesByPeriod = {};
             for (const t of trades) {
                 const pk = t.periodKey || 'unknown';
                 if (!tradesByPeriod[pk]) tradesByPeriod[pk] = [];
                 tradesByPeriod[pk].push(t);
+            }
+            // Cache trades for period detail charts
+            for (const pk of Object.keys(tradesByPeriod)) {
+                periodTradesCache[pk] = tradesByPeriod[pk];
             }
 
             // Build combined period entries from predictions (include current open period)
@@ -1522,6 +1526,11 @@
                             html += '<span class="period-trade-info" style="color:#8b949e">Edge: ' + t.edge + '</span>';
                         }
 
+                        // Decision reason
+                        if (t.reason) {
+                            html += '<div style="font-size:9px;color:#8b949e;margin:1px 0 1px 4px;font-style:italic;opacity:0.8">' + t.reason + '</div>';
+                        }
+
                         // Flip detail: show original side
                         if (t.flipped && t.originalSide) {
                             html += '<span class="period-trade-info" style="color:#e3b341;font-size:9px">\u21C4 was ' + t.originalSide.toUpperCase() + '</span>';
@@ -1636,6 +1645,7 @@
 
         // ── Period Detail Chart ─────────────────────────────────────
         const periodDetailCache = {};
+        const periodTradesCache = {}; // { periodKey: [{type, time, side, limitPrice, strategy, ...}] }
         const openDetailPanels = new Set(); // track which panels are open
 
         async function togglePeriodDetail(periodKey, safeKey) {
@@ -2139,6 +2149,109 @@
                     ctx.font = 'bold 8px sans-serif';
                     ctx.textAlign = 'center';
                     ctx.fillText('\u21C4 ' + flip.to.toUpperCase(), x, pad.top - 3);
+                }
+
+                // ── Trade event vertical lines ──
+                const periodTrades = periodTradesCache[periodKey] || [];
+                const tradeColors = {
+                    buy: '#3fb950', sell: '#f85149', dip_buy: '#58a6ff',
+                    late_lock: '#a371f7', late_lock_add: '#a371f7', press_bet: '#d2a8ff',
+                    re_entry: '#79c0ff', confident_flip: '#e3b341'
+                };
+                const tradeLabels = {
+                    buy: 'BUY', sell: 'SELL', dip_buy: 'DIP', late_lock: 'LOCK',
+                    late_lock_add: 'LOCK+', press_bet: 'PRESS', re_entry: 'RE-ENTRY',
+                    confident_flip: 'FLIP'
+                };
+                for (const t of periodTrades) {
+                    if (t.type === 'settle' || !t.time) continue;
+                    const tTime = new Date(t.time);
+                    if (tTime < points[0].time || tTime > points[points.length - 1].time) continue;
+                    const x = xPos(tTime);
+                    if (x < pad.left || x > W - pad.right) continue;
+                    const isFlip = t.strategy === 'confident_flip' || t.flipped;
+                    const tType = isFlip ? 'confident_flip' : t.type;
+                    const color = tradeColors[tType] || tradeColors[t.type] || '#8b949e';
+                    const label = isFlip ? 'FLIP' : (tradeLabels[t.type] || t.type.toUpperCase());
+                    // Vertical dotted line
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 1.5;
+                    ctx.setLineDash([3, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(x, pad.top);
+                    ctx.lineTo(x, pad.top + cH);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    // If it's a buy-type, draw horizontal dotted line at the Kalshi price
+                    if (t.limitPrice && (t.type === 'buy' || t.type === 'dip_buy' || t.type === 'late_lock' || t.type === 'late_lock_add' || t.type === 're_entry' || isFlip)) {
+                        const kalshiY = kalshiYPos(t.limitPrice);
+                        ctx.strokeStyle = color;
+                        ctx.lineWidth = 0.8;
+                        ctx.setLineDash([2, 4]);
+                        ctx.beginPath();
+                        ctx.moveTo(pad.left, kalshiY);
+                        ctx.lineTo(W - pad.right, kalshiY);
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                        // Price label on right
+                        ctx.fillStyle = color;
+                        ctx.font = '7px monospace';
+                        ctx.textAlign = 'right';
+                        ctx.fillText(t.limitPrice + '\u00A2', W - pad.right - 2, kalshiY - 2);
+                    }
+                    // Label at top
+                    ctx.fillStyle = color;
+                    ctx.font = 'bold 7px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(label, x, pad.top + cH + 12);
+                }
+
+                // ── Optimal entry line (cheapest price of winning side during cycle) ──
+                // Find what the winning side's cheapest ask was during the period
+                const lastPoint = points[points.length - 1];
+                if (lastPoint && lastPoint.strike) {
+                    const finalPrice = lastPoint.price;
+                    const priceWentUp = finalPrice >= lastPoint.strike;
+                    let bestEntry = null, bestEntryTime = null;
+                    for (const pt of points) {
+                        // Winning side: if price went UP, YES was the winner; check YES ask (cheapest buy)
+                        const ask = priceWentUp ? pt.kalshiYesAsk : pt.kalshiNoAsk;
+                        if (ask && ask > 0 && ask < 99) {
+                            if (bestEntry === null || ask < bestEntry) {
+                                bestEntry = ask;
+                                bestEntryTime = pt.time;
+                            }
+                        }
+                    }
+                    if (bestEntry !== null) {
+                        const bestY = kalshiYPos(bestEntry);
+                        ctx.strokeStyle = 'rgba(63,185,80,0.6)';
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([1, 3]);
+                        ctx.beginPath();
+                        ctx.moveTo(pad.left, bestY);
+                        ctx.lineTo(W - pad.right, bestY);
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                        ctx.fillStyle = 'rgba(63,185,80,0.8)';
+                        ctx.font = 'bold 7px monospace';
+                        ctx.textAlign = 'left';
+                        ctx.fillText('BEST ' + bestEntry + '\u00A2 ' + (priceWentUp ? 'YES' : 'NO'), pad.left + 2, bestY - 2);
+                        // Mark the optimal time with a small diamond
+                        if (bestEntryTime) {
+                            const bx = xPos(bestEntryTime);
+                            if (bx >= pad.left && bx <= W - pad.right) {
+                                ctx.fillStyle = 'rgba(63,185,80,0.9)';
+                                ctx.beginPath();
+                                ctx.moveTo(bx, bestY - 4);
+                                ctx.lineTo(bx + 3, bestY);
+                                ctx.lineTo(bx, bestY + 4);
+                                ctx.lineTo(bx - 3, bestY);
+                                ctx.closePath();
+                                ctx.fill();
+                            }
+                        }
+                    }
                 }
 
                 // 50% line for probability
@@ -4449,6 +4562,45 @@
             ctx.font = '9px monospace';
             ctx.textAlign = 'left';
             ctx.fillText(formatPrice(predictedPrice), toX(tMax) + 6, toY(predictedPrice) + 3);
+
+            // ── Trade event lines on live chart ──
+            const liveTrades = (serverData && serverData.tradingStatus && serverData.tradingStatus.recentTrades) || [];
+            const currentPeriodKey = serverData && serverData.currentPeriod && serverData.currentPeriod.periodKey;
+            const liveTradeColors = {
+                buy: '#3fb950', sell: '#f85149', dip_buy: '#58a6ff',
+                late_lock: '#a371f7', late_lock_add: '#a371f7',
+                re_entry: '#79c0ff', confident_flip: '#e3b341'
+            };
+            const liveTradeLabels = {
+                buy: 'BUY', sell: 'SELL', dip_buy: 'DIP', late_lock: 'LOCK',
+                late_lock_add: 'LOCK+', re_entry: 'RE-ENTRY', confident_flip: 'FLIP'
+            };
+            for (const t of liveTrades) {
+                if (t.type === 'settle' || !t.time || !t.periodKey) continue;
+                // Show trades from both current and previous period (chart shows 2 periods)
+                const tTime = new Date(t.time).getTime();
+                if (tTime < tMin || tTime > tMax) continue;
+                const x = toX(tTime);
+                if (x < pad.left || x > w - pad.right) continue;
+                const isFlip = t.strategy === 'confident_flip' || t.flipped;
+                const tType = isFlip ? 'confident_flip' : t.type;
+                const color = liveTradeColors[tType] || liveTradeColors[t.type] || '#8b949e';
+                const label = isFlip ? 'FLIP' : (liveTradeLabels[t.type] || t.type.toUpperCase());
+                // Vertical dotted line
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+                ctx.beginPath();
+                ctx.moveTo(x, pad.top);
+                ctx.lineTo(x, pad.top + cH);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                // Label at bottom
+                ctx.fillStyle = color;
+                ctx.font = 'bold 7px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(label, x, pad.top + cH + 12);
+            }
 
             // Current price dot (pulsing "now")
             ctx.beginPath();

@@ -1010,6 +1010,11 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         reason: 'Good entry',
     }).catch(e => console.error('[db] Decision log error:', e.message));
 
+    // Build reason string explaining why this bet was placed
+    const stabilityInfo = predictionStability.consecutiveSame >= 3 ? 'stable' : 'early';
+    const convInfo = betQuality.convictionTier ? betQuality.convictionTier : 'normal';
+    const entryReason = `Prediction ${isUp ? 'UP' : 'DOWN'} (${stabilityInfo}, ${convInfo} conviction, ${(betQuality.edge * 100).toFixed(1)}% edge, ${(15 - minutesRemaining).toFixed(0)}m into cycle)`;
+
     const tradeInfo = {
         ticker: kalshiTicker,
         side,
@@ -1021,6 +1026,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         edge: (betQuality.edge * 100).toFixed(1) + '%',
         quality: (betQuality.quality * 100).toFixed(0) + '%',
         betSize: betQuality.betSize.toFixed(2),
+        reason: entryReason,
     };
 
     if (config.paperMode) {
