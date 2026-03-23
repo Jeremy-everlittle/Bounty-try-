@@ -110,6 +110,17 @@ let fillFailedPeriods = {};   // { periodKey: { count, lastAttempt } } — track
 let enteredPeriods = {};      // { periodKey: { side, ticker, entryTime } } — prevent duplicate entries even if position is cleared
 let syncZeroCount = 0;        // consecutive times sync read 0 contracts — require 3 before clearing
 
+// ── Prediction direction stability tracking ──
+// Track consecutive cycles the prediction has pointed the same direction.
+// Data shows 55% of cycles have direction flips — early predictions are unreliable.
+// By waiting for the prediction to stabilize, we avoid entering on early wrong signals.
+let predictionStability = {
+    periodKey: null,
+    lastDirection: null,  // 'yes' or 'no'
+    consecutiveSame: 0,   // how many cycles in a row same direction
+    totalCycles: 0,       // total prediction cycles this period
+};
+
 // Get the current 15-minute period key (matches server.js getPeriodKey format)
 function getCurrentPeriodKey() {
     const now = new Date();
@@ -815,14 +826,46 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const periodEnd = (Math.floor(mins / 15) + 1) * 15;
     const minutesRemaining = Math.max(0.5, periodEnd - mins - (now.getSeconds() / 60));
 
+    // ── PREDICTION DIRECTION STABILITY TRACKING ──
+    // Track how many consecutive cycles the prediction has pointed the same direction.
+    // Data shows 55% of cycles have direction flips — early predictions are unreliable.
+    if (predictionStability.periodKey !== periodKey) {
+        // New period — reset tracking
+        predictionStability = { periodKey, lastDirection: side, consecutiveSame: 1, totalCycles: 1 };
+    } else {
+        predictionStability.totalCycles++;
+        if (side === predictionStability.lastDirection) {
+            predictionStability.consecutiveSame++;
+        } else {
+            console.log(`[trade-executor] Prediction direction flip: was ${predictionStability.lastDirection.toUpperCase()}, now ${side.toUpperCase()} (cycle ${predictionStability.totalCycles}, was stable for ${predictionStability.consecutiveSame})`);
+            predictionStability.lastDirection = side;
+            predictionStability.consecutiveSame = 1;
+        }
+    }
+
     // ── EARLY PERIOD WAIT ──
-    // In the first 3 minutes of a cycle, the model has very little data.
-    // Unless conviction is STRONG or LOCK, wait for the picture to develop.
+    // Wait for the first 5 minutes of a cycle (was 3 min — too aggressive).
+    // Data shows most wrong-side bets entered at the 3-minute mark when prediction
+    // hadn't stabilized yet. LOCK bets bypass (they only trigger in final 5 min).
     const isLockTier = betQuality.convictionTier === 'LOCK';
     const isStrongOrLock = isLockTier || betQuality.convictionTier === 'STRONG';
-    if (minutesRemaining > 12 && !isStrongOrLock) {
+    if (minutesRemaining > 10 && !isStrongOrLock) {
         const minsIn = 15 - minutesRemaining;
-        const msg = `Too early in cycle (${minsIn.toFixed(1)}m in) — waiting for price direction to establish`;
+        const msg = `Too early in cycle (${minsIn.toFixed(1)}m in) — waiting for prediction to stabilize`;
+        console.log(`[trade-executor] ${msg}`);
+        setThought('waiting', msg);
+        decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
+        return;
+    }
+
+    // ── PREDICTION STABILITY GATE ──
+    // Don't enter until prediction direction has been stable for at least 3 consecutive
+    // cycles (~30 seconds). This prevents entering on the initial noisy readings that
+    // flip 55% of the time. LOCK/STRONG bypass (high conviction).
+    // After 8+ minutes (< 7 min remaining), relax to 2 consecutive (enough data by then).
+    const requiredStability = minutesRemaining < 7 ? 2 : 3;
+    if (!isStrongOrLock && predictionStability.consecutiveSame < requiredStability) {
+        const msg = `Prediction unstable — ${side.toUpperCase()} for ${predictionStability.consecutiveSame}/${requiredStability} cycles, waiting`;
         console.log(`[trade-executor] ${msg}`);
         setThought('waiting', msg);
         decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
@@ -835,14 +878,14 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     // Exception: LOCK conviction tier (last ~5 min, near-guaranteed) can go up to 95¢.
     const MAX_ENTRY_PRICE = isLockTier ? 95 : 85;
 
-    // Early period protection: in the first 5 minutes of a period, require cheaper
-    // entries to compensate for the higher uncertainty.
+    // Early period protection: in the first 7 minutes of a period, require cheaper
+    // entries to compensate for higher uncertainty (prediction still stabilizing).
     // LOCK bets bypass early period limits (they only trigger with <5 min left anyway).
     const earlyPeriodMaxPrice = isLockTier ? MAX_ENTRY_PRICE
-                              : minutesRemaining > 13 ? 65  // first ~2 min: max 65¢ (if STRONG)
-                              : minutesRemaining > 11 ? 72  // 2-4 min: max 72¢
-                              : minutesRemaining > 10 ? 82  // 4-5 min: max 82¢ (was 78¢ — too tight)
-                              : MAX_ENTRY_PRICE;             // after 5 min: standard 85¢ cap
+                              : minutesRemaining > 10 ? 60  // first ~5 min: max 60¢ (if STRONG)
+                              : minutesRemaining > 9 ? 68   // 5-6 min: max 68¢
+                              : minutesRemaining > 8 ? 75   // 6-7 min: max 75¢
+                              : MAX_ENTRY_PRICE;             // after 7 min: standard 85¢ cap
 
     const convictionLabel = betQuality.convictionTier ? ` [${betQuality.convictionTier}]` : '';
 
@@ -1652,6 +1695,7 @@ function onPeriodEnd(gradeResult) {
     soldThisPeriod = null; // reset for new period
     flippedThisPeriod = false; // reset flip limit for new period
     syncZeroCount = 0;
+    predictionStability = { periodKey: null, lastDirection: null, consecutiveSame: 0, totalCycles: 0 };
     // Clean up old period entries (keep last 5 for safety)
     const periodKeys = Object.keys(enteredPeriods);
     if (periodKeys.length > 5) {
