@@ -1770,6 +1770,26 @@
             const finalDir = points[points.length - 1].dir;
             const dirChanges = flips.length;
 
+            // Determine winning side from outcome (price vs strike at period end)
+            const winningSide = lastPrice >= strike ? 'yes' : 'no';
+
+            // Compute best entry price (lowest ask) and average price for the winning side
+            // YES: buy at kalshiYesAsk. NO: buy at kalshiNoAsk (= 100 - kalshiYesBid if not available)
+            const winningSidePrices = points
+                .map(p => {
+                    if (winningSide === 'yes') {
+                        return p.kalshiYesAsk || (p.kalshiYesBid ? p.kalshiYesBid + 1 : null);
+                    } else {
+                        return p.kalshiNoAsk || (p.kalshiNoBid ? p.kalshiNoBid + 1 : null);
+                    }
+                })
+                .filter(v => v !== null && v > 0 && v < 100);
+
+            const bestEntryPrice = winningSidePrices.length > 0 ? Math.min(...winningSidePrices) : null;
+            const avgEntryPrice = winningSidePrices.length > 0
+                ? Math.round(winningSidePrices.reduce((s, v) => s + v, 0) / winningSidePrices.length)
+                : null;
+
             html += '<div class="period-detail-stats">';
             html += '<div class="period-detail-stat"><div class="stat-label">Ticks Captured</div><div class="stat-value">' + points.length + '</div></div>';
             html += '<div class="period-detail-stat"><div class="stat-label">Price Range</div><div class="stat-value">$' + minPrice.toFixed(2) + ' - $' + maxPrice.toFixed(2) + '</div></div>';
@@ -1777,6 +1797,12 @@
             html += '<div class="period-detail-stat"><div class="stat-label">Avg P(up)</div><div class="stat-value">' + (avgProb * 100).toFixed(1) + '%</div></div>';
             html += '<div class="period-detail-stat"><div class="stat-label">Avg Confidence</div><div class="stat-value">' + (avgConf * 100).toFixed(0) + '%</div></div>';
             html += '<div class="period-detail-stat"><div class="stat-label">Direction Flips</div><div class="stat-value">' + dirChanges + '</div></div>';
+            if (bestEntryPrice !== null) {
+                html += '<div class="period-detail-stat"><div class="stat-label">Best ' + winningSide.toUpperCase() + ' Entry</div><div class="stat-value" style="color:#3fb950">' + bestEntryPrice + '\u00A2</div></div>';
+            }
+            if (avgEntryPrice !== null) {
+                html += '<div class="period-detail-stat"><div class="stat-label">Avg ' + winningSide.toUpperCase() + ' Price</div><div class="stat-value">' + avgEntryPrice + '\u00A2</div></div>';
+            }
             html += '</div>';
 
             // Signal breakdown from first and last ticks
@@ -1812,7 +1838,7 @@
             } else if (settleEntry) {
                 knownOutcome = settleEntry.correct ? (settleEntry.direction || null) : (settleEntry.direction === 'up' ? 'down' : 'up');
             }
-            const analysis = analyzePeriod(points, flips, strike, knownOutcome, periodTradesForAnalysis);
+            const analysis = analyzePeriod(points, flips, strike, knownOutcome, periodTradesForAnalysis, { bestEntryPrice, avgEntryPrice: avgEntryPrice, winningSide });
             for (const item of analysis) {
                 const icon = item.type === 'good' ? '\u2713' : item.type === 'bad' ? '\u2717' : '\u25CB';
                 const color = item.type === 'good' ? '#3fb950' : item.type === 'bad' ? '#f85149' : '#d29922';
@@ -2269,7 +2295,7 @@
         }
 
         // ── Period Self-Analysis ────────────────────────────────────
-        function analyzePeriod(points, flips, strike, knownOutcome, trades) {
+        function analyzePeriod(points, flips, strike, knownOutcome, trades, entryPriceInfo) {
             const analysis = [];
             if (points.length < 3) return [{ type: 'info', msg: 'Too few data points for analysis.' }];
 
@@ -2544,6 +2570,23 @@
                         if (avgEdge < -10) {
                             suggestions.push('Average entry edge was ' + avgEdge.toFixed(1) + '% — deeply negative. The model probability was far below market price at entry. Skip trades with negative edge.');
                         }
+                    }
+                }
+
+                // Entry price vs best available price analysis
+                if (entryPriceInfo && entryPriceInfo.bestEntryPrice !== null && buys.length > 0) {
+                    const actualAvgEntry = Math.round(buys.reduce((s, b) => s + ((b.contracts || 0) * (b.limitPrice || b.entryPrice || 0)), 0) / buys.reduce((s, b) => s + (b.contracts || 0), 0));
+                    const best = entryPriceInfo.bestEntryPrice;
+                    const cycleAvg = entryPriceInfo.avgEntryPrice;
+                    const overpay = actualAvgEntry - best;
+                    const side = entryPriceInfo.winningSide;
+                    if (overpay > 5 && settlement && settlement.correct) {
+                        const extraProfit = overpay * totalContracts;
+                        analysis.push({ type: 'info', msg: 'Entered ' + side.toUpperCase() + ' @ ' + actualAvgEntry + '\u00A2 but best available was ' + best + '\u00A2 (avg ' + cycleAvg + '\u00A2). Missed +$' + (extraProfit / 100).toFixed(2) + ' extra profit from better timing.' });
+                    } else if (overpay > 10 && settlement && !settlement.correct) {
+                        analysis.push({ type: 'bad', msg: 'Entered at ' + actualAvgEntry + '\u00A2 — ' + overpay + '\u00A2 above best entry (' + best + '\u00A2). Buying on the high side increases loss when wrong.' });
+                    } else if (overpay <= 3 && best > 0) {
+                        analysis.push({ type: 'good', msg: 'Entry @ ' + actualAvgEntry + '\u00A2 was near the best available (' + best + '\u00A2). Good timing.' });
                     }
                 }
 
