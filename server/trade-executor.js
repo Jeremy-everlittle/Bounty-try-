@@ -2306,6 +2306,20 @@ function getStatus() {
         },
         recentTrades: tradeLog.slice(0, 200),
         thought: { ...traderThought },
+        hourFilter: (() => {
+            const currentHour = new Date().getHours();
+            const hourPerf = HOUR_PERFORMANCE[currentHour];
+            return {
+                currentHour,
+                allowed: hourPerf ? hourPerf.allowed : true,
+                boost: hourPerf ? !!hourPerf.boost : false,
+                minConvictionOverride: hourPerf && !hourPerf.allowed ? (hourPerf.minConviction || null) : null,
+                allHours: Object.entries(HOUR_PERFORMANCE).reduce((acc, [h, v]) => {
+                    acc[h] = { allowed: v.allowed, boost: !!v.boost, minConviction: v.minConviction || null };
+                    return acc;
+                }, {}),
+            };
+        })(),
     };
 }
 

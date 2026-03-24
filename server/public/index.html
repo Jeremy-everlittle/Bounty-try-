@@ -672,6 +672,47 @@
         .trading-btn-danger { color: #f85149; border-color: rgba(248,81,73,0.4); }
         .trading-btn-danger:hover { background: rgba(248,81,73,0.15); }
         .trading-not-configured { font-size: 11px; color: #8b949e; text-align: center; padding: 10px; }
+
+        /* ── Trading Hours Filter ── */
+        .hours-filter { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
+        .hours-filter-row { display: flex; align-items: center; justify-content: space-between; }
+        .hours-filter-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: #8b949e; font-weight: 600; }
+        .hours-filter-status { font-size: 11px; font-weight: 800; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 4px; }
+        .hours-status-blocked { background: rgba(248,81,73,0.2); color: #f85149; border: 1px solid rgba(248,81,73,0.35); }
+        .hours-status-allowed { background: rgba(139,148,158,0.15); color: #b0b8c1; border: 1px solid rgba(139,148,158,0.25); }
+        .hours-status-boosted { background: rgba(63,185,80,0.2); color: #3fb950; border: 1px solid rgba(63,185,80,0.35); }
+        .hours-filter-next { font-size: 10px; color: #8b949e; margin-top: 4px; }
+
+        /* ── Edge Quality Bar ── */
+        .edge-quality-bar { margin-top: 10px; padding: 10px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
+        .edge-bar-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: #8b949e; font-weight: 600; margin-bottom: 6px; }
+        .edge-bar-track { height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; position: relative; }
+        .edge-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease, background 0.5s ease; }
+        .edge-bar-markers { display: flex; justify-content: space-between; margin-top: 3px; font-size: 9px; color: #8b949e; }
+        .edge-bar-value { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
+        .edge-bar-pct { font-size: 16px; font-weight: 700; }
+        .edge-bar-verdict { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+        .edge-no-trade { color: #f85149; }
+        .edge-marginal { color: #d29922; }
+        .edge-good { color: #3fb950; }
+        .rr-display { display: flex; gap: 12px; margin-top: 6px; font-size: 11px; }
+        .rr-item { display: flex; flex-direction: column; }
+        .rr-item-label { font-size: 9px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+        .rr-item-value { font-size: 13px; font-weight: 700; color: #e6edf3; }
+
+        /* ── Model Health Card ── */
+        .model-health { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+        .model-health-item { padding: 8px 10px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
+        .model-health-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.8px; color: #8b949e; font-weight: 600; margin-bottom: 4px; }
+        .model-health-value { font-size: 16px; font-weight: 700; }
+        .model-health-sub { font-size: 10px; color: #8b949e; margin-top: 2px; }
+        .session-pnl-tracker { margin-top: 8px; padding: 10px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
+        .session-pnl-row { display: flex; align-items: center; justify-content: space-between; }
+        .streak-badge { display: inline-block; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 4px; letter-spacing: 0.5px; }
+        .streak-win { background: rgba(63,185,80,0.2); color: #3fb950; }
+        .streak-loss { background: rgba(248,81,73,0.2); color: #f85149; }
+        .streak-neutral { background: rgba(139,148,158,0.12); color: #8b949e; }
+
         /* ── Environment Toggle ── */
         .env-toggle { display: flex; gap: 4px; margin: 8px 0; padding: 4px; background: rgba(0,0,0,0.3); border-radius: 6px; }
         .env-btn { flex: 1; padding: 5px 8px; border: 1px solid transparent; border-radius: 4px; font-size: 10px; font-weight: 800; letter-spacing: 1.2px; text-align: center; cursor: pointer; background: transparent; color: #8b949e; transition: all 0.2s; }
@@ -781,6 +822,36 @@
             </div>
         </div>
 
+        <!-- Edge Quality Bar -->
+        <div class="edge-quality-bar" id="edge-quality-bar" style="display:none;">
+            <div class="edge-bar-label">Edge Quality</div>
+            <div class="edge-bar-track">
+                <div class="edge-bar-fill" id="edge-bar-fill" style="width:0%;background:#f85149;"></div>
+            </div>
+            <div class="edge-bar-markers">
+                <span>0%</span><span style="color:#f85149">3%</span><span style="color:#d29922">5%</span><span>10%+</span>
+            </div>
+            <div class="edge-bar-value">
+                <span class="edge-bar-pct" id="edge-bar-pct">--</span>
+                <span class="edge-bar-verdict" id="edge-bar-verdict">--</span>
+            </div>
+            <!-- Risk/Reward Ratio -->
+            <div class="rr-display" id="rr-display" style="display:none;">
+                <div class="rr-item">
+                    <span class="rr-item-label">Entry Cost</span>
+                    <span class="rr-item-value" id="rr-entry">--</span>
+                </div>
+                <div class="rr-item">
+                    <span class="rr-item-label">Potential Payout</span>
+                    <span class="rr-item-value" id="rr-payout" style="color:#3fb950;">--</span>
+                </div>
+                <div class="rr-item">
+                    <span class="rr-item-label">R:R Ratio</span>
+                    <span class="rr-item-value" id="rr-ratio">--</span>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <!-- Auto-Trading Card (separate) -->
@@ -811,6 +882,14 @@
                     <div class="trading-stat-label">W/L</div>
                     <div class="trading-stat-value" id="trading-wl">0/0</div>
                 </div>
+            </div>
+            <!-- Trading Hours Filter -->
+            <div class="hours-filter" id="hours-filter">
+                <div class="hours-filter-row">
+                    <span class="hours-filter-label">Hour Filter</span>
+                    <span class="hours-filter-status" id="hours-filter-status">--</span>
+                </div>
+                <div class="hours-filter-next" id="hours-filter-next"></div>
             </div>
             <!-- Paper balance controls (shown only in paper mode) -->
             <div id="paper-balance-controls" style="display:none;margin:6px 0;padding:8px;background:rgba(210,153,34,0.08);border:1px solid rgba(210,153,34,0.25);border-radius:8px;">
@@ -863,6 +942,45 @@
                 <button class="trading-btn" id="cfg-save-btn" onclick="saveConfig()" style="width:100%;margin-top:8px;padding:6px 0;font-size:12px;font-weight:700;background:rgba(63,185,80,0.15);border-color:rgba(63,185,80,0.4);color:#3fb950;">Save Settings</button>
             </div>
         </div>
+
+    <!-- Model Health & Session Card -->
+    <div class="card" id="model-health-card" style="display:none;">
+        <div class="card-label">Model Health & Session</div>
+        <!-- Session P&L Tracker -->
+        <div class="session-pnl-tracker" id="session-pnl-tracker">
+            <div class="session-pnl-row">
+                <span style="font-size:10px;text-transform:uppercase;letter-spacing:0.8px;color:#8b949e;font-weight:600;">Session P&L</span>
+                <span style="font-size:18px;font-weight:800;" id="session-pnl-value">$0.00</span>
+            </div>
+            <div class="session-pnl-row" style="margin-top:4px;">
+                <span style="font-size:10px;color:#8b949e;">Streak</span>
+                <span class="streak-badge streak-neutral" id="streak-badge">No trades</span>
+            </div>
+        </div>
+        <!-- Model Health Metrics -->
+        <div class="model-health" id="model-health-grid">
+            <div class="model-health-item">
+                <div class="model-health-label">Calibration</div>
+                <div class="model-health-value" id="mh-calibration">--</div>
+                <div class="model-health-sub" id="mh-calibration-sub">Is model overconfident?</div>
+            </div>
+            <div class="model-health-item">
+                <div class="model-health-label">Direction Accuracy</div>
+                <div class="model-health-value" id="mh-direction">--</div>
+                <div class="model-health-sub" id="mh-direction-sub">Current hour</div>
+            </div>
+            <div class="model-health-item">
+                <div class="model-health-label">Signal Agreement</div>
+                <div class="model-health-value" id="mh-agreement">--</div>
+                <div class="model-health-sub" id="mh-agreement-sub">Original vs Updated</div>
+            </div>
+            <div class="model-health-item">
+                <div class="model-health-label">Risk Multiplier</div>
+                <div class="model-health-value" id="mh-risk-mult">--</div>
+                <div class="model-health-sub" id="mh-risk-mult-sub">Session risk adj.</div>
+            </div>
+        </div>
+    </div>
 
         <!-- Kalshi Orderbook Card -->
         <div class="card" id="kalshi-orderbook-card" style="display:none;">
