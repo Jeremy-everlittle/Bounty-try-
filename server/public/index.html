@@ -2516,6 +2516,23 @@
                         analysis.push({ type: 'info', msg: 'Flip signal was generated but no flip executed.' });
                     }
                 }
+
+                // Entry price vs best available price analysis
+                if (entryPriceInfo && entryPriceInfo.bestEntryPrice !== null && buys.length > 0) {
+                    const actualAvgEntry = Math.round(buys.reduce((s, b) => s + ((b.contracts || 0) * (b.limitPrice || b.entryPrice || 0)), 0) / buys.reduce((s, b) => s + (b.contracts || 0), 0));
+                    const best = entryPriceInfo.bestEntryPrice;
+                    const cycleAvg = entryPriceInfo.avgEntryPrice;
+                    const overpay = actualAvgEntry - best;
+                    const side = entryPriceInfo.winningSide;
+                    if (overpay > 5 && settlement && settlement.correct) {
+                        const extraProfit = overpay * totalContracts;
+                        analysis.push({ type: 'info', msg: 'Entered ' + side.toUpperCase() + ' @ ' + actualAvgEntry + '\u00A2 but best available was ' + best + '\u00A2 (avg ' + cycleAvg + '\u00A2). Missed +$' + (extraProfit / 100).toFixed(2) + ' extra profit from better timing.' });
+                    } else if (overpay > 10 && settlement && !settlement.correct) {
+                        analysis.push({ type: 'bad', msg: 'Entered at ' + actualAvgEntry + '\u00A2 — ' + overpay + '\u00A2 above best entry (' + best + '\u00A2). Buying on the high side increases loss when wrong.' });
+                    } else if (overpay <= 3 && best > 0) {
+                        analysis.push({ type: 'good', msg: 'Entry @ ' + actualAvgEntry + '\u00A2 was near the best available (' + best + '\u00A2). Good timing.' });
+                    }
+                }
             }
 
             return analysis;
@@ -2606,23 +2623,6 @@
                         if (avgEdge < -10) {
                             suggestions.push('Average entry edge was ' + avgEdge.toFixed(1) + '% — deeply negative. The model probability was far below market price at entry. Skip trades with negative edge.');
                         }
-                    }
-                }
-
-                // Entry price vs best available price analysis
-                if (entryPriceInfo && entryPriceInfo.bestEntryPrice !== null && buys.length > 0) {
-                    const actualAvgEntry = Math.round(buys.reduce((s, b) => s + ((b.contracts || 0) * (b.limitPrice || b.entryPrice || 0)), 0) / buys.reduce((s, b) => s + (b.contracts || 0), 0));
-                    const best = entryPriceInfo.bestEntryPrice;
-                    const cycleAvg = entryPriceInfo.avgEntryPrice;
-                    const overpay = actualAvgEntry - best;
-                    const side = entryPriceInfo.winningSide;
-                    if (overpay > 5 && settlement && settlement.correct) {
-                        const extraProfit = overpay * totalContracts;
-                        analysis.push({ type: 'info', msg: 'Entered ' + side.toUpperCase() + ' @ ' + actualAvgEntry + '\u00A2 but best available was ' + best + '\u00A2 (avg ' + cycleAvg + '\u00A2). Missed +$' + (extraProfit / 100).toFixed(2) + ' extra profit from better timing.' });
-                    } else if (overpay > 10 && settlement && !settlement.correct) {
-                        analysis.push({ type: 'bad', msg: 'Entered at ' + actualAvgEntry + '\u00A2 — ' + overpay + '\u00A2 above best entry (' + best + '\u00A2). Buying on the high side increases loss when wrong.' });
-                    } else if (overpay <= 3 && best > 0) {
-                        analysis.push({ type: 'good', msg: 'Entry @ ' + actualAvgEntry + '\u00A2 was near the best available (' + best + '\u00A2). Good timing.' });
                     }
                 }
 
