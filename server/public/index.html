@@ -1723,7 +1723,12 @@
                 return;
             }
 
-            renderPeriodDetailChart(container, data, periodKey);
+            try {
+                renderPeriodDetailChart(container, data, periodKey);
+            } catch (e) {
+                console.error('[period-detail] Render error:', e);
+                container.innerHTML = '<div class="period-detail-loading" style="color:#f85149">Render error: ' + e.message + '</div>';
+            }
         }
 
         function renderPeriodDetailChart(container, ticks, periodKey) {
@@ -1802,7 +1807,7 @@
             const dirChanges = flips.length;
 
             // Determine winning side from outcome (price vs strike at period end)
-            const winningSide = lastPrice >= strike ? 'yes' : 'no';
+            const winningSide = (strike && lastPrice >= strike) ? 'yes' : (strike ? 'no' : 'yes');
 
             // Compute best entry price (lowest ask) and average price for the winning side
             // YES: buy at kalshiYesAsk. NO: buy at kalshiNoAsk (= 100 - kalshiYesBid if not available)
