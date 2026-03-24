@@ -2183,6 +2183,243 @@
             }
         }
 
+        // ── Trading Hours Filter Rendering ──
+        const HOUR_PERFORMANCE_CLIENT = {
+            13: { allowed: true, boost: true },
+            14: { allowed: false, minConviction: 'LOCK' },
+            15: { allowed: true },
+            16: { allowed: true },
+            17: { allowed: false, minConviction: 'LOCK' },
+            18: { allowed: true },
+            19: { allowed: true, boost: true },
+            20: { allowed: true, boost: true },
+            21: { allowed: true, boost: true },
+        };
+
+        function renderHoursFilter() {
+            const el = document.getElementById('hours-filter-status');
+            const nextEl = document.getElementById('hours-filter-next');
+            if (!el) return;
+
+            const currentHour = new Date().getHours();
+            const perf = HOUR_PERFORMANCE_CLIENT[currentHour];
+
+            let statusText, statusClass;
+            if (!perf) {
+                // Hours not in the map are allowed by default (no special filter)
+                statusText = 'ALLOWED';
+                statusClass = 'hours-status-allowed';
+            } else if (!perf.allowed) {
+                statusText = 'BLOCKED';
+                statusClass = 'hours-status-blocked';
+            } else if (perf.boost) {
+                statusText = 'BOOSTED';
+                statusClass = 'hours-status-boosted';
+            } else {
+                statusText = 'ALLOWED';
+                statusClass = 'hours-status-allowed';
+            }
+            el.textContent = currentHour + ':00 — ' + statusText;
+            el.className = 'hours-filter-status ' + statusClass;
+
+            // Find next allowed/boosted hour
+            if (perf && !perf.allowed) {
+                let nextHour = currentHour + 1;
+                let found = false;
+                for (let i = 0; i < 24; i++) {
+                    const h = (currentHour + 1 + i) % 24;
+                    const hp = HOUR_PERFORMANCE_CLIENT[h];
+                    if (!hp || hp.allowed) {
+                        nextHour = h;
+                        found = true;
+                        break;
+                    }
+                }
+                nextEl.textContent = found ? 'Next allowed: ' + nextHour + ':00' + (HOUR_PERFORMANCE_CLIENT[nextHour] && HOUR_PERFORMANCE_CLIENT[nextHour].boost ? ' (boosted)' : '') : '';
+                nextEl.style.display = '';
+            } else {
+                // Find next boosted hour
+                let nextBoosted = null;
+                for (let i = 1; i <= 24; i++) {
+                    const h = (currentHour + i) % 24;
+                    const hp = HOUR_PERFORMANCE_CLIENT[h];
+                    if (hp && hp.boost) {
+                        nextBoosted = h;
+                        break;
+                    }
+                }
+                nextEl.textContent = nextBoosted !== null ? 'Next boosted: ' + nextBoosted + ':00' : '';
+                nextEl.style.display = nextBoosted !== null ? '' : 'none';
+            }
+        }
+
+        // ── Edge Quality Bar Rendering ──
+        function renderEdgeQualityBar() {
+            const bar = document.getElementById('edge-quality-bar');
+            if (!bar) return;
+
+            const bq = serverData && serverData.betQuality;
+            if (!bq) { bar.style.display = 'none'; return; }
+
+            bar.style.display = '';
+            const edgePct = (bq.edge || 0) * 100;
+            const fillEl = document.getElementById('edge-bar-fill');
+            const pctEl = document.getElementById('edge-bar-pct');
+            const verdictEl = document.getElementById('edge-bar-verdict');
+
+            // Map edge to bar width (0-10% maps to 0-100% bar width)
+            const barWidth = Math.min(100, Math.max(0, edgePct * 10));
+            fillEl.style.width = barWidth + '%';
+
+            let color, verdict, verdictBg;
+            if (edgePct < 3) {
+                color = '#f85149'; verdict = 'NO TRADE'; verdictBg = 'rgba(248,81,73,0.15)';
+            } else if (edgePct < 5) {
+                color = '#d29922'; verdict = 'MARGINAL'; verdictBg = 'rgba(210,153,34,0.15)';
+            } else {
+                color = '#3fb950'; verdict = 'GOOD SETUP'; verdictBg = 'rgba(63,185,80,0.15)';
+            }
+
+            fillEl.style.background = color;
+            pctEl.textContent = edgePct.toFixed(1) + '%';
+            pctEl.style.color = color;
+            verdictEl.textContent = verdict;
+            verdictEl.style.color = color;
+            verdictEl.style.background = verdictBg;
+
+            // Risk/Reward Ratio
+            const rrDisplay = document.getElementById('rr-display');
+            const ts = serverData && serverData.tradingStatus;
+            const pred = serverData && serverData.prediction;
+            const activePred = pred && (pred.updatedPrediction || pred.originalPrediction);
+
+            if (bq.shouldBet && activePred) {
+                rrDisplay.style.display = '';
+                // Entry cost is approximately the probability (in cents per contract)
+                const probForBet = activePred.probability || 0.5;
+                const entryPrice = Math.round(probForBet * 100); // cents
+                const payout = 100; // binary option pays $1
+                const risk = entryPrice;
+                const reward = payout - entryPrice;
+                const rrRatio = risk > 0 ? (reward / risk) : 0;
+
+                document.getElementById('rr-entry').textContent = entryPrice + '\u00A2';
+                document.getElementById('rr-payout').textContent = payout + '\u00A2';
+                const rrColor = rrRatio >= 1.5 ? '#3fb950' : rrRatio >= 1.0 ? '#d29922' : '#f85149';
+                document.getElementById('rr-ratio').textContent = rrRatio.toFixed(2) + ':1';
+                document.getElementById('rr-ratio').style.color = rrColor;
+            } else {
+                rrDisplay.style.display = 'none';
+            }
+        }
+
+        // ── Model Health Card Rendering ──
+        function renderModelHealth() {
+            const card = document.getElementById('model-health-card');
+            if (!card) return;
+
+            const ts = serverData && serverData.tradingStatus;
+            const sr = serverData && serverData.sessionRisk;
+            const bq = serverData && serverData.betQuality;
+
+            // Show card if we have any useful data
+            if (!ts && !sr) { card.style.display = 'none'; return; }
+            card.style.display = '';
+
+            // Session P&L
+            if (ts && ts.daily) {
+                const pnl = ts.daily.pnlCents / 100;
+                const pnlEl = document.getElementById('session-pnl-value');
+                pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+                pnlEl.style.color = pnl >= 0 ? '#3fb950' : '#f85149';
+            }
+
+            // Streak
+            if (sr) {
+                const streakEl = document.getElementById('streak-badge');
+                if (sr.consecutiveWins > 0) {
+                    streakEl.textContent = sr.consecutiveWins + 'W streak';
+                    streakEl.className = 'streak-badge streak-win';
+                } else if (sr.consecutiveLosses > 0) {
+                    streakEl.textContent = sr.consecutiveLosses + 'L streak';
+                    streakEl.className = 'streak-badge streak-loss';
+                } else {
+                    streakEl.textContent = 'Even';
+                    streakEl.className = 'streak-badge streak-neutral';
+                }
+            }
+
+            // Calibration — check if model is overconfident
+            const pred = serverData && serverData.prediction;
+            const activePred = pred && (pred.updatedPrediction || pred.originalPrediction);
+            const calEl = document.getElementById('mh-calibration');
+            const calSub = document.getElementById('mh-calibration-sub');
+            if (activePred && activePred.confidence) {
+                const conf = (activePred.confidence * 100).toFixed(0);
+                calEl.textContent = conf + '%';
+                if (activePred.confidence > 0.75) {
+                    calEl.style.color = '#d29922';
+                    calSub.textContent = 'High confidence — may be overfit';
+                } else if (activePred.confidence > 0.6) {
+                    calEl.style.color = '#3fb950';
+                    calSub.textContent = 'Well calibrated';
+                } else {
+                    calEl.style.color = '#8b949e';
+                    calSub.textContent = 'Low confidence';
+                }
+            }
+
+            // Direction accuracy (from trading W/L as proxy)
+            const dirEl = document.getElementById('mh-direction');
+            const dirSub = document.getElementById('mh-direction-sub');
+            if (ts && ts.daily && (ts.daily.wins + ts.daily.losses) > 0) {
+                const total = ts.daily.wins + ts.daily.losses;
+                const acc = ((ts.daily.wins / total) * 100).toFixed(0);
+                dirEl.textContent = acc + '%';
+                dirEl.style.color = acc >= 55 ? '#3fb950' : acc >= 45 ? '#d29922' : '#f85149';
+                dirSub.textContent = ts.daily.wins + 'W / ' + ts.daily.losses + 'L today';
+            } else {
+                dirEl.textContent = '--';
+                dirEl.style.color = '#8b949e';
+                dirSub.textContent = 'No trades yet';
+            }
+
+            // Signal agreement (original vs updated)
+            const agreeEl = document.getElementById('mh-agreement');
+            const agreeSub = document.getElementById('mh-agreement-sub');
+            if (pred && pred.originalPrediction && pred.updatedPrediction) {
+                const origUp = pred.originalPrediction.predictedPrice >= (serverData.kalshiStrike || 0);
+                const updUp = pred.updatedPrediction.predictedPrice >= (serverData.kalshiStrike || 0);
+                if (origUp === updUp) {
+                    agreeEl.textContent = 'AGREE';
+                    agreeEl.style.color = '#3fb950';
+                    agreeSub.textContent = 'Both say ' + (origUp ? 'UP' : 'DOWN');
+                } else {
+                    agreeEl.textContent = 'SPLIT';
+                    agreeEl.style.color = '#f85149';
+                    agreeSub.textContent = 'Orig: ' + (origUp ? 'UP' : 'DOWN') + ' / Upd: ' + (updUp ? 'UP' : 'DOWN');
+                }
+            } else {
+                agreeEl.textContent = '--';
+                agreeEl.style.color = '#8b949e';
+                agreeSub.textContent = 'Waiting for update';
+            }
+
+            // Risk multiplier
+            const rmEl = document.getElementById('mh-risk-mult');
+            const rmSub = document.getElementById('mh-risk-mult-sub');
+            if (sr && sr.riskMultiplier !== undefined) {
+                const rm = sr.riskMultiplier;
+                rmEl.textContent = rm.toFixed(2) + 'x';
+                rmEl.style.color = rm >= 0.9 ? '#3fb950' : rm >= 0.5 ? '#d29922' : '#f85149';
+                rmSub.textContent = rm >= 0.9 ? 'Full size' : rm >= 0.5 ? 'Reduced size' : 'Minimal size';
+                if (sr.coolingOff) {
+                    rmSub.textContent = 'COOLING OFF';
+                    rmSub.style.color = '#f85149';
+                }
+            }
+        }
+
         async function toggleTradingMode() {
             try {
                 const ts = serverData && serverData.tradingStatus;
@@ -2884,6 +3121,9 @@
 
             // Auto-trading panel
             renderTradingPanel();
+            renderHoursFilter();
+            renderEdgeQualityBar();
+            renderModelHealth();
             renderKalshiOrderbook();
 
             // Wallet rendering removed
