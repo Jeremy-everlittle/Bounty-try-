@@ -151,7 +151,7 @@ function getSessionRiskMultiplier() {
 function extractMLFeatures(marketData, extraCtx) {
     const prices = marketData.history.map(h => h.price);
     const n = prices.length;
-    if (n < 10) return { features: [0, 0, 0, 0, 0, 0, 0, 0], ctx: {} };
+    if (n < 10) return { features: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ctx: {} };
 
     const volRegime = detectVolRegime(prices);
     const trendRegime = detectTrendRegime(prices, n);
@@ -173,6 +173,11 @@ function extractMLFeatures(marketData, extraCtx) {
     const distFromStrike = extraCtx && extraCtx.zScore ? extraCtx.zScore : 0;
     const spreadVol = extraCtx && extraCtx.spreadVolAdjust ? extraCtx.spreadVolAdjust : 1.0;
 
+    // Day-of-week as numeric: 0=Sun..6=Sat, normalized to [0,1]
+    const dayOfWeek = new Date().getUTCDay() / 6;
+    // Is weekend flag (0 or 1)
+    const isWeekend = (new Date().getUTCDay() === 0 || new Date().getUTCDay() === 6) ? 1 : 0;
+
     const features = [
         volRegimeNum,
         trendStrength,
@@ -181,7 +186,11 @@ function extractMLFeatures(marketData, extraCtx) {
         distFromStrike,
         mom5 * 1000,
         (rsi - 50) / 50,
-        spreadVol
+        spreadVol,
+        // New features for enhanced signal coverage
+        dayOfWeek,          // day-of-week pattern
+        isWeekend,          // weekend liquidity flag
+        hour / 24           // fractional hour for hourly seasonality (duplicate of timeOfDay for explicit naming)
     ];
 
     const ctx = {
@@ -193,7 +202,9 @@ function extractMLFeatures(marketData, extraCtx) {
         rsi,
         spreadVolAdjust: spreadVol,
         zScore: distFromStrike,
-        logReturn
+        logReturn,
+        dayOfWeek,
+        isWeekend
     };
 
     return { features, ctx };
@@ -2217,6 +2228,7 @@ function predictPrice(marketData, minutesAhead, strike) {
     }
 
     // ── NEW SIGNAL: Hourly Directional Seasonality ──
+    const utcHour = new Date().getUTCHours();
     const predLog = store.getPredictionLog();
     const hourlyBias = computeHourlyDirectionalBias(utcHour, predLog);
 
@@ -2317,7 +2329,6 @@ function predictPrice(marketData, minutesAhead, strike) {
     // SIGNAL: HOUR-OF-DAY BIAS — research-backed intraday seasonality
     // 22:00-23:00 UTC consistently bullish (~0.07% avg return, p<0.05)
     // US market open (14:30 UTC) = elevated volatility / momentum regime
-    const utcHour = new Date().getUTCHours();
     let hourBias = 0;
     if (utcHour === 22) hourBias = 0.08;       // strongest anomaly
     else if (utcHour === 21 || utcHour === 23) hourBias = 0.04; // shoulders
@@ -2386,7 +2397,11 @@ function predictPrice(marketData, minutesAhead, strike) {
         { value: exhaustionSignal, weight: 0.08 },
         { value: normRocSignal, weight: 0.05 },
         { value: mrComposite.signal, weight: 0.06 },
-        { value: liqSignal, weight: 0.07 }
+        { value: liqSignal, weight: 0.07 },
+        { value: hourlyBias, weight: 0.05 },
+        { value: obDepthMom.signal, weight: 0.03 },
+        { value: dowBias.bias, weight: 0.02 },
+        { value: fundingStress.signal, weight: 0.04 }
     ];
     const agreementMult = computeAgreementMultiplier(allSignals);
 
@@ -2408,13 +2423,17 @@ function predictPrice(marketData, minutesAhead, strike) {
     // ═══════════════════════════════════════════════════════════════
 
     // GROUP 1: Single momentum composite (replaces 7 redundant momentum signals)
-    const momentumComposite = driftZShift * regM.momentum;
+    // Apply jump-filtered dampening: jumps exhaust immediately, reduce momentum by 40%
+    // Apply liquidation size clustering: large liq = dampen momentum, retail panic = boost
+    const momentumComposite = driftZShift * regM.momentum * jumpMomentumDampen * (1 + liqMomentumAdj);
 
     // GROUP 2: Order flow composite (replaces 4 overlapping flow signals)
     const flowComposite = (orderFlowSignal * 0.5 + tradeFlowSignal * 0.3 + (typeof cvdSignal !== 'undefined' ? cvdSignal * 0.2 : 0)) * regM.flow;
 
     // GROUP 3: Mean reversion (single composite)
-    const meanRevComposite = (microMRSignal * 0.6 + vwapSignal * 0.4) * regM.reversion;
+    // Apply jump mean-reversion boost and ETH divergence mean-reversion boost
+    const jumpAndEthMRBoost = jumpMeanRevBoost + (ethLL.meanReversionBoost || 0);
+    const meanRevComposite = (microMRSignal * 0.6 + vwapSignal * 0.4) * regM.reversion + jumpAndEthMRBoost;
 
     // GROUP 4: Liquidation cascade (independent information source)
     const liqComposite = liqSignal * immediateBoosted;
@@ -2423,15 +2442,33 @@ function predictPrice(marketData, minutesAhead, strike) {
     const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * regM.reversion;
 
     // GROUP 6: ETH confirmation (small, only when active)
-    const ethComposite = ethLL.signal * immediateBoosted * regM.momentum;
+    // Apply ETH confidence boost when strong agreement detected
+    const ethConfBoost = 1 + (ethLL.confidenceBoost || 0);
+    const ethComposite = ethLL.signal * immediateBoosted * regM.momentum * ethConfBoost;
+
+    // GROUP 7: Hourly directional seasonality (~5% weight)
+    const hourlySeasonalComposite = hourlyBias;
+
+    // GROUP 8: Orderbook depth momentum (rate of change in OB imbalance)
+    const obDepthMomComposite = obDepthMom.signal;
+
+    // GROUP 9: Day-of-week bias (subtle ±0.02 effect)
+    const dowBiasComposite = dowBias.bias;
+
+    // GROUP 10: Funding rate stress (derivatives leverage signal)
+    const fundingStressComposite = fundingStress.signal;
 
     const rawTotalZShift = (
-        momentumComposite     * 0.18 +   // was 0.12 — momentum is the strongest signal
-        flowComposite         * 0.12 +   // was 0.08 — order flow has real information
-        meanRevComposite      * 0.08 +   // was 0.10 — mean reversion less reliable short-term
-        liqComposite          * 0.10 +   // was 0.08 — liquidation cascades are very predictive
-        exhaustionComposite   * 1.00 +   // keep as-is (already scaled internally)
-        ethComposite          * 0.03     // was 0.04 — ETH correlation is noisy
+        momentumComposite         * 0.16 +   // was 0.18 — reduced to accommodate new signals
+        flowComposite             * 0.11 +   // was 0.12
+        meanRevComposite          * 0.08 +   // unchanged
+        liqComposite              * 0.09 +   // was 0.10
+        exhaustionComposite       * 1.00 +   // keep as-is (already scaled internally)
+        ethComposite              * 0.03 +   // unchanged
+        hourlySeasonalComposite   * 0.05 +   // NEW: ~5% weight for hourly directional bias
+        obDepthMomComposite       * 0.03 +   // NEW: orderbook depth momentum
+        dowBiasComposite          * 0.02 +   // NEW: day-of-week pattern (subtle)
+        fundingStressComposite    * 0.04     // NEW: funding rate stress signal
     );
 
     // Shrinkage + cap: max 0.4 total z-shift (was 1.2 — a 1.2 z-shift moves
@@ -2542,7 +2579,8 @@ function predictPrice(marketData, minutesAhead, strike) {
     const changePercent = ((predictedPrice - current) / current) * 100;
     const sigmoidInput = (confidenceDistance - 0.35) * 8;
     const sigmoidVal = 1 / (1 + Math.exp(-sigmoidInput));
-    const confidence = Math.max(0.20, Math.min(0.96, 0.40 + sigmoidVal * 0.56));
+    // Apply day-of-week confidence multiplier (weekends/Friday US close slightly reduce confidence)
+    const confidence = Math.max(0.20, Math.min(0.96, (0.40 + sigmoidVal * 0.56) * dowBias.confidenceMult));
 
     const trendLabel = ema5 > ema20 ? 'Bullish' : ema5 < ema20 ? 'Bearish' : 'Neutral';
     const momentumLabel = mom5 > 0.001 ? 'Bullish' : mom5 < -0.001 ? 'Bearish' : 'Neutral';
@@ -2552,7 +2590,24 @@ function predictPrice(marketData, minutesAhead, strike) {
     return {
         predictedPrice, changePercent, confidence, probability: finalProb,
         _remainingVol: remainingVol, ensembleConfidence: ensConf,
-        signals: { momentum: momentumLabel, volatility: volLabel, trend: trendLabel, rsi: rsiLabel },
+        signals: {
+            momentum: momentumLabel, volatility: volLabel, trend: trendLabel, rsi: rsiLabel,
+            // New/enhanced signals for DB persistence and downstream consumers
+            jumpDetected: jumpInfo.jumpDetected,
+            jumpRatio: jumpInfo.jumpRatio,
+            hourlyBias,
+            obDepthMomentum: obDepthMom.signal,
+            obDepthDelta: obDepthMom.depthDelta,
+            dayOfWeekBias: dowBias.bias,
+            dayOfWeekConfMult: dowBias.confidenceMult,
+            fundingStressLevel: fundingStress.stress,
+            fundingStressSignal: fundingStress.signal,
+            fundingExtremePositioning: fundingStress.extremePositioning,
+            liqMomentumAdj,
+            ethDivergenceScore: ethLL.divergenceScore || 0,
+            ethMeanRevBoost: ethLL.meanReversionBoost || 0,
+            ethConfidenceBoost: ethLL.confidenceBoost || 0
+        },
         _regimeInfo: { volRegime: volRegime.regime, trendRegime: getBayesTrendLabel(trendRegime) },
         _exhaustion: momExhaustion,
         _choppiness: choppiness
