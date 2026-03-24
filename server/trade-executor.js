@@ -73,9 +73,9 @@ function captureKalshiOrderbook(ticker, reason, minutesRemaining, yesBids, noBid
 // ── Configuration (from env, with safe defaults) ──
 const config = {
     paperMode: (process.env.PAPER_MODE || 'true').toLowerCase() === 'true',
-    baseContracts: parseInt(process.env.BASE_CONTRACTS || '7', 10), // was 10 — 7% of balance per bet
-    maxPositionContracts: parseInt(process.env.MAX_POSITION_CONTRACTS || '50', 10),
-    convictionMaxContracts: parseInt(process.env.CONVICTION_MAX_CONTRACTS || '100', 10), // was 150 — lower cap for high-conviction bets
+    baseContracts: parseInt(process.env.BASE_CONTRACTS || '4', 10), // was 7 — 4% of balance per bet (safer for 53% accuracy)
+    maxPositionContracts: parseInt(process.env.MAX_POSITION_CONTRACTS || '25', 10), // was 50
+    convictionMaxContracts: parseInt(process.env.CONVICTION_MAX_CONTRACTS || '50', 10), // was 100 — lower cap for high-conviction bets
     maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '10000', 10),   // $100
     maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '200', 10),
 };
@@ -84,13 +84,12 @@ const config = {
 // Historical analysis shows certain hours have terrible win rates.
 // Skip trading during statistically poor hours unless conviction is very high.
 const HOUR_PERFORMANCE = {
-    // Key = local hour (24h), Value = { allowed: bool, minConviction: string|null }
-    // null minConviction = always allowed, 'LOCK' = only LOCK tier passes
-    13: { allowed: true, boost: true },    // 1PM: 100% historical
-    14: { allowed: false, minConviction: 'LOCK' }, // 2PM: 25% - terrible
-    15: { allowed: true },                 // 3PM: 50%
-    16: { allowed: true },                 // 4PM: 50%
-    17: { allowed: false, minConviction: 'LOCK' }, // 5PM: 0% - worst hour
+    // Key = local hour (24h), Value = { allowed: bool, minEdge: number|null, boost: bool }
+    13: { allowed: true, boost: true },    // 1PM: 100%
+    14: { allowed: false },                 // 2PM: 25% - blocked entirely
+    15: { allowed: true, minEdge: 0.08 },   // 3PM: 50% - need higher edge
+    16: { allowed: true, minEdge: 0.08 },   // 4PM: 50% - need higher edge
+    17: { allowed: false },                 // 5PM: 0% - blocked entirely
     18: { allowed: true },                 // 6PM: 75%
     19: { allowed: true, boost: true },    // 7PM: 100%
     20: { allowed: true, boost: true },    // 8PM: 100%
@@ -825,16 +824,18 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const currentHour = new Date().getHours();
     const hourPerf = HOUR_PERFORMANCE[currentHour];
     if (hourPerf && !hourPerf.allowed) {
-        const convictionTier = betQuality.convictionTier;
-        const minConviction = hourPerf.minConviction;
-        if (!minConviction || convictionTier !== minConviction) {
-            const msg = `Hour ${currentHour}:00 has poor historical performance — skipping (need ${minConviction || 'N/A'} conviction to override)`;
-            console.log(`[trade-executor] ${msg}`);
-            setThought('skip', msg);
-            decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
-            return;
-        }
-        console.log(`[trade-executor] Hour ${currentHour}:00 poor but ${convictionTier} conviction overrides filter`);
+        const msg = `Hour ${currentHour}:00 has poor historical performance — blocked entirely`;
+        console.log(`[trade-executor] ${msg}`);
+        setThought('skip', msg);
+        decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
+        return;
+    }
+    if (hourPerf && hourPerf.minEdge && betQuality.edge < hourPerf.minEdge) {
+        const msg = `Hour ${currentHour}:00 requires higher edge (${(hourPerf.minEdge*100).toFixed(0)}%) — current edge ${(betQuality.edge*100).toFixed(1)}% too low`;
+        console.log(`[trade-executor] ${msg}`);
+        setThought('skip', msg);
+        decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
+        return;
     }
 
     const isUp = prediction.predictedPrice >= strike;
@@ -864,16 +865,13 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     // Hard cap: never pay more than 85¢ for standard entries.
     // Above 85¢, risk/reward is terrible — risking 85¢+ to make at most 15¢.
     // Exception: LOCK conviction tier (last ~5 min, near-guaranteed) can go up to 95¢.
-    const MAX_ENTRY_PRICE = isLockTier ? 92 : 75; // was 95/85 — lower entry = better R:R
+    const MAX_ENTRY_PRICE = isLockTier ? 92 : 60;
 
-    // Early period protection: in the first 5 minutes of a period, require cheaper
-    // entries to compensate for the higher uncertainty.
-    // LOCK bets bypass early period limits (they only trigger with <5 min left anyway).
     const earlyPeriodMaxPrice = isLockTier ? MAX_ENTRY_PRICE
-                              : minutesRemaining > 13 ? 58  // was 65 — first ~2 min: cheaper entries
-                              : minutesRemaining > 11 ? 63  // was 72
-                              : minutesRemaining > 10 ? 68  // was 78
-                              : MAX_ENTRY_PRICE;             // after 5 min: standard cap
+                              : minutesRemaining > 13 ? 45  // first ~2 min
+                              : minutesRemaining > 11 ? 50  // 2-4 min
+                              : minutesRemaining > 10 ? 55  // 4-5 min
+                              : MAX_ENTRY_PRICE;             // after 5 min
 
     const convictionLabel = betQuality.convictionTier ? ` [${betQuality.convictionTier}]` : '';
     setThought('buying', `Placing ${isUp ? 'UP' : 'DOWN'} bet${convictionLabel}`, {
@@ -955,8 +953,8 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     if (estimatedEntry > 0) {
         const potentialProfit = 100 - estimatedEntry;
         const riskRewardRatio = potentialProfit / estimatedEntry;
-        if (riskRewardRatio < 0.5 && !isLockTier) {
-            const msg = `Poor risk/reward: entry=${estimatedEntry}c, profit=${potentialProfit}c, R:R=${riskRewardRatio.toFixed(2)} — need at least 0.5`;
+        if (riskRewardRatio < 0.65 && !isLockTier) {
+            const msg = `Poor risk/reward: entry=${estimatedEntry}c, profit=${potentialProfit}c, R:R=${riskRewardRatio.toFixed(2)} — need at least 0.65`;
             console.log(`[trade-executor] ${msg}`);
             setThought('skip', msg);
             return;
@@ -967,10 +965,21 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const baseCount = getBaseContractCount(limitPrice);
     const isHighConviction = betQuality.betSize > 1.0;
     const positionCap = isHighConviction ? config.convictionMaxContracts : config.maxPositionContracts;
-    const contracts = Math.max(1, Math.min(
+    let contracts = Math.max(1, Math.min(
         positionCap,
         Math.round(betQuality.betSize * baseCount)
     ));
+
+    // Max risk per trade: never risk more than 12% of balance on a single entry
+    const maxRiskPct = 0.12;
+    const balForRisk = config.paperMode ? (paperBalances[getEnvironment()] || 0) : (cachedBalance ? cachedBalance.balanceCents : 10000);
+    const maxRiskCents = balForRisk * maxRiskPct;
+    const tradeCost = contracts * (limitPrice || theoreticalPrice);
+    if (tradeCost > maxRiskCents) {
+        const oldContracts = contracts;
+        contracts = Math.max(1, Math.floor(maxRiskCents / (limitPrice || theoreticalPrice)));
+        console.log(`[trade-executor] Risk cap: ${oldContracts} contracts ($${(tradeCost/100).toFixed(2)}) exceeds ${(maxRiskPct*100).toFixed(0)}% of $${(balForRisk/100).toFixed(2)} — capped to ${contracts} contracts`);
+    }
 
     // ── DB: log bet decision ──
     db.saveDecisionLog({
@@ -1580,11 +1589,15 @@ function onPeriodEnd(gradeResult) {
 
 async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPrice, minutesRemaining, kalshiTicker, periodKey) {
     if (!currentPosition || currentPosition.periodKey !== periodKey) return;
+    if (currentPosition.dipBuyCount >= 1) return; // limit to 1 dip buy per period
     if (killSwitch) return;
+    const dipHour = new Date().getHours();
+    const dipHourPerf = HOUR_PERFORMANCE[dipHour];
+    if (dipHourPerf && !dipHourPerf.allowed) return; // no dip buys during bad hours
     // Only allow dip buys in the middle of a period (4-10 min remaining)
     // Too early = price still volatile, too late = no time to recover
     if (minutesRemaining < 4.0 || minutesRemaining > 10.0) return;
-    if (Date.now() - lastDipCheckTime < 8000) return; // throttle
+    if (Date.now() - lastDipCheckTime < 30000) return; // throttle (30s)
     lastDipCheckTime = Date.now();
 
     // Respect fill failure cooldowns — don't spam orders when there's no liquidity
@@ -1604,7 +1617,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
 
     // Only add if the sell signal says HOLD (normal dip / recoverable)
     // Never add if the model says sell or lost cause
-    if (sellSignal && (sellSignal.level === 'lost_cause' || sellSignal.level === 'sell_now' || sellSignal.level === 'consider_selling')) return;
+    if (sellSignal && (sellSignal.level === 'lost_cause' || sellSignal.level === 'sell_now' || sellSignal.level === 'consider_selling' || sellSignal.level === 'uncomfortable')) return;
 
     // Check updated prediction still agrees with our direction
     const bq = updatedPrediction && updatedPrediction._betQuality;
@@ -1614,13 +1627,13 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
 
     // Require stronger probability for dip buys (>65%) — moderate confidence not enough
     const probForBet = betIsUp ? updatedPrediction.probability : (1 - updatedPrediction.probability);
-    if (probForBet < 0.65) return; // require strong confidence for dip buys
+    if (probForBet < 0.70) return; // require strong confidence for dip buys
 
     // Calculate the dip opportunity — how much cheaper can we buy?
     // Cap entry price at 55¢ to prevent expensive dip buys that amplify losses
-    const currentLimitPrice = Math.max(5, Math.min(55, Math.round(probForBet * 100)));
+    const currentLimitPrice = Math.max(5, Math.min(42, Math.round(probForBet * 100)));
     const entryImprovement = currentPosition.entryPrice - currentLimitPrice;
-    if (entryImprovement < 5) return; // require meaningful improvement (5¢+)
+    if (entryImprovement < 10) return; // require meaningful improvement (10¢+)
 
     // How many more contracts can we add?
     const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
@@ -1629,7 +1642,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
     if (maxAdd <= 0) return; // already at max
 
     // Scale add size: bigger dip = add more, but cap at half the original position
-    const dipScale = Math.min(1.0, entryImprovement / 20); // 20¢ dip = full scale
+    const dipScale = Math.min(0.5, entryImprovement / 30); // 30¢ dip = full scale, capped at 0.5
     const addContracts = Math.max(1, Math.min(maxAdd, Math.round(dipScale * bq.betSize * getBaseContractCount(currentLimitPrice))));
 
     const check = await canTrade(periodKey);
@@ -1664,6 +1677,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
         currentPosition.contracts = newTotal;
         currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal); // weighted avg
         tradeInfo.contracts = cappedAdd;
+        currentPosition.dipBuyCount = (currentPosition.dipBuyCount || 0) + 1;
         logTrade('dip_buy', tradeInfo);
         decisionLog.logTradeExecution({ ...tradeInfo, strategy: 'dip_buyer', currentPrice, strike });
         dailyStats.tradeCount++;
@@ -1716,6 +1730,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
         currentPosition.totalContracts = newTotal;
         currentPosition.contracts = newTotal;
         currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal);
+        currentPosition.dipBuyCount = (currentPosition.dipBuyCount || 0) + 1;
         logTrade('dip_buy', { ...tradeInfo, orderId: order.order_id, filledContracts });
         dailyStats.tradeCount++;
         console.log(`[trade-executor] LIVE DIP-BUY: +${filledContracts}x @ ${currentLimitPrice}c — order ${order.order_id} (${order.status})`);
@@ -2332,6 +2347,13 @@ async function pressBet(addContracts) {
         return { ok: false, reason: 'No open position to press' };
     }
 
+    const pressHour = new Date().getHours();
+    const pressHourPerf = HOUR_PERFORMANCE[pressHour];
+    if (pressHourPerf && !pressHourPerf.allowed) {
+        console.log(`[trade-executor] pressBet blocked: hour ${pressHour} has poor performance`);
+        return { ok: false, reason: `Hour ${pressHour} blocked by hour filter` };
+    }
+
     const ticker = currentPosition.ticker;
     const side = currentPosition.side;
     const periodKey = currentPosition.periodKey;
@@ -2446,6 +2468,13 @@ async function pressBet(addContracts) {
 // ═══════════════════════════════════════════════════════════════
 
 async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideContracts) {
+    const forceHour = new Date().getHours();
+    const forceHourPerf = HOUR_PERFORMANCE[forceHour];
+    if (forceHourPerf && !forceHourPerf.allowed) {
+        console.log(`[trade-executor] forceBet blocked: hour ${forceHour} has poor performance`);
+        return { ok: false, reason: `Hour ${forceHour} blocked by hour filter` };
+    }
+
     if (!prediction || !kalshiTicker || strike === null) {
         return { ok: false, reason: 'Missing prediction, ticker, or strike data' };
     }

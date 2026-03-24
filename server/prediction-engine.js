@@ -97,10 +97,10 @@ function updateSessionRisk(correct) {
         sessionRisk.consecutiveWins = 0;
     }
 
-    // Cooling off: 3+ consecutive losses → 20 min pause
-    if (sessionRisk.consecutiveLosses >= 3) {
+    // Cooling off: 2+ consecutive losses → 30 min pause
+    if (sessionRisk.consecutiveLosses >= 2) {
         sessionRisk.coolingOff = true;
-        sessionRisk.coolingOffUntil = Date.now() + 20 * 60 * 1000;
+        sessionRisk.coolingOffUntil = Date.now() + 30 * 60 * 1000;
     }
 
     // Edge decay: only alert at very poor accuracy
@@ -119,11 +119,21 @@ function getSessionRiskMultiplier() {
 
     if (sessionRisk.coolingOff) return 0; // full stop during cooldown — trading at 30% when model is broken is still losing money
 
+    // Hard stop: session loss limit (~$3)
+    if (sessionRisk.sessionPnL < -3.0) return 0;
+
+    // Rolling accuracy check: if last 10 results < 45% accuracy, full stop
+    if (sessionRisk.results.length >= 10) {
+        const last10 = sessionRisk.results.slice(-10);
+        const recentAcc = last10.filter(r => r.correct).length / last10.length;
+        if (recentAcc < 0.45) return 0;
+    }
+
     let mult = 1.0;
 
     // Anti-martingale: reduce after consecutive losses
-    if (sessionRisk.consecutiveLosses >= 3) mult *= 0.50;
-    else if (sessionRisk.consecutiveLosses >= 1) mult *= 0.75;
+    if (sessionRisk.consecutiveLosses >= 2) return 0; // full stop after 2 losses
+    else if (sessionRisk.consecutiveLosses >= 1) mult *= 0.60;
 
     // Drawdown protection: only reduce in deep drawdowns
     if (sessionRisk.currentDrawdown > 4.0) mult *= 0.60;   // was >2.0 at 0.50
@@ -1657,6 +1667,30 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     const probForBet = prediction.predictedPrice >= strike ? prediction.probability : (1 - prediction.probability);
     const edge = probForBet - 0.5;
     const confidence = prediction.confidence;
+
+    // Hard floor: never bet when probability is below 55%
+    // At 48% probability the model is basically guessing
+    if (probForBet < 0.55) {
+        return {
+            quality: 0, shouldBet: false, waitForBetter: minutesAhead > 8,
+            suggestedWait: 0, edge, factors: { probTooLow: true },
+            choppiness: { choppy: false, adx: 0 }, exhaustion: { exhaustion: 0 },
+            betSize: 0, betSizeReason: 'Probability too low (' + (probForBet*100).toFixed(0) + '%) — no directional edge',
+            convictionTier: null,
+            kellyEntryPrice: null, kellyWinProfit: null, kellyLossAmount: null,
+            kellyRaw: 0, kellyFraction: 0, kellyHasEdge: false, kellyError: null,
+            sessionRisk: {
+                consecutiveLosses: sessionRisk.consecutiveLosses,
+                consecutiveWins: sessionRisk.consecutiveWins,
+                currentDrawdown: sessionRisk.currentDrawdown,
+                coolingOff: sessionRisk.coolingOff,
+                edgeDecayAlert: sessionRisk.edgeDecayAlert,
+                riskMultiplier: getSessionRiskMultiplier()
+            },
+            reason: 'Probability too low (' + (probForBet*100).toFixed(0) + '%) — need at least 55%'
+        };
+    }
+
     const prices = marketData.history.map(h => h.price);
     const chop = detectChoppiness(prices);
     const exhaustion = detectMomentumExhaustion(prices, marketData.history);
@@ -1671,24 +1705,25 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     // Trading less often with higher edge >> trading often with thin edge.
     const factors = {
         hasMinEdge: edge >= minEdge,
-        hasConfidence: confidence >= 0.45,        // was 0.40 — need meaningful confidence
-        notChoppy: !chop.choppy || chop.adx > 18, // was 15
-        notExhausted: exhaustion.exhaustion < 0.5, // was 0.6
-        hasTime: minutesAhead >= 6,               // was 5 — need more time for edge
+        hasConfidence: confidence >= 0.45,
+        notChoppy: !chop.choppy || chop.adx > 18,
+        notExhausted: exhaustion.exhaustion < 0.5,
+        hasTime: minutesAhead >= 6,
         signalAgreement: prediction.ensembleConfidence?.level !== 'low',
+        hasGoodRR: probForBet < 0.63,
+        notCoinFlip: probForBet >= 0.55,
     };
 
-    // Score each factor — reduced weight on restrictive factors
     let score = 0;
     let maxScore = 0;
-    const weights = { hasMinEdge: 3, hasConfidence: 1, notChoppy: 1, notExhausted: 1, hasTime: 1, signalAgreement: 1 };
+    const weights = { hasMinEdge: 3, hasConfidence: 1, notChoppy: 1, notExhausted: 1, hasTime: 1, signalAgreement: 2, hasGoodRR: 2, notCoinFlip: 2 };
     for (const [key, weight] of Object.entries(weights)) {
         maxScore += weight;
         if (factors[key]) score += weight;
     }
 
     const quality = score / maxScore;
-    const shouldBet = quality >= 0.60; // was 0.55 — higher quality bar
+    const shouldBet = quality >= 0.70;
     const waitForBetter = !shouldBet && minutesAhead > 10;
 
     // Optimal entry timing: in choppy markets, wait for clearer signal
@@ -1786,7 +1821,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
 
         // TIER 3: LOCK — price is far on our side near settlement, nearly guaranteed
         // 85%+ probability, <5 min left, on right side, strong sigma distance
-        if (probForBet >= 0.85 && minutesLeft <= 5 && onRightSide && sigmaFromStrike >= 1.0 && !chop.choppy) {
+        if (probForBet >= 0.85 && minutesLeft <= 5 && onRightSide && sigmaFromStrike >= 1.5 && !chop.choppy) {
             betSize = Math.max(betSize, 3.0);
             convictionTier = 'LOCK';
             betSizeReason = 'MAX CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
@@ -1794,7 +1829,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         }
         // TIER 2: HIGH CONVICTION — strong probability, on right side, good edge
         // 75%+ probability, on right side or strong edge, not choppy
-        else if (probForBet >= 0.75 && edge >= 0.05 && !chop.choppy && (onRightSide || quality >= 0.70)) {
+        else if (probForBet >= 0.78 && edge >= 0.05 && !chop.choppy && onRightSide) {
             betSize = Math.max(betSize, 2.0);
             convictionTier = 'HIGH';
             betSizeReason = 'HIGH CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
@@ -1802,7 +1837,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         }
         // TIER 1: ELEVATED — above-average confidence
         // 65%+ probability, positive edge, quality setup
-        else if (probForBet >= 0.65 && edge >= 0.04 && quality >= 0.60) {
+        else if (probForBet >= 0.68 && edge >= 0.06 && quality >= 0.60) {
             betSize = Math.max(betSize, 1.5);
             convictionTier = 'ELEVATED';
             betSizeReason = 'ELEVATED CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
@@ -2844,6 +2879,17 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
         advice = 'Position at ' + (probForBet * 100).toFixed(0) + '% win probability. Normal fluctuation — hold position.';
     }
 
+    // ── CONFIDENCE DETERIORATION EXIT ──
+    // If model now favors the other side (prob < 42%) and we're in a 'hold' state,
+    // flag for potential exit. Does NOT override stronger signals (lost_cause, confident_flip, sell_now).
+    const updProbForBet = betIsUp ? (updPred.probability || 0.5) : (1 - (updPred.probability || 0.5));
+    if (level === 'hold' && updProbForBet < 0.42 && minutesRemaining > 3 && minutesRemaining < 12) {
+        level = 'consider_selling';
+        shortLabel = 'CONFIDENCE DROP';
+        urgency = Math.max(urgency, 40);
+        reasons.push('Confidence deteriorated to ' + (updProbForBet * 100).toFixed(0) + '% — model favors other side');
+    }
+
     urgency = Math.min(100, Math.max(0, urgency));
 
     return {
@@ -2929,10 +2975,10 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
 
     // Adaptive EMA alpha — more responsive so edges can develop
     // Was 0.15-0.40; increased to allow faster probability movement
-    const alpha = minutesAhead <= 1 ? 0.60
-                : minutesAhead <= 2 ? 0.50
-                : minutesAhead <= 5 ? 0.40
-                : 0.30;
+    const alpha = minutesAhead <= 1 ? 0.45
+                : minutesAhead <= 2 ? 0.35
+                : minutesAhead <= 5 ? 0.25
+                : 0.15;
     stabilityState.smoothedProbability = alpha * raw.probability + (1 - alpha) * stabilityState.smoothedProbability;
     const smoothedP = stabilityState.smoothedProbability;
 
@@ -2966,10 +3012,10 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
     // - With 5 min left: need ~2 vols
     // - With 2 min left: need ~1.5 vols
     // - With <1 min left: need ~0.8 vols (price is almost certainly settling here)
-    const flipThreshold = minutesAhead <= 1 ? 1.2
-                        : minutesAhead <= 2 ? 2.0
-                        : minutesAhead <= 5 ? 3.0
-                        : 4.0;
+    const flipThreshold = minutesAhead <= 1 ? 2.0
+                        : minutesAhead <= 2 ? 3.0
+                        : minutesAhead <= 5 ? 4.5
+                        : 6.0;
 
     // Also require the raw prediction model to agree (not just price position)
     const rawModelAgrees = rawIsUp === currentIsUp;
@@ -2979,7 +3025,7 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
     const canFlip = (stabilityState.flipCount || 0) < maxFlips;
 
     let didFlip = false;
-    if (directionConflict && distanceInVols >= flipThreshold && rawModelAgrees && canFlip) {
+    if (directionConflict && distanceInVols >= flipThreshold && rawModelAgrees && canFlip && stabilityState.consecutiveSameDirection <= 1) {
         console.log(`[prediction-engine] Direction flip: ${stabilityState.lockedDirection} → ${rawDir} ` +
             `(price ${current.toFixed(2)} vs strike ${strike.toFixed(2)}, ` +
             `${distanceInVols.toFixed(1)} vols away, ${minutesAhead.toFixed(1)} min left)`);
