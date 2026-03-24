@@ -1680,17 +1680,28 @@ async function onPeriodEnd(gradeResult) {
     const predictionCorrect = gradeResult && gradeResult.correct;
     let positionWon;
     let settlementSource = 'unknown';
+    let kalshiSettlementDebug = null; // Store Kalshi API response for UI debugging
 
     // 1. Try Kalshi settlement result (ground truth)
     try {
         const marketData = await trading.getMarket(currentPosition.ticker);
         const market = marketData?.market;
+        kalshiSettlementDebug = {
+            status: market?.status || 'no-market',
+            result: market?.result || null,
+            ticker: currentPosition.ticker,
+            yes_sub_title: market?.yes_sub_title || null,
+            no_sub_title: market?.no_sub_title || null,
+        };
         if (market && market.result) {
             positionWon = (market.result === currentPosition.side);
             settlementSource = 'kalshi';
             console.log(`[trade-executor] Kalshi settlement for ${currentPosition.ticker}: result=${market.result.toUpperCase()}, position ${currentPosition.side.toUpperCase()} → ${positionWon ? 'WON' : 'LOST'}`);
+        } else {
+            console.warn(`[trade-executor] Kalshi market ${currentPosition.ticker}: status=${market?.status}, result=${market?.result || 'undefined'} — no settlement result yet`);
         }
     } catch (e) {
+        kalshiSettlementDebug = { error: e.message, status: e.status || null, ticker: currentPosition.ticker };
         console.warn(`[trade-executor] Could not fetch Kalshi settlement for ${currentPosition.ticker}: ${e.message}`);
     }
 
@@ -1793,6 +1804,16 @@ async function onPeriodEnd(gradeResult) {
         flipped: currentPosition.flipped || false,
         originalSide: currentPosition.originalSide || null,
         badFlip,
+        settlementSource,
+        kalshiSettlement: kalshiSettlementDebug,
+        gradeResultDebug: gradeResult ? {
+            periodKey: gradeResult.periodKey,
+            correct: gradeResult.correct,
+            actualDirection: gradeResult.actualDirection,
+            settlementPrice: gradeResult.settlementPrice,
+            strikePrice: gradeResult.strikePrice,
+        } : null,
+        positionStrike: currentPosition.strike || null,
     });
 
     setThought('settled', `${positionWon ? 'WON' : 'LOST'}: ${pnl > 0 ? '+' : ''}$${(pnl / 100).toFixed(2)}${badFlip ? ' (BAD FLIP)' : ''}`, { pnlCents: pnl, positionWon, badFlip });

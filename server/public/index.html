@@ -1547,6 +1547,12 @@
                             html += '<span class="period-trade-info" style="color:#ff6b6b;font-size:9px;font-weight:600">\u26A0 Original ' + (t.originalSide || '').toUpperCase() + ' bet would have won</span>';
                         }
 
+                        // Settlement source indicator
+                        if (t.type === 'settle' && t.settlementSource) {
+                            const srcColor = t.settlementSource === 'kalshi' ? '#3fb950' : t.settlementSource.startsWith('gradeResult') ? '#d29922' : '#8b949e';
+                            html += '<span class="period-trade-info" style="color:' + srcColor + ';font-size:8px">via ' + t.settlementSource + '</span>';
+                        }
+
                         // P&L for settlements
                         if (t.pnlCents !== undefined) {
                             const pnlPos = t.pnlCents > 0;
@@ -1580,6 +1586,31 @@
                                 (pnlPos ? '+' : '') + '$' + (pnl / 100).toFixed(2) +
                             '</span>' +
                             '</div>';
+
+                        // Settlement debug info — shows Kalshi API response and settlement source
+                        const src = settlement.settlementSource || '';
+                        const ks = settlement.kalshiSettlement;
+                        const gr = settlement.gradeResultDebug;
+                        let debugParts = [];
+                        debugParts.push('Source: ' + (src || 'unknown'));
+                        if (ks) {
+                            if (ks.error) {
+                                debugParts.push('Kalshi API: ERROR ' + (ks.status || '') + ' — ' + ks.error);
+                            } else {
+                                debugParts.push('Kalshi: status=' + (ks.status || '?') + ', result=' + (ks.result || 'none'));
+                            }
+                        }
+                        if (gr) {
+                            debugParts.push('Grade: dir=' + (gr.actualDirection || '?') +
+                                ', price=$' + (gr.settlementPrice ? gr.settlementPrice.toFixed(2) : '?') +
+                                ' vs strike=$' + (gr.strikePrice ? gr.strikePrice.toFixed(2) : '?') +
+                                ', period=' + (gr.periodKey || '?'));
+                        }
+                        if (settlement.positionStrike) {
+                            debugParts.push('Position strike: $' + settlement.positionStrike.toFixed(2));
+                        }
+                        html += '<div style="font-size:8px;color:#6e7681;margin-top:4px;padding:3px 6px;background:rgba(255,255,255,0.03);border-radius:4px;word-break:break-all">' +
+                            debugParts.join(' | ') + '</div>';
                     }
 
                     html += '</div>';
