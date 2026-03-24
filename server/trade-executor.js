@@ -1267,7 +1267,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         const env = getEnvironment();
         paperBalances[env] = (paperBalances[env] || 0) + sellProceeds;
         console.log(`[trade-executor] PAPER SELL: ${sellContracts}x ${currentPosition.side.toUpperCase()} on ${currentPosition.ticker} @ ${sellPrice}c — reason: ${sellSignal.level} | Proceeds=$${(sellProceeds/100).toFixed(2)} | Loss=$${(sellLossCents/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
-        logTrade('sell', { ...tradeInfo, limitPrice: sellPrice });
+        logTrade('sell', { ...tradeInfo, limitPrice: sellPrice, sellProceeds, originalCost: originalCostCents });
         decisionLog.logSellDecision({ sellSignal, minutesRemaining, acted: true, reason: sellSignal.level, currentPrice, strike });
         dailyStats.tradeCount++;
         // Record for potential re-entry
@@ -1283,6 +1283,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             lossCents: sellLossCents,
         };
         currentPosition = null;
+        persistPosition(); // Clear position in DB so it's not restored as stale on restart
 
         // ── FLIP: immediately enter the opposite side (max 1 flip per cycle) ──
         // Size the flip to recover the loss from selling + a profit margin
@@ -1566,20 +1567,42 @@ function onPeriodEnd(gradeResult) {
             (t.type === 'buy' || t.type === 'dip_buy' || t.type === 'late_lock' || t.type === 're_entry'));
         const periodSells = tradeLog.filter(t => t.periodKey === gradeResult.periodKey && t.type === 'sell');
         if (periodBuys.length > 0) {
-            // Find the last buy set (after any sells = the flip position)
-            const lastSellIdx = periodSells.length > 0 ?
-                Math.max(...periodSells.map(s => tradeLog.indexOf(s))) : -1;
-            const activeBuys = lastSellIdx >= 0 ?
-                periodBuys.filter(b => tradeLog.indexOf(b) > lastSellIdx) : periodBuys;
-            const totalContracts = activeBuys.reduce((sum, b) => sum + (b.contracts || 0), 0);
-            const totalCost = activeBuys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
-            const flipLoss = activeBuys.find(b => b.flipLossCents)?.flipLossCents || 0;
-            if (positionWon) {
-                fallbackPnl = (totalContracts * 100) - totalCost - flipLoss;
+            // IMPORTANT: tradeLog is newest-first (unshift), so newer entries have LOWER indices.
+            // To find buys AFTER the last sell (flip buys), we need buys with LOWER index than sell.
+            // Use timestamps for clarity and correctness.
+            const lastSellTime = periodSells.length > 0 ?
+                Math.max(...periodSells.map(s => new Date(s.time).getTime())) : 0;
+            const activeBuys = lastSellTime > 0 ?
+                periodBuys.filter(b => new Date(b.time).getTime() > lastSellTime) : periodBuys;
+
+            if (activeBuys.length > 0) {
+                // There are buys after the sell (flip position) — compute P&L from the flip
+                const totalContracts = activeBuys.reduce((sum, b) => sum + (b.contracts || 0), 0);
+                const totalCost = activeBuys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
+                const flipLoss = activeBuys.find(b => b.flipLossCents)?.flipLossCents || 0;
+                if (positionWon) {
+                    fallbackPnl = (totalContracts * 100) - totalCost - flipLoss;
+                } else {
+                    fallbackPnl = -totalCost - flipLoss;
+                }
+                console.log(`[trade-executor] Computed fallback P&L from flip position: ${fallbackPnl}c (contracts=${totalContracts}, cost=${totalCost}, flipLoss=${flipLoss})`);
+            } else if (periodSells.length > 0) {
+                // Sold early, no flip — P&L is sell proceeds minus buy cost
+                const totalBuyCost = periodBuys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
+                const totalSellProceeds = periodSells.reduce((sum, s) => sum + (s.contracts || 0) * (s.limitPrice || 0), 0);
+                fallbackPnl = totalSellProceeds - totalBuyCost; // negative = loss from selling at lower price
+                console.log(`[trade-executor] Computed fallback P&L from early sell: ${fallbackPnl}c (bought=${totalBuyCost}c, sold=${totalSellProceeds}c)`);
             } else {
-                fallbackPnl = -totalCost - flipLoss;
+                // No sells — position expired/settled normally but was somehow cleared
+                const totalContracts = periodBuys.reduce((sum, b) => sum + (b.contracts || 0), 0);
+                const totalCost = periodBuys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
+                if (positionWon) {
+                    fallbackPnl = (totalContracts * 100) - totalCost;
+                } else {
+                    fallbackPnl = -totalCost;
+                }
+                console.log(`[trade-executor] Computed fallback P&L from position: ${fallbackPnl}c (contracts=${totalContracts}, cost=${totalCost})`);
             }
-            console.log(`[trade-executor] Computed fallback P&L from trade history: ${fallbackPnl}c (contracts=${totalContracts}, cost=${totalCost}, flipLoss=${flipLoss})`);
         }
         logTrade('settle', {
             ticker: ep.ticker,
