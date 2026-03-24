@@ -956,7 +956,7 @@ async function fetchAllData() {
                     console.log(`[server] Period transition ${currentPeriod.periodKey} → ${periodKey} | ` +
                         `predLog size: ${log.length} | lastGraded: ${lastGraded ? lastGraded.periodKey + ' correct=' + lastGraded.correct : 'NONE'}`);
                     if (lastGraded) {
-                        tradeExecutor.onPeriodEnd({
+                        await tradeExecutor.onPeriodEnd({
                             correct: lastGraded.correct,
                             periodKey: lastGraded.periodKey,
                             actualDirection: lastGraded.actualDirection,
@@ -983,7 +983,7 @@ async function fetchAllData() {
                             const correct = currentPeriod.originalPrediction ?
                                 (currentPeriod.originalPrediction.predictedPrice >= currentPeriod.periodStartPrice) === (state.brtiPrice >= currentPeriod.periodStartPrice)
                                 : false;
-                            tradeExecutor.onPeriodEnd({
+                            await tradeExecutor.onPeriodEnd({
                                 correct,
                                 periodKey: currentPeriod.periodKey,
                                 actualDirection,

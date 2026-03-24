@@ -143,7 +143,7 @@ function getCurrentPeriodKey() {
 // If the position is from a previous period, auto-settle it to prevent phantom positions.
 // This is critical for paper mode (no Kalshi API to sync with) and also catches
 // stale positions restored from DB after server restart.
-function validateCurrentPosition() {
+async function validateCurrentPosition() {
     if (!currentPosition) return;
     const currentPeriod = getCurrentPeriodKey();
     if (currentPosition.periodKey && currentPosition.periodKey !== currentPeriod) {
@@ -151,26 +151,38 @@ function validateCurrentPosition() {
         // Only clear if position is old enough (>2 min) to avoid race conditions at period boundaries
         if (positionAge > 120000) {
             console.log(`[trade-executor] Stale position detected: position period=${currentPosition.periodKey}, current period=${currentPeriod}, age=${Math.round(positionAge/1000)}s — auto-settling`);
-            // In paper mode, settle the position (assume loss conservatively)
+            // In paper mode, settle the position using Kalshi result or price-based grading
             if (config.paperMode) {
                 const contracts = currentPosition.totalContracts || currentPosition.contracts;
                 const cost = currentPosition.totalCostCents || (contracts * currentPosition.entryPrice);
-                // We don't know the result, but the position should have been settled by onPeriodEnd.
-                // If it wasn't (missed period end), assume loss.
-                dailyStats.losses++;
-                dailyStats.pnlCents -= cost;
+                // Try to determine actual outcome from Kalshi or price vs strike
+                let positionWon = false;
+                let settleNote = 'auto-settled stale phantom position (missed period end)';
+                try {
+                    const marketData = await trading.getMarket(currentPosition.ticker);
+                    const market = marketData?.market;
+                    if (market && market.result) {
+                        positionWon = (market.result === currentPosition.side);
+                        settleNote += ` — Kalshi result: ${market.result}`;
+                    }
+                } catch (e) {
+                    console.warn(`[trade-executor] Could not fetch Kalshi result for stale position: ${e.message}`);
+                }
+                const pnl = positionWon ? (contracts * 100) - cost : -cost;
+                if (positionWon) { dailyStats.wins++; } else { dailyStats.losses++; }
+                dailyStats.pnlCents += pnl;
                 const env = getEnvironment();
-                // Don't add back proceeds — assume worst case (total loss)
+                if (positionWon) { paperBalances[env] = (paperBalances[env] || 0) + (contracts * 100); }
                 logTrade('settle', {
                     ticker: currentPosition.ticker,
                     side: currentPosition.side,
                     contracts,
                     entryPrice: currentPosition.entryPrice,
-                    correct: false,
-                    pnlCents: -cost,
+                    correct: positionWon,
+                    pnlCents: pnl,
                     dailyPnlCents: dailyStats.pnlCents,
                     periodKey: currentPosition.periodKey,
-                    note: 'auto-settled stale phantom position (missed period end)',
+                    note: settleNote,
                 });
             }
             currentPosition = null;
@@ -730,7 +742,7 @@ async function capContractsByBalance(contracts, pricePerContract) {
 // ═══════════════════════════════════════════════════════════════
 
 async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
-    validateCurrentPosition(); // Clear stale positions from previous periods
+    await validateCurrentPosition(); // Clear stale positions from previous periods
     if (!prediction || !kalshiTicker || strike === null) return;
 
     const betQuality = prediction._betQuality;
@@ -792,28 +804,52 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         return;
     }
 
-    // Close stale position from a previous period — settle it instead of silently discarding
+    // Close stale position from a previous period — settle using Kalshi result or price-based
     if (currentPosition && currentPosition.periodKey !== periodKey) {
         console.log(`[trade-executor] Stale position from ${currentPosition.periodKey} — auto-settling before new entry`);
-        // We don't know the actual result, but the position should have been settled by onPeriodEnd.
-        // If it wasn't (race condition), settle as unknown/loss to be conservative.
         const staleContracts = currentPosition.totalContracts || currentPosition.contracts;
         const staleCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
         const staleEntry = staleContracts > 0 ? Math.round(staleCost / staleContracts) : currentPosition.entryPrice;
         if (staleContracts > 0 && staleCost > 0) {
-            const pnl = -staleCost; // assume loss (worst case)
-            dailyStats.losses++;
+            // Try Kalshi for actual result, then fall back to price-based
+            let positionWon = false;
+            let settleNote = 'auto-settled stale position (missed onPeriodEnd)';
+            try {
+                const marketData = await trading.getMarket(currentPosition.ticker);
+                const market = marketData?.market;
+                if (market && market.result) {
+                    positionWon = (market.result === currentPosition.side);
+                    settleNote += ` — Kalshi result: ${market.result}`;
+                } else if (currentPosition.strike) {
+                    // Use gradeResult or current price vs strike
+                    const settlePrice = gradeResult?.settlementPrice || null;
+                    if (settlePrice) {
+                        const priceAboveStrike = settlePrice >= currentPosition.strike;
+                        positionWon = (currentPosition.side === 'yes' && priceAboveStrike) ||
+                                      (currentPosition.side === 'no' && !priceAboveStrike);
+                        settleNote += ` — price-based: $${settlePrice.toFixed(2)} vs strike $${currentPosition.strike.toFixed(2)}`;
+                    }
+                }
+            } catch (e) {
+                console.warn(`[trade-executor] Could not fetch Kalshi result for stale position: ${e.message}`);
+            }
+            const pnl = positionWon ? (staleContracts * 100) - staleCost : -staleCost;
+            if (positionWon) { dailyStats.wins++; } else { dailyStats.losses++; }
             dailyStats.pnlCents += pnl;
+            if (config.paperMode && positionWon) {
+                const env = getEnvironment();
+                paperBalances[env] = (paperBalances[env] || 0) + (staleContracts * 100);
+            }
             logTrade('settle', {
                 ticker: currentPosition.ticker,
                 side: currentPosition.side,
                 contracts: staleContracts,
                 entryPrice: staleEntry,
-                correct: false,
+                correct: positionWon,
                 pnlCents: pnl,
                 dailyPnlCents: dailyStats.pnlCents,
                 periodKey: currentPosition.periodKey,
-                note: 'auto-settled stale position (missed onPeriodEnd)',
+                note: settleNote,
             });
         }
         currentPosition = null;
@@ -1086,6 +1122,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             entryTime: Date.now(),
             totalCostCents: costCents,
             totalContracts: cappedContracts,
+            strike,
         };
         enteredPeriods[periodKey] = { side, ticker: kalshiTicker, entryTime: Date.now() };
         tradeInfo.contracts = cappedContracts;
@@ -1162,6 +1199,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             entryTime: Date.now(),
             totalCostCents: filledContracts * limitPrice,
             totalContracts: filledContracts,
+            strike,
         };
         // Mark this period as entered to prevent duplicate entries
         enteredPeriods[periodKey] = { side, ticker: kalshiTicker, entryTime: Date.now() };
@@ -1177,7 +1215,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 
         // On 409 (conflict/insufficient funds), don't retry this period
         if (err.status === 409) {
-            currentPosition = { ticker: kalshiTicker, side, contracts: 0, entryPrice: 0, orderId: 'blocked-409', periodKey, entryTime: Date.now() };
+            currentPosition = { ticker: kalshiTicker, side, contracts: 0, entryPrice: 0, orderId: 'blocked-409', periodKey, entryTime: Date.now(), strike };
         }
     } finally {
         orderInFlight = false;
@@ -1189,7 +1227,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 // ═══════════════════════════════════════════════════════════════
 
 async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, strike, currentPrice) {
-    validateCurrentPosition(); // Clear stale positions from previous periods
+    await validateCurrentPosition(); // Clear stale positions from previous periods
     if (!currentPosition || !sellSignal) return;
 
     // ── BINARY OPTIONS: ALMOST NEVER SELL (except confident flips) ──
@@ -1328,7 +1366,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                             entryPrice: flipPrice, orderId: 'flip-paper-' + Date.now(),
                             periodKey: soldPeriodKey, entryTime: Date.now(),
                             totalCostCents: flipCost, totalContracts: flipContracts,
-                            flipped: true, originalSide: soldSide,
+                            flipped: true, originalSide: soldSide, strike,
                             flipLossCents: sellLossCents,
                         };
                         enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
@@ -1477,7 +1515,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
                                     entryPrice: avgPrice, orderId: flipOrder.order_id,
                                     periodKey: soldPeriodKey, entryTime: Date.now(),
                                     totalCostCents: flipCost, totalContracts: flipFills.filled,
-                                    flipped: true, originalSide: soldSide,
+                                    flipped: true, originalSide: soldSide, strike,
                                     flipLossCents: liveSellLossCents,
                                 };
                                 enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
@@ -1523,7 +1561,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 // Period end: called when prediction is graded
 // ═══════════════════════════════════════════════════════════════
 
-function onPeriodEnd(gradeResult) {
+async function onPeriodEnd(gradeResult) {
     // If currentPosition was cleared (e.g., by sync bug) but we know we entered this period,
     // still log a settlement so the frontend can show WIN/LOSS instead of PENDING
     // If currentPosition was cleared by sync but we saved the data, restore it for settlement
@@ -1635,34 +1673,65 @@ function onPeriodEnd(gradeResult) {
     console.log(`[trade-executor] onPeriodEnd: settling position ${currentPosition.periodKey}, gradeResult:`, JSON.stringify(gradeResult));
 
     // Position auto-settles on Kalshi. Track the P&L.
-    // Win/loss is determined by POSITION SIDE vs ACTUAL DIRECTION.
-    // IMPORTANT: Use settlement price vs strike as the source of truth when available,
-    // since gradeResult.actualDirection can be wrong if graded using a BRTI price
-    // from after the period ended (race condition at period boundary).
+    // PRIORITY ORDER for determining win/loss:
+    // 1. Kalshi market.result (ground truth from exchange)
+    // 2. gradeResult settlement price vs strike (BRTI approximation, only if period key matches)
+    // 3. Position's own strike vs current price (last resort)
     const predictionCorrect = gradeResult && gradeResult.correct;
     let positionWon;
-    if (gradeResult && gradeResult.settlementPrice && gradeResult.strikePrice) {
-        // Use the actual settlement price vs strike — most reliable
-        const priceAboveStrike = gradeResult.settlementPrice >= gradeResult.strikePrice;
-        positionWon = (currentPosition.side === 'yes' && priceAboveStrike) ||
-                      (currentPosition.side === 'no' && !priceAboveStrike);
-        // Check if gradeResult.actualDirection disagrees — log if it does
-        const derivedDirection = priceAboveStrike ? 'up' : 'down';
-        if (gradeResult.actualDirection && gradeResult.actualDirection !== derivedDirection) {
-            console.warn(`[trade-executor] GRADING FIX: gradeResult said ${gradeResult.actualDirection} but settlement price ${gradeResult.settlementPrice} vs strike ${gradeResult.strikePrice} says ${derivedDirection} — using price-based result`);
+    let settlementSource = 'unknown';
+
+    // 1. Try Kalshi settlement result (ground truth)
+    try {
+        const marketData = await trading.getMarket(currentPosition.ticker);
+        const market = marketData?.market;
+        if (market && market.result) {
+            positionWon = (market.result === currentPosition.side);
+            settlementSource = 'kalshi';
+            console.log(`[trade-executor] Kalshi settlement for ${currentPosition.ticker}: result=${market.result.toUpperCase()}, position ${currentPosition.side.toUpperCase()} → ${positionWon ? 'WON' : 'LOST'}`);
         }
-    } else if (gradeResult && gradeResult.actualDirection) {
-        // Fallback to graded direction
-        positionWon = (currentPosition.side === 'yes' && gradeResult.actualDirection === 'up') ||
-                      (currentPosition.side === 'no' && gradeResult.actualDirection === 'down');
-    } else {
-        // Last resort fallback
-        positionWon = predictionCorrect;
+    } catch (e) {
+        console.warn(`[trade-executor] Could not fetch Kalshi settlement for ${currentPosition.ticker}: ${e.message}`);
     }
+
+    // 2. Fallback: gradeResult (only if period key matches position)
+    if (positionWon === undefined && gradeResult) {
+        // CRITICAL: Validate period key matches — gradeResult from wrong period = wrong outcome
+        if (gradeResult.periodKey && currentPosition.periodKey &&
+            gradeResult.periodKey !== currentPosition.periodKey) {
+            console.warn(`[trade-executor] PERIOD MISMATCH: gradeResult is for ${gradeResult.periodKey} but position is from ${currentPosition.periodKey} — skipping gradeResult`);
+        } else if (gradeResult.settlementPrice && gradeResult.strikePrice) {
+            const priceAboveStrike = gradeResult.settlementPrice >= gradeResult.strikePrice;
+            positionWon = (currentPosition.side === 'yes' && priceAboveStrike) ||
+                          (currentPosition.side === 'no' && !priceAboveStrike);
+            settlementSource = 'gradeResult-price';
+        } else if (gradeResult.actualDirection) {
+            positionWon = (currentPosition.side === 'yes' && gradeResult.actualDirection === 'up') ||
+                          (currentPosition.side === 'no' && gradeResult.actualDirection === 'down');
+            settlementSource = 'gradeResult-direction';
+        }
+    }
+
+    // 3. Last resort: position's own strike vs gradeResult settlement price or prediction
+    if (positionWon === undefined) {
+        const posStrike = currentPosition.strike;
+        const settlePrice = gradeResult?.settlementPrice;
+        if (posStrike && settlePrice) {
+            const priceAboveStrike = settlePrice >= posStrike;
+            positionWon = (currentPosition.side === 'yes' && priceAboveStrike) ||
+                          (currentPosition.side === 'no' && !priceAboveStrike);
+            settlementSource = 'position-strike';
+        } else {
+            positionWon = !!predictionCorrect;
+            settlementSource = 'prediction-fallback';
+        }
+    }
+
+    console.log(`[trade-executor] Settlement determined via ${settlementSource}: ${positionWon ? 'WON' : 'LOST'} (side=${currentPosition.side}, predictionCorrect=${predictionCorrect})`);
     if (positionWon !== predictionCorrect) {
         console.warn(`[trade-executor] Position side (${currentPosition.side}) diverged from prediction! ` +
             `Prediction ${predictionCorrect ? 'correct' : 'wrong'} but position ${positionWon ? 'WON' : 'LOST'} ` +
-            `(actual direction: ${gradeResult?.actualDirection})`);
+            `(source: ${settlementSource}, actual direction: ${gradeResult?.actualDirection})`);
     }
 
     // Use totalContracts/totalCostCents to include dip buys, late locks, re-entries
@@ -1998,7 +2067,7 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
             // Respect fill failure cooldowns
             const addCheck = await canTrade(periodKey);
             if (!addCheck.ok) return;
-            return await executeLockEntry(lockSide, addContracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock_add');
+            return await executeLockEntry(lockSide, addContracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock_add', strike);
         } else {
             // On the wrong side?! This shouldn't happen if sell signals work, but don't fight it
             return;
@@ -2014,10 +2083,10 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     // Cap fresh late-lock at maxPositionContracts (50) instead of conviction max (150).
     // Data shows huge late-lock entries lead to outsized losses when sigma estimate is wrong.
     const contracts = config.maxPositionContracts;
-    await executeLockEntry(lockSide, contracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock');
+    await executeLockEntry(lockSide, contracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock', strike);
 }
 
-async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, sigmaDistance, profitPerContract, strategy) {
+async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, sigmaDistance, profitPerContract, strategy, strike) {
     const direction = side === 'yes' ? 'UP' : 'DOWN';
     const tradeInfo = {
         ticker,
@@ -2056,6 +2125,7 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
                 entryTime: Date.now(),
                 totalCostCents: costCents,
                 totalContracts: cappedContracts,
+                strike,
             };
             enteredPeriods[periodKey] = { side, ticker, entryTime: Date.now() };
         }
@@ -2121,6 +2191,7 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
                 periodKey,
                 entryTime: Date.now(),
                 totalCostCents: filledContracts * limitPrice,
+                strike,
                 totalContracts: filledContracts,
             };
             enteredPeriods[periodKey] = { side, ticker, entryTime: Date.now() };
@@ -2220,6 +2291,7 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
             entryTime: Date.now(),
             totalCostCents: costCents,
             totalContracts: cappedContracts,
+            strike,
         };
         tradeInfo.contracts = cappedContracts;
         logTrade('re_entry', tradeInfo);
@@ -2275,6 +2347,7 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
             entryTime: Date.now(),
             totalCostCents: filledContracts * limitPrice,
             totalContracts: filledContracts,
+            strike,
         };
         logTrade('re_entry', { ...tradeInfo, orderId: order.order_id, filledContracts });
         dailyStats.tradeCount++;
@@ -2509,7 +2582,7 @@ async function syncPositionWithKalshi() {
 function getStatus() {
     checkDayRollover().catch(e => console.error('[db] Day rollover error:', e.message));
     // Validate position is still for current period (prevents phantom positions)
-    validateCurrentPosition();
+    validateCurrentPosition().catch(e => console.error('[trade-executor] Position validation error:', e.message));
     // Trigger async balance refresh + position sync + balance snapshot (non-blocking)
     if (!config.paperMode) {
         refreshBalance();
@@ -2738,7 +2811,7 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
             currentPosition = {
                 ticker: kalshiTicker, side, contracts: cappedContracts, entryPrice: limitPrice,
                 orderId: 'force-paper-' + Date.now(), periodKey, entryTime: Date.now(),
-                totalCostCents: costCents, totalContracts: cappedContracts,
+                totalCostCents: costCents, totalContracts: cappedContracts, strike,
             };
         }
         enteredPeriods[periodKey] = enteredPeriods[periodKey] || { side, ticker: kalshiTicker, entryTime: Date.now() };
@@ -2827,7 +2900,7 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
                 currentPosition = {
                     ticker: kalshiTicker, side, contracts: filledContracts, entryPrice: limitPrice,
                     orderId: order.order_id, periodKey, entryTime: Date.now(),
-                    totalCostCents: filledContracts * limitPrice, totalContracts: filledContracts,
+                    totalCostCents: filledContracts * limitPrice, totalContracts: filledContracts, strike,
                 };
             }
             enteredPeriods[periodKey] = enteredPeriods[periodKey] || { side, ticker: kalshiTicker, entryTime: Date.now() };
