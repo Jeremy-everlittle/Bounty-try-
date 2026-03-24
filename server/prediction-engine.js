@@ -30,6 +30,13 @@ const microState = {
     lambdaHistory: [],  // [{timestamp, priceChange, signedVolume}]
 };
 
+// ── Orderbook Depth Momentum state (persists across ticks) ──
+let _previousOBImbalance = null;
+let _previousOBTimestamp = 0;
+
+// ── Funding Rate Volatility history (persists across ticks) ──
+const _fundingRateHistory = [];
+
 // Anti-flip-flop state for updated predictions (persists within a period)
 const stabilityState = {
     smoothedProbability: null,
@@ -997,18 +1004,36 @@ function computeEthLeadLag(btcPrices, ethPriceHistory) {
     const ethMom = (ethPriceHistory[n-1] - ethPriceHistory[n-3]) / ethPriceHistory[n-3];
     const bn = btcPrices.length;
     const btcMom = (btcPrices[bn-1] - btcPrices[bn-3]) / btcPrices[bn-3];
-    // If both moving same direction → confirmation → small boost to BTC direction
-    // If ETH diverging from BTC → BTC move may fade → dampen signal
+    // Compute divergence magnitude instead of binary check
+    // divergenceScore near 0 = strong agreement; near ±1 = strong divergence
+    const divergenceScore = (btcMom - ethMom) / (Math.abs(btcMom) + Math.abs(ethMom) + 1e-6);
+    const absDivergence = Math.abs(divergenceScore);
+
+    // If both moving same direction → confirmation → boost to BTC direction
+    // Magnitude-based: stronger agreement = stronger confirmation
     const sameDirection = Math.sign(ethMom) === Math.sign(btcMom) && Math.sign(btcMom) !== 0;
     let signal = 0;
-    if (sameDirection) {
-        // ETH confirms BTC direction — small boost in BTC's direction
-        signal = Math.sign(btcMom) * 0.08;
+    let meanReversionBoost = 0;
+    let confidenceBoost = 0;
+
+    if (absDivergence > 0.6) {
+        // Strong divergence: BTC and ETH moving very differently
+        // BTC move may be fading → boost mean reversion expectation
+        signal = -Math.sign(btcMom) * 0.05 * (absDivergence / 0.6);
+        meanReversionBoost = 0.08;
+    } else if (absDivergence < 0.2 && sameDirection) {
+        // Strong agreement: both assets moving together with conviction
+        signal = Math.sign(btcMom) * 0.08 * (1 - absDivergence / 0.2);
+        confidenceBoost = 0.03; // boost confidence in direction
+    } else if (sameDirection) {
+        // Moderate agreement
+        signal = Math.sign(btcMom) * 0.06;
     } else if (Math.abs(ethMom) > 0.001 && Math.abs(btcMom) > 0.001) {
-        // Active divergence — BTC move may be fading, slight contrarian
-        signal = -Math.sign(btcMom) * 0.05;
+        // Moderate divergence
+        signal = -Math.sign(btcMom) * 0.04;
+        meanReversionBoost = 0.03;
     }
-    return { signal, ethMom, btcMom };
+    return { signal, ethMom, btcMom, divergenceScore, meanReversionBoost, confidenceBoost };
 }
 
 function computeOIVolSignal(openInterestHistory) {
@@ -1850,6 +1875,139 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// NEW SIGNAL HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+// ── 1. Hourly Directional Seasonality ──
+// Groups past graded predictions by UTC hour, computes per-hour win rate
+// for UP vs DOWN to derive a directional bias.
+function computeHourlyDirectionalBias(hour, predictionLog) {
+    if (!predictionLog || predictionLog.length === 0) return 0;
+    const graded = predictionLog.filter(p => p.actualDirection !== null && p.timestamp);
+    const hourBucket = [];
+    for (const p of graded) {
+        const pHour = new Date(p.timestamp).getUTCHours();
+        if (pHour === hour) hourBucket.push(p);
+    }
+    if (hourBucket.length < 10) return 0; // need minimum 10 samples
+    let upCorrect = 0, upTotal = 0, downCorrect = 0, downTotal = 0;
+    for (const p of hourBucket) {
+        if (p.predictedDirection === 'up') {
+            upTotal++;
+            if (p.correct) upCorrect++;
+        } else {
+            downTotal++;
+            if (p.correct) downCorrect++;
+        }
+    }
+    const upWinRate = upTotal >= 3 ? upCorrect / upTotal : 0.5;
+    const downWinRate = downTotal >= 3 ? downCorrect / downTotal : 0.5;
+    // Positive = bullish hour (UP predictions win more), negative = bearish hour
+    const bias = (upWinRate - downWinRate) * 0.15; // scaled to small effect
+    return Math.max(-0.10, Math.min(0.10, bias));
+}
+
+// ── 5. Orderbook Depth Momentum ──
+// Compares current orderbook imbalance to previous cycle to detect
+// rate of change in depth — rapidly improving depth signals confidence.
+function computeOrderbookDepthMomentum(currentOB, previousOB) {
+    if (!currentOB || !currentOB.bids || !currentOB.asks) {
+        return { signal: 0, depthDelta: 0 };
+    }
+    const levels = Math.min(currentOB.bids.length, currentOB.asks.length, 10);
+    if (levels < 3) return { signal: 0, depthDelta: 0 };
+
+    let bidVol = 0, askVol = 0;
+    for (let i = 0; i < levels; i++) {
+        bidVol += parseFloat(currentOB.bids[i][1]);
+        askVol += parseFloat(currentOB.asks[i][1]);
+    }
+    const total = bidVol + askVol;
+    const currentImbalance = total > 0 ? (bidVol - askVol) / total : 0;
+
+    // Store for next cycle comparison
+    const prevImb = previousOB;
+    _previousOBImbalance = currentImbalance;
+    _previousOBTimestamp = Date.now();
+
+    if (prevImb === null) return { signal: 0, depthDelta: 0 };
+
+    const depthDelta = currentImbalance - prevImb;
+    // Rapid improvement on bid side → bullish; on ask side → bearish
+    // Scale: a 0.10 change in imbalance ratio per cycle is significant
+    const signal = Math.max(-0.20, Math.min(0.20, depthDelta * 1.5));
+    return { signal, depthDelta };
+}
+
+// ── 6. Day-of-Week Pattern ──
+// Subtle bias based on day-of-week patterns:
+// Weekend: reduce confidence; Monday: slight bearish; Friday: reduce sizing
+function getDayOfWeekBias() {
+    const now = new Date();
+    const day = now.getUTCDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+    const hour = now.getUTCHours();
+    switch (day) {
+        case 0: // Sunday — lower liquidity
+            return { bias: 0, confidenceMult: 0.98 };
+        case 1: // Monday — slight bearish bias (historical pattern)
+            return { bias: -0.02, confidenceMult: 1.0 };
+        case 5: // Friday — reduce near US close (20-22 UTC)
+            if (hour >= 20 && hour <= 22) {
+                return { bias: 0, confidenceMult: 0.98 };
+            }
+            return { bias: 0, confidenceMult: 1.0 };
+        case 6: // Saturday — lower liquidity
+            return { bias: 0, confidenceMult: 0.98 };
+        default:
+            return { bias: 0, confidenceMult: 1.0 };
+    }
+}
+
+// ── 7. Funding Rate Volatility / Stress ──
+// Tracks funding rate over time, detects derivatives stress from high variance
+// and extreme positioning.
+function computeFundingRateStress(fundingRate, history) {
+    if (fundingRate === null || fundingRate === undefined) {
+        return { stress: 0, signal: 0, extremePositioning: 'none' };
+    }
+    const fr = typeof fundingRate === 'number' ? fundingRate : (fundingRate.settledRate || 0);
+
+    // Track in module-level history
+    _fundingRateHistory.push(fr);
+    while (_fundingRateHistory.length > 10) _fundingRateHistory.shift();
+
+    let stress = 0;
+    let signal = 0;
+    let extremePositioning = 'none';
+
+    // Compute std dev of funding rate history
+    if (_fundingRateHistory.length >= 5) {
+        const mean = _fundingRateHistory.reduce((a, b) => a + b, 0) / _fundingRateHistory.length;
+        const variance = _fundingRateHistory.reduce((s, v) => s + (v - mean) ** 2, 0) / _fundingRateHistory.length;
+        const stdDev = Math.sqrt(variance);
+        // Derivatives stress: high funding rate volatility
+        if (stdDev > 0.0005) {
+            stress = Math.min(1.0, (stdDev - 0.0005) / 0.001);
+        }
+    }
+
+    // Extreme positive funding (>0.01% = 0.0001) → overleveraged longs → bearish
+    if (fr > 0.0001) {
+        const excess = fr - 0.0001;
+        signal = -Math.min(0.15, excess * 300);
+        extremePositioning = 'overleveraged_longs';
+    }
+    // Extreme negative funding (<-0.01% = -0.0001) → overleveraged shorts → bullish
+    else if (fr < -0.0001) {
+        const excess = Math.abs(fr) - 0.0001;
+        signal = Math.min(0.15, excess * 300);
+        extremePositioning = 'overleveraged_shorts';
+    }
+
+    return { stress, signal, extremePositioning };
+}
+
+// ═══════════════════════════════════════════════════════════════
 // MAIN PREDICTION FUNCTION
 // ═══════════════════════════════════════════════════════════════
 
@@ -1897,6 +2055,10 @@ function predictPrice(marketData, minutesAhead, strike) {
     if (jumpInfo.jumpDetected) {
         perMinuteVol *= 1.0 + jumpInfo.jumpRatio * 0.3; // jumps predict slightly elevated future vol
     }
+    // Jump-filtered signal dampening: jumps often exhaust immediately
+    // When a jump is detected, reduce momentum weight and boost mean reversion
+    const jumpMomentumDampen = jumpInfo.jumpDetected ? 0.60 : 1.0; // reduce momentum by 40%
+    const jumpMeanRevBoost = jumpInfo.jumpDetected ? 0.05 : 0; // slight mean reversion boost
 
     const { remainingVol: rawRemainingVol, H } = computeAdjustedRemainingVol(perMinuteVol, minutesAhead, prices);
     const todMult = getIntradayVolMultiplier();
@@ -2052,6 +2214,38 @@ function predictPrice(marketData, minutesAhead, strike) {
         // Vol adjustment: active liquidation cascade = higher vol
         if (liq.totalLiqVol > 500000) liqVolAdjust = 1.15; // >$500K
         if (liq.totalLiqVol > 2000000) liqVolAdjust = 1.30; // >$2M
+    }
+
+    // ── NEW SIGNAL: Hourly Directional Seasonality ──
+    const predLog = store.getPredictionLog();
+    const hourlyBias = computeHourlyDirectionalBias(utcHour, predLog);
+
+    // ── NEW SIGNAL: Orderbook Depth Momentum ──
+    const obDepthMom = computeOrderbookDepthMomentum(orderBook, _previousOBImbalance);
+
+    // ── NEW SIGNAL: Day-of-Week Pattern ──
+    const dowBias = getDayOfWeekBias();
+
+    // ── NEW SIGNAL: Funding Rate Volatility / Stress ──
+    const fundingStress = computeFundingRateStress(marketData.fundingRate, _fundingRateHistory);
+
+    // ── ENHANCED: Liquidation Size Clustering ──
+    // Analyze large vs small liquidation ratio for momentum dampening/boosting
+    let liqMomentumAdj = 0;
+    if (marketData.liquidations && marketData.liquidations.totalLiqVol > 0) {
+        const liq = marketData.liquidations;
+        // Use volume imbalance as proxy for large/small ratio when detailed data unavailable
+        // totalLiqVol > $100K suggests large liquidations; scale ratio by total volume
+        const largeLiqProxy = liq.totalLiqVol > 100000 ? Math.min(liq.totalLiqVol / 100000, 5) : 0;
+        const smallLiqProxy = liq.totalLiqVol < 10000 ? 1 : Math.max(1, 10000 / (liq.totalLiqVol + 1));
+        const liqSizeRatio = smallLiqProxy > 0 ? largeLiqProxy / smallLiqProxy : largeLiqProxy;
+        if (liqSizeRatio > 3) {
+            // Large/small ratio > 3:1 → institutional liquidations → reversal likely
+            liqMomentumAdj = -0.3; // dampen momentum
+        } else if (liqSizeRatio < 0.5) {
+            // Large/small ratio < 0.5:1 → retail panic → continuation likely
+            liqMomentumAdj = 0.1; // boost momentum
+        }
     }
 
     const microVolAdjust = spreadVolAdjust * vpinVolAdjust * lambdaVolAdjust * oiSignal.volMultiplier * liqVolAdjust;

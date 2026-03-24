@@ -365,6 +365,135 @@ async function init() {
             value JSONB NOT NULL,
             updated_at TIMESTAMPTZ DEFAULT NOW()
         );
+
+        -- ═══════════════════════════════════════════════════════════
+        -- SELL SIGNALS — Tracked sell/exit signals with context
+        -- ═══════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS sell_signals (
+            id SERIAL PRIMARY KEY,
+            period_key TEXT NOT NULL,
+            ticker TEXT,
+            level TEXT,
+            urgency INTEGER,
+            advice TEXT,
+            bet_direction TEXT,
+            on_wrong_side BOOLEAN,
+            current_price NUMERIC,
+            strike NUMERIC,
+            exhaustion NUMERIC,
+            choppiness NUMERIC,
+            prob_velocity NUMERIC,
+            peak_prob NUMERIC,
+            distance_pct NUMERIC,
+            sigma_distance NUMERIC,
+            acted BOOLEAN,
+            action_type TEXT,
+            was_good_signal BOOLEAN,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            settled_at TIMESTAMPTZ
+        );
+        CREATE INDEX IF NOT EXISTS idx_sell_sig_period ON sell_signals(period_key);
+        CREATE INDEX IF NOT EXISTS idx_sell_sig_created ON sell_signals(created_at);
+
+        -- ═══════════════════════════════════════════════════════════
+        -- FEATURE SNAPSHOTS — Full feature vector at prediction time
+        -- For feature importance analysis and ML training
+        -- ═══════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS feature_snapshots (
+            id SERIAL PRIMARY KEY,
+            period_key TEXT NOT NULL,
+            snapshot_type TEXT,
+            vol_regime TEXT,
+            vol_value NUMERIC,
+            trend_regime TEXT,
+            trend_value NUMERIC,
+            momentum_score NUMERIC,
+            order_flow_imbalance NUMERIC,
+            exhaustion_score NUMERIC,
+            time_bucket INTEGER,
+            distance_from_strike NUMERIC,
+            bayesian_prob NUMERIC,
+            ml_prob NUMERIC,
+            calibrated_prob NUMERIC,
+            ensemble_prob NUMERIC,
+            feature_vector JSONB,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_feat_snap_period ON feature_snapshots(period_key);
+        CREATE INDEX IF NOT EXISTS idx_feat_snap_created ON feature_snapshots(created_at);
+
+        -- ═══════════════════════════════════════════════════════════
+        -- ORDER EXECUTIONS — Detailed fill data for slippage analysis
+        -- ═══════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS order_executions (
+            id SERIAL PRIMARY KEY,
+            period_key TEXT NOT NULL,
+            trade_id INTEGER,
+            order_timestamp TIMESTAMPTZ,
+            our_price_limit INTEGER,
+            market_best_ask INTEGER,
+            slippage_cents INTEGER,
+            side TEXT,
+            contracts INTEGER,
+            filled_contracts INTEGER,
+            filled_price INTEGER,
+            fill_time_ms BIGINT,
+            partial BOOLEAN,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_order_exec_period ON order_executions(period_key);
+        CREATE INDEX IF NOT EXISTS idx_order_exec_created ON order_executions(created_at);
+
+        -- ═══════════════════════════════════════════════════════════
+        -- SESSION STATE — Risk management state per trading session
+        -- ═══════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS session_state (
+            id SERIAL PRIMARY KEY,
+            session_date TEXT,
+            consecutive_wins INTEGER DEFAULT 0,
+            consecutive_losses INTEGER DEFAULT 0,
+            drawdown NUMERIC DEFAULT 0,
+            cooling_off BOOLEAN DEFAULT false,
+            edge_decay BOOLEAN DEFAULT false,
+            risk_multiplier NUMERIC DEFAULT 1.0,
+            total_trades INTEGER DEFAULT 0,
+            total_pnl_cents INTEGER DEFAULT 0,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_state_date ON session_state(session_date);
+
+        -- ═══════════════════════════════════════════════════════════
+        -- LEARNING AUDIT — Track probability adjustments through pipeline
+        -- ═══════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS learning_audit (
+            id SERIAL PRIMARY KEY,
+            period_key TEXT NOT NULL,
+            original_prob NUMERIC,
+            raw_prob NUMERIC,
+            calibrated_prob NUMERIC,
+            bayesian_delta NUMERIC,
+            ml_delta NUMERIC,
+            error_correction_delta NUMERIC,
+            final_prob NUMERIC,
+            actual_direction TEXT,
+            was_correct BOOLEAN,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_learn_audit_period ON learning_audit(period_key);
+        CREATE INDEX IF NOT EXISTS idx_learn_audit_created ON learning_audit(created_at);
+
+        -- ═══════════════════════════════════════════════════════════
+        -- EXTERNAL SIGNALS — External data feeds (funding, sentiment, etc.)
+        -- ═══════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS external_signals (
+            id SERIAL PRIMARY KEY,
+            signal_type TEXT NOT NULL,
+            signal_value NUMERIC,
+            signal_data JSONB,
+            fetched_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_ext_sig_type ON external_signals(signal_type);
+        CREATE INDEX IF NOT EXISTS idx_ext_sig_fetched ON external_signals(fetched_at);
     `);
 
     ready = true;
@@ -1292,6 +1421,321 @@ async function loadStoreState(key) {
     }
 }
 
+// ── Sell Signals ──────────────────────────────────────────────
+
+async function saveSellSignal(data) {
+    if (!ready) return;
+    try {
+        await pool.query(`
+            INSERT INTO sell_signals (
+                period_key, ticker, level, urgency, advice, bet_direction,
+                on_wrong_side, current_price, strike, exhaustion, choppiness,
+                prob_velocity, peak_prob, distance_pct, sigma_distance,
+                acted, action_type, was_good_signal, settled_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+        `, [
+            data.periodKey,
+            data.ticker || null,
+            data.level || null,
+            data.urgency || null,
+            data.advice || null,
+            data.betDirection || null,
+            data.onWrongSide != null ? data.onWrongSide : null,
+            data.currentPrice || null,
+            data.strike || null,
+            data.exhaustion || null,
+            data.choppiness || null,
+            data.probVelocity || null,
+            data.peakProb || null,
+            data.distancePct || null,
+            data.sigmaDistance || null,
+            data.acted != null ? data.acted : null,
+            data.actionType || null,
+            data.wasGoodSignal != null ? data.wasGoodSignal : null,
+            data.settledAt || null,
+        ]);
+    } catch (e) {
+        console.error('[db] Failed to save sell signal:', e.message);
+    }
+}
+
+// ── Feature Snapshots ─────────────────────────────────────────
+
+async function saveFeatureSnapshot(data) {
+    if (!ready) return;
+    try {
+        await pool.query(`
+            INSERT INTO feature_snapshots (
+                period_key, snapshot_type, vol_regime, vol_value, trend_regime,
+                trend_value, momentum_score, order_flow_imbalance, exhaustion_score,
+                time_bucket, distance_from_strike, bayesian_prob, ml_prob,
+                calibrated_prob, ensemble_prob, feature_vector
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        `, [
+            data.periodKey,
+            data.snapshotType || null,
+            data.volRegime || null,
+            data.volValue || null,
+            data.trendRegime || null,
+            data.trendValue || null,
+            data.momentumScore || null,
+            data.orderFlowImbalance || null,
+            data.exhaustionScore || null,
+            data.timeBucket || null,
+            data.distanceFromStrike || null,
+            data.bayesianProb || null,
+            data.mlProb || null,
+            data.calibratedProb || null,
+            data.ensembleProb || null,
+            data.featureVector ? JSON.stringify(data.featureVector) : null,
+        ]);
+    } catch (e) {
+        console.error('[db] Failed to save feature snapshot:', e.message);
+    }
+}
+
+// ── Order Executions ──────────────────────────────────────────
+
+async function saveOrderExecution(data) {
+    if (!ready) return;
+    try {
+        await pool.query(`
+            INSERT INTO order_executions (
+                period_key, trade_id, order_timestamp, our_price_limit,
+                market_best_ask, slippage_cents, side, contracts,
+                filled_contracts, filled_price, fill_time_ms, partial
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        `, [
+            data.periodKey,
+            data.tradeId || null,
+            data.orderTimestamp || null,
+            data.ourPriceLimit || null,
+            data.marketBestAsk || null,
+            data.slippageCents || null,
+            data.side || null,
+            data.contracts || null,
+            data.filledContracts || null,
+            data.filledPrice || null,
+            data.fillTimeMs || null,
+            data.partial != null ? data.partial : null,
+        ]);
+    } catch (e) {
+        console.error('[db] Failed to save order execution:', e.message);
+    }
+}
+
+// ── Session State ─────────────────────────────────────────────
+
+async function saveSessionState(data) {
+    if (!ready) return;
+    try {
+        await pool.query(`
+            INSERT INTO session_state (
+                session_date, consecutive_wins, consecutive_losses, drawdown,
+                cooling_off, edge_decay, risk_multiplier, total_trades, total_pnl_cents
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ON CONFLICT (id) DO UPDATE SET
+                consecutive_wins = $2,
+                consecutive_losses = $3,
+                drawdown = $4,
+                cooling_off = $5,
+                edge_decay = $6,
+                risk_multiplier = $7,
+                total_trades = $8,
+                total_pnl_cents = $9
+        `, [
+            data.sessionDate,
+            data.consecutiveWins || 0,
+            data.consecutiveLosses || 0,
+            data.drawdown || 0,
+            data.coolingOff != null ? data.coolingOff : false,
+            data.edgeDecay != null ? data.edgeDecay : false,
+            data.riskMultiplier || 1.0,
+            data.totalTrades || 0,
+            data.totalPnlCents || 0,
+        ]);
+    } catch (e) {
+        console.error('[db] Failed to save session state:', e.message);
+    }
+}
+
+async function loadSessionState(date) {
+    if (!ready) return null;
+    try {
+        const { rows } = await pool.query(
+            'SELECT * FROM session_state WHERE session_date = $1 ORDER BY created_at DESC LIMIT 1',
+            [date]
+        );
+        if (rows.length === 0) return null;
+        const row = rows[0];
+        return {
+            sessionDate: row.session_date,
+            consecutiveWins: row.consecutive_wins,
+            consecutiveLosses: row.consecutive_losses,
+            drawdown: parseFloat(row.drawdown),
+            coolingOff: row.cooling_off,
+            edgeDecay: row.edge_decay,
+            riskMultiplier: parseFloat(row.risk_multiplier),
+            totalTrades: row.total_trades,
+            totalPnlCents: row.total_pnl_cents,
+        };
+    } catch (e) {
+        console.error('[db] Failed to load session state:', e.message);
+        return null;
+    }
+}
+
+// ── Learning Audit ────────────────────────────────────────────
+
+async function saveLearningAudit(data) {
+    if (!ready) return;
+    try {
+        await pool.query(`
+            INSERT INTO learning_audit (
+                period_key, original_prob, raw_prob, calibrated_prob,
+                bayesian_delta, ml_delta, error_correction_delta,
+                final_prob, actual_direction, was_correct
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        `, [
+            data.periodKey,
+            data.originalProb || null,
+            data.rawProb || null,
+            data.calibratedProb || null,
+            data.bayesianDelta || null,
+            data.mlDelta || null,
+            data.errorCorrectionDelta || null,
+            data.finalProb || null,
+            data.actualDirection || null,
+            data.wasCorrect != null ? data.wasCorrect : null,
+        ]);
+    } catch (e) {
+        console.error('[db] Failed to save learning audit:', e.message);
+    }
+}
+
+// ── External Signals ──────────────────────────────────────────
+
+async function saveExternalSignal(type, value, data) {
+    if (!ready) return;
+    try {
+        await pool.query(`
+            INSERT INTO external_signals (signal_type, signal_value, signal_data)
+            VALUES ($1, $2, $3)
+        `, [
+            type,
+            value || null,
+            data ? JSON.stringify(data) : null,
+        ]);
+    } catch (e) {
+        console.error('[db] Failed to save external signal:', e.message);
+    }
+}
+
+async function getRecentExternalSignals(type, limit = 50) {
+    if (!ready) return [];
+    try {
+        const { rows } = await pool.query(
+            'SELECT * FROM external_signals WHERE signal_type = $1 ORDER BY fetched_at DESC LIMIT $2',
+            [type, limit]
+        );
+        return rows;
+    } catch (e) {
+        console.error('[db] Failed to get recent external signals:', e.message);
+        return [];
+    }
+}
+
+// ── Feature Importance Analysis ───────────────────────────────
+
+async function getFeatureImportance(days = 7) {
+    if (!ready) return [];
+    try {
+        const { rows } = await pool.query(`
+            SELECT
+                fs.vol_regime,
+                fs.trend_regime,
+                COUNT(*) AS total,
+                SUM(CASE WHEN ps.was_correct = true THEN 1 ELSE 0 END) AS wins,
+                ROUND(AVG(fs.momentum_score)::numeric, 4) AS avg_momentum,
+                ROUND(AVG(fs.order_flow_imbalance)::numeric, 4) AS avg_order_flow,
+                ROUND(AVG(fs.exhaustion_score)::numeric, 4) AS avg_exhaustion,
+                ROUND(AVG(fs.ensemble_prob)::numeric, 4) AS avg_ensemble_prob,
+                ROUND(AVG(fs.distance_from_strike)::numeric, 4) AS avg_distance
+            FROM feature_snapshots fs
+            JOIN prediction_snapshots ps ON fs.period_key = ps.period_key
+                AND ps.snapshot_type = 'new_period'
+                AND ps.was_correct IS NOT NULL
+            WHERE fs.created_at >= NOW() - ($1 || ' days')::INTERVAL
+            GROUP BY fs.vol_regime, fs.trend_regime
+            ORDER BY total DESC
+        `, [days]);
+        return rows;
+    } catch (e) {
+        console.error('[db] Failed to get feature importance:', e.message);
+        return [];
+    }
+}
+
+// ── Hourly Directional Stats ──────────────────────────────────
+
+async function getHourlyDirectionalStats(days = 7) {
+    if (!ready) return [];
+    try {
+        const { rows } = await pool.query(`
+            SELECT
+                EXTRACT(HOUR FROM created_at)::integer AS hour,
+                direction,
+                COUNT(*) AS total,
+                SUM(CASE WHEN was_correct = true THEN 1 ELSE 0 END) AS wins,
+                ROUND(AVG(probability)::numeric, 4) AS avg_prob,
+                SUM(CASE WHEN pnl_cents IS NOT NULL THEN pnl_cents ELSE 0 END) AS total_pnl_cents
+            FROM prediction_snapshots
+            WHERE snapshot_type = 'new_period'
+                AND was_correct IS NOT NULL
+                AND created_at >= NOW() - ($1 || ' days')::INTERVAL
+            GROUP BY hour, direction
+            ORDER BY hour, direction
+        `, [days]);
+        return rows;
+    } catch (e) {
+        console.error('[db] Failed to get hourly directional stats:', e.message);
+        return [];
+    }
+}
+
+// ── Data Cleanup ──────────────────────────────────────────────
+
+async function cleanOldData(daysToKeep = 30) {
+    if (!ready) return;
+    try {
+        const cutoff = `NOW() - ('${parseInt(daysToKeep, 10)} days')::INTERVAL`;
+        const tables = [
+            'price_snapshots',
+            'orderbook_snapshots',
+            'market_data_snapshots',
+            'feature_snapshots',
+            'order_executions',
+            'sell_signals',
+            'learning_audit',
+            'external_signals',
+        ];
+        let totalDeleted = 0;
+        for (const table of tables) {
+            const col = table === 'external_signals' ? 'fetched_at' : 'created_at';
+            const result = await pool.query(
+                `DELETE FROM ${table} WHERE ${col} < NOW() - ($1 || ' days')::INTERVAL`,
+                [parseInt(daysToKeep, 10)]
+            );
+            totalDeleted += result.rowCount;
+        }
+        console.log(`[db] Cleaned old data: ${totalDeleted} rows deleted (kept ${daysToKeep} days)`);
+        return totalDeleted;
+    } catch (e) {
+        console.error('[db] Failed to clean old data:', e.message);
+        return 0;
+    }
+}
+
 // ── Cleanup ────────────────────────────────────────────────────
 
 async function close() {
@@ -1346,4 +1790,23 @@ module.exports = {
     // Store state persistence
     saveStoreState,
     loadStoreState,
+    // Sell signals
+    saveSellSignal,
+    // Feature snapshots
+    saveFeatureSnapshot,
+    // Order executions
+    saveOrderExecution,
+    // Session state
+    saveSessionState,
+    loadSessionState,
+    // Learning audit
+    saveLearningAudit,
+    // External signals
+    saveExternalSignal,
+    getRecentExternalSignals,
+    // Analytics
+    getFeatureImportance,
+    getHourlyDirectionalStats,
+    // Maintenance
+    cleanOldData,
 };
