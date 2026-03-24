@@ -90,10 +90,10 @@ function updateSessionRisk(correct) {
         sessionRisk.consecutiveWins = 0;
     }
 
-    // Cooling off: 5+ consecutive losses → short pause (15 min, was 30)
-    if (sessionRisk.consecutiveLosses >= 5) { // was 3
+    // Cooling off: 3+ consecutive losses → 20 min pause
+    if (sessionRisk.consecutiveLosses >= 3) {
         sessionRisk.coolingOff = true;
-        sessionRisk.coolingOffUntil = Date.now() + 15 * 60 * 1000; // was 30 min
+        sessionRisk.coolingOffUntil = Date.now() + 20 * 60 * 1000;
     }
 
     // Edge decay: only alert at very poor accuracy
@@ -114,9 +114,9 @@ function getSessionRiskMultiplier() {
 
     let mult = 1.0;
 
-    // Anti-martingale: mild reduction after consecutive losses (was aggressive)
-    if (sessionRisk.consecutiveLosses >= 4) mult *= 0.50;       // was >=2
-    else if (sessionRisk.consecutiveLosses >= 2) mult *= 0.75;  // was >=1
+    // Anti-martingale: reduce after consecutive losses
+    if (sessionRisk.consecutiveLosses >= 3) mult *= 0.50;
+    else if (sessionRisk.consecutiveLosses >= 1) mult *= 0.75;
 
     // Drawdown protection: only reduce in deep drawdowns
     if (sessionRisk.currentDrawdown > 4.0) mult *= 0.60;   // was >2.0 at 0.50
@@ -1256,12 +1256,15 @@ function getBayesTrendLabel(trendRegime) {
 }
 
 function getCalibrationBin(prob) {
-    if (prob < 0.2) return 0;
-    if (prob < 0.35) return 1;
-    if (prob < 0.45) return 2;
-    if (prob < 0.55) return 3;
-    if (prob < 0.65) return 4;
-    return 5;
+    if (prob < 0.15) return 0;
+    if (prob < 0.30) return 1;
+    if (prob < 0.40) return 2;
+    if (prob < 0.47) return 3;
+    if (prob < 0.53) return 4;
+    if (prob < 0.60) return 5;
+    if (prob < 0.70) return 6;
+    if (prob < 0.85) return 7;
+    return 8;
 }
 
 function computeDirectionalPrior(direction, windowSize) {
@@ -1273,7 +1276,7 @@ function computeDirectionalPrior(direction, windowSize) {
     if (graded.length < 2) return { adjustment: 0, n: 0 };
     const correct = graded.filter(r => r.correct).length;
     const rate = correct / graded.length;
-    return { adjustment: (rate - 0.5) * 0.3, n: graded.length };
+    return { adjustment: (rate - 0.5) * 0.4, n: graded.length };
 }
 
 function computeRegimeAdjustment(volRegimeLabel, trendRegimeLabel) {
@@ -1298,7 +1301,7 @@ function computeCalibrationAdjustment(rawProb) {
     const n = beta.a + beta.b - 2;
     if (n < 3) return { calibratedProb: rawProb, adjustment: 0 };
     const historicalAccuracy = betaMean(beta);
-    const weight = Math.min(n / 20, 0.5);
+    const weight = Math.min(n / 15, 0.6); // learn faster, trust more
     const calibratedProb = rawProb * (1 - weight) + historicalAccuracy * weight;
     return { calibratedProb, adjustment: calibratedProb - rawProb };
 }
@@ -1626,16 +1629,16 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     // Kalshi fees ≈ 1.5¢/side (break-even ~52.3%), but execution slippage adds 2-4%.
     // With model shrinkage (30-50% OOS), a 2% measured edge is likely 0% real edge.
     // At 4%, real edge after costs is ~1.5-2% — marginally profitable.
-    const minEdge = 0.04; // 4% minimum edge (was 2%)
+    const minEdge = 0.05; // 5% minimum edge (was 4%)
 
     // Quality factors — tightened to only take high-quality setups.
     // Trading less often with higher edge >> trading often with thin edge.
     const factors = {
         hasMinEdge: edge >= minEdge,
-        hasConfidence: confidence >= 0.40,        // was 0.35 — need meaningful confidence
+        hasConfidence: confidence >= 0.45,        // was 0.40 — need meaningful confidence
         notChoppy: !chop.choppy || chop.adx > 18, // was 15
         notExhausted: exhaustion.exhaustion < 0.5, // was 0.6
-        hasTime: minutesAhead >= 5,               // was 1.5 — contracts mispriced after 10 min
+        hasTime: minutesAhead >= 6,               // was 5 — need more time for edge
         signalAgreement: prediction.ensembleConfidence?.level !== 'low',
     };
 
@@ -1649,7 +1652,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     }
 
     const quality = score / maxScore;
-    const shouldBet = quality >= 0.55; // was 0.40 — only take quality setups
+    const shouldBet = quality >= 0.60; // was 0.55 — higher quality bar
     const waitForBetter = !shouldBet && minutesAhead > 10;
 
     // Optimal entry timing: in choppy markets, wait for clearer signal
@@ -1683,7 +1686,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     // Vol regime-based sizing: less aggressive reductions
     if (prices.length > 5) {
         const vr = detectVolRegime(prices);
-        const volSizeMults = { quiet: 1.15, contracting: 1.05, normal: 1.00, expanding: 0.85, volatile: 0.65 };
+        const volSizeMults = { quiet: 1.10, contracting: 1.00, normal: 1.00, expanding: 0.75, volatile: 0.50 };
         let volMult = volSizeMults[vr.regime] || 1.0;
         // Only extreme vol crisis gets major cut (was 0.25, now 0.45)
         if (vr.ratio > 3.0) volMult = 0.45;
@@ -2134,7 +2137,7 @@ function predictPrice(marketData, minutesAhead, strike) {
     const sigMax = 1 / (1 + Math.exp(-sigK * sigMid));
     // Reduced positional weight so signals have more influence on final probability
     // Was 0.75-0.98 — now 0.55-0.80. This lets momentum/flow signals create tradeable edges.
-    const positionalWeight = 0.55 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.25;
+    const positionalWeight = 0.50 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.22; // was 0.55+0.25
 
     const vwapResult = computeAnchoredVWAP(history);
     const vwapSignal = Math.max(-0.5, Math.min(0.5, vwapResult.deviation * 1000));
@@ -2229,18 +2232,18 @@ function predictPrice(marketData, minutesAhead, strike) {
     const ethComposite = ethLL.signal * immediateBoosted * regM.momentum;
 
     const rawTotalZShift = (
-        momentumComposite     * 0.12 +   // single momentum (was 7 signals totaling ~0.45)
-        flowComposite         * 0.08 +   // order flow (with decay: multiply by exp(-minutesAhead/3))
-        meanRevComposite      * 0.10 +   // mean reversion
-        liqComposite          * 0.08 +   // liquidation cascades
-        exhaustionComposite   * 1.00 +   // already scaled
-        ethComposite          * 0.04     // ETH confirmation
+        momentumComposite     * 0.18 +   // was 0.12 — momentum is the strongest signal
+        flowComposite         * 0.12 +   // was 0.08 — order flow has real information
+        meanRevComposite      * 0.08 +   // was 0.10 — mean reversion less reliable short-term
+        liqComposite          * 0.10 +   // was 0.08 — liquidation cascades are very predictive
+        exhaustionComposite   * 1.00 +   // keep as-is (already scaled internally)
+        ethComposite          * 0.03     // was 0.04 — ETH correlation is noisy
     );
 
     // Shrinkage + cap: max 0.4 total z-shift (was 1.2 — a 1.2 z-shift moves
     // probability by ~35 points, which no combination of noisy 15-min signals justifies)
-    const shrinkageFactor = 0.55 * (choppiness.choppy ? 0.80 : 1.0);
-    const totalZShift = Math.max(-0.4, Math.min(0.4, rawTotalZShift * shrinkageFactor));
+    const shrinkageFactor = 0.60 * (choppiness.choppy ? 0.75 : 1.0); // was 0.55/0.80
+    const totalZShift = Math.max(-0.5, Math.min(0.5, rawTotalZShift * shrinkageFactor)); // was 0.4
 
     // Final probability
     const driftAdjustedProb = fatTailCDF(zScore + totalZShift * (1 - positionalWeight) * 0.8, prices);
@@ -2324,7 +2327,7 @@ function predictPrice(marketData, minutesAhead, strike) {
     // T = 1.3 is the recommended default for unverified models.
     // The self-learned overconfidenceRatio above partially handles this,
     // but temperature scaling in logit space is more principled.
-    const TEMPERATURE = 1.02; // very mild (was 1.10 — crushed edge too much)
+    const TEMPERATURE = 1.05; // mild overconfidence correction (was 1.02)
     if (finalProb > 0.01 && finalProb < 0.99) {
         const logit = Math.log(finalProb / (1 - finalProb));
         const scaledLogit = logit / TEMPERATURE;
@@ -2332,7 +2335,7 @@ function predictPrice(marketData, minutesAhead, strike) {
     }
 
     // ── Hard probability bounds — widened to allow stronger convictions ──
-    finalProb = Math.max(0.08, Math.min(0.92, finalProb));
+    finalProb = Math.max(0.10, Math.min(0.90, finalProb));
 
     // Construct output
     const predictUp = finalProb > 0.5;
@@ -2440,10 +2443,10 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const updProbForOtherSide = betIsUp ? (1 - updPred.probability) : updPred.probability;
     const confidenceForFlip = updPred.confidence || 0;
     const shouldFlip = onWrongSide
-        && (modelFlipped || updProbForOtherSide >= 0.70)
-        && confidenceForFlip >= 0.80
-        && minutesRemaining >= 4
-        && sigmaDistance >= 0.8;
+        && (modelFlipped || updProbForOtherSide >= 0.75)
+        && confidenceForFlip >= 0.85
+        && minutesRemaining >= 5
+        && sigmaDistance >= 1.2;
 
     if (shouldFlip) {
         level = 'confident_flip'; shortLabel = 'FLIP';
@@ -2714,16 +2717,16 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
     // - With 5 min left: need ~2 vols
     // - With 2 min left: need ~1.5 vols
     // - With <1 min left: need ~0.8 vols (price is almost certainly settling here)
-    const flipThreshold = minutesAhead <= 1 ? 0.8
-                        : minutesAhead <= 2 ? 1.5
-                        : minutesAhead <= 5 ? 2.0
-                        : 3.0;
+    const flipThreshold = minutesAhead <= 1 ? 1.2
+                        : minutesAhead <= 2 ? 2.0
+                        : minutesAhead <= 5 ? 3.0
+                        : 4.0;
 
     // Also require the raw prediction model to agree (not just price position)
     const rawModelAgrees = rawIsUp === currentIsUp;
 
     // Limit total flips per period to prevent flip-flopping
-    const maxFlips = 2;
+    const maxFlips = 1;
     const canFlip = (stabilityState.flipCount || 0) < maxFlips;
 
     let didFlip = false;
@@ -3016,10 +3019,10 @@ function recomputeCorrections(ea) {
     if (confidentTotal > 5) {
         const overconfRate = confidentWrong / confidentTotal;
         // Target: < 30% wrong when confident. If higher, dampen.
-        if (overconfRate > 0.40) {
-            c.overconfidenceRatio = Math.max(0.5, c.overconfidenceRatio * 0.95);
-        } else if (overconfRate < 0.20) {
-            c.overconfidenceRatio = Math.min(1.5, c.overconfidenceRatio * 1.02);
+        if (overconfRate > 0.35) {
+            c.overconfidenceRatio = Math.max(0.4, c.overconfidenceRatio * 0.92);
+        } else if (overconfRate < 0.15) {
+            c.overconfidenceRatio = Math.min(1.3, c.overconfidenceRatio * 1.03);
         }
     }
 
