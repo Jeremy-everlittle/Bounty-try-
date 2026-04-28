@@ -494,6 +494,53 @@ async function init() {
         );
         CREATE INDEX IF NOT EXISTS idx_ext_sig_type ON external_signals(signal_type);
         CREATE INDEX IF NOT EXISTS idx_ext_sig_fetched ON external_signals(fetched_at);
+
+        -- ═══════════════════════════════════════════════════════════
+        -- CYCLE DATA — Comprehensive per-tick data capture
+        -- Stores EVERYTHING the app computes every 5 seconds
+        -- ═══════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS cycle_data (
+            id SERIAL PRIMARY KEY,
+            period_key VARCHAR(20) NOT NULL,
+            timestamp TIMESTAMPTZ DEFAULT NOW(),
+            minutes_remaining REAL,
+
+            -- Price data
+            btc_price REAL,
+            strike REAL,
+            distance_from_strike REAL,
+            distance_pct REAL,
+
+            -- Kalshi orderbook
+            kalshi_yes_bid REAL,
+            kalshi_yes_ask REAL,
+            kalshi_no_bid REAL,
+            kalshi_no_ask REAL,
+            kalshi_spread REAL,
+            kalshi_yes_bids JSONB,
+            kalshi_no_bids JSONB,
+
+            -- Prediction output
+            predicted_price REAL,
+            probability REAL,
+            confidence REAL,
+            direction VARCHAR(4),
+
+            -- All raw signals (JSONB for flexibility)
+            raw_signals JSONB,
+
+            -- Market data context
+            market_context JSONB,
+
+            -- Bet quality if evaluated
+            bet_quality JSONB,
+
+            -- Sell signal if evaluated
+            sell_signal JSONB
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cycle_data_period ON cycle_data(period_key);
+        CREATE INDEX IF NOT EXISTS idx_cycle_data_time ON cycle_data(timestamp);
     `);
 
     ready = true;
@@ -807,7 +854,7 @@ async function savePredictionSnapshot(snap) {
             // Signals & regime
             snap.signals ? JSON.stringify(snap.signals) : null,
             snap.regimeInfo ? JSON.stringify(snap.regimeInfo) : null,
-            snap.ensembleConfidence || null,
+            typeof snap.ensembleConfidence === 'object' ? (snap.ensembleConfidence?.stddev ?? null) : (snap.ensembleConfidence || null),
             snap.exhaustionScore || null,
             snap.exhaustionType || null,
             snap.choppinessAdx || null,
@@ -1329,6 +1376,7 @@ async function savePredictionLogEntry(entry) {
                 predicted_direction, actual_price, actual_direction, correct, confidence, probability, data)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT(period_key) DO UPDATE SET
+                predicted_direction = COALESCE($6, prediction_log.predicted_direction),
                 actual_price = COALESCE($7, prediction_log.actual_price),
                 actual_direction = COALESCE($8, prediction_log.actual_direction),
                 correct = COALESCE($9, prediction_log.correct),
@@ -1391,6 +1439,27 @@ async function clearPredictionLog() {
         await pool.query('DELETE FROM prediction_log');
     } catch (e) {
         console.error('[db] Failed to clear prediction log:', e.message);
+    }
+}
+
+async function purgeAllData() {
+    if (!ready) return;
+    try {
+        await pool.query('DELETE FROM trades');
+        await pool.query('DELETE FROM daily_stats');
+        await pool.query('DELETE FROM positions');
+        await pool.query('DELETE FROM prediction_snapshots');
+        await pool.query('DELETE FROM decision_log');
+        await pool.query('DELETE FROM price_snapshots');
+        await pool.query('DELETE FROM orderbook_snapshots');
+        await pool.query('DELETE FROM market_data_snapshots');
+        await pool.query('DELETE FROM account_balances');
+        await pool.query('DELETE FROM prediction_log');
+        await pool.query('DELETE FROM store_state');
+        await pool.query('DELETE FROM cycle_data');
+        console.log('[db] All data purged');
+    } catch (e) {
+        console.error('[db] purgeAllData error:', e.message);
     }
 }
 
@@ -1747,6 +1816,67 @@ async function close() {
     }
 }
 
+// ── Cycle Data (comprehensive per-tick capture) ─────────────
+
+async function saveCycleData(data) {
+    if (!ready) return;
+    try {
+        await pool.query(`
+            INSERT INTO cycle_data (
+                period_key, minutes_remaining,
+                btc_price, strike, distance_from_strike, distance_pct,
+                kalshi_yes_bid, kalshi_yes_ask, kalshi_no_bid, kalshi_no_ask, kalshi_spread,
+                kalshi_yes_bids, kalshi_no_bids,
+                predicted_price, probability, confidence, direction,
+                raw_signals, market_context, bet_quality, sell_signal
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+        `, [
+            data.periodKey, data.minutesRemaining,
+            data.btcPrice, data.strike, data.distanceFromStrike, data.distancePct,
+            data.kalshiYesBid, data.kalshiYesAsk, data.kalshiNoBid, data.kalshiNoAsk, data.kalshiSpread,
+            JSON.stringify(data.kalshiYesBids || null), JSON.stringify(data.kalshiNoBids || null),
+            data.predictedPrice, data.probability, data.confidence, data.direction,
+            JSON.stringify(data.rawSignals || null),
+            JSON.stringify(data.marketContext || null),
+            JSON.stringify(data.betQuality || null),
+            JSON.stringify(data.sellSignal || null)
+        ]);
+    } catch (e) {
+        console.error('[db] saveCycleData error:', e.message);
+    }
+}
+
+async function getCycleData(periodKey, options = {}) {
+    if (!ready) return [];
+    try {
+        let query = 'SELECT * FROM cycle_data WHERE period_key = $1 ORDER BY timestamp ASC';
+        const params = [periodKey];
+        if (options.limit) {
+            query += ' LIMIT $2';
+            params.push(options.limit);
+        }
+        const result = await pool.query(query, params);
+        return result.rows;
+    } catch (e) {
+        console.error('[db] getCycleData error:', e.message);
+        return [];
+    }
+}
+
+async function getRecentCycleData(limit = 100) {
+    if (!ready) return [];
+    try {
+        const result = await pool.query(
+            'SELECT * FROM cycle_data ORDER BY timestamp DESC LIMIT $1',
+            [limit]
+        );
+        return result.rows;
+    } catch (e) {
+        console.error('[db] getRecentCycleData error:', e.message);
+        return [];
+    }
+}
+
 module.exports = {
     init,
     close,
@@ -1787,6 +1917,7 @@ module.exports = {
     savePredictionLogEntry,
     loadPredictionLog,
     clearPredictionLog,
+    purgeAllData,
     // Store state persistence
     saveStoreState,
     loadStoreState,
@@ -1809,4 +1940,8 @@ module.exports = {
     getHourlyDirectionalStats,
     // Maintenance
     cleanOldData,
+    // Cycle data (comprehensive per-tick capture)
+    saveCycleData,
+    getCycleData,
+    getRecentCycleData,
 };
