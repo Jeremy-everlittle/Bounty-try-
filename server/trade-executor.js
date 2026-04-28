@@ -1470,7 +1470,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         const env = getEnvironment();
         paperBalances[env] = (paperBalances[env] || 0) + sellProceeds;
         console.log(`[trade-executor] PAPER SELL: ${sellContracts}x ${currentPosition.side.toUpperCase()} on ${currentPosition.ticker} @ ${sellPrice}c — reason: ${sellSignal.level} | Proceeds=$${(sellProceeds/100).toFixed(2)} | Loss=$${(sellLossCents/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
-        logTrade('sell', { ...tradeInfo, limitPrice: sellPrice, sellProceeds, originalCost: originalCostCents });
+        logTrade('sell', { ...tradeInfo, limitPrice: sellPrice, sellProceeds, originalCost: originalCostCents, pnlCents: sellProceeds - originalCostCents });
         decisionLog.logSellDecision({ sellSignal, minutesRemaining, acted: true, reason: sellSignal.level, currentPrice, strike });
         dailyStats.tradeCount++;
         // Record for potential re-entry
@@ -1621,7 +1621,14 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         const liveSellProceeds = filledContracts * (fills.avgPrice || currentPosition.entryPrice);
         const liveOriginalCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
         const liveSellLossCents = Math.max(0, liveOriginalCost - liveSellProceeds);
-        logTrade('sell', { ...tradeInfo, limitPrice: fills.avgPrice || currentPosition.entryPrice, orderId: order.order_id, fillStatus: order.status, filledContracts, lossCents: liveSellLossCents });
+        logTrade('sell', {
+            ...tradeInfo,
+            limitPrice: fills.avgPrice || currentPosition.entryPrice,
+            orderId: order.order_id, fillStatus: order.status, filledContracts,
+            sellProceeds: liveSellProceeds, originalCost: liveOriginalCost,
+            pnlCents: liveSellProceeds - liveOriginalCost,
+            lossCents: liveSellLossCents,
+        });
         dailyStats.tradeCount++;
         const soldTicker = currentPosition.ticker;
         const soldPeriodKey = currentPosition.periodKey;
