@@ -212,6 +212,40 @@ async function getOrderbook(ticker) {
     return kalshiFetch('GET', `/markets/${ticker}/orderbook`);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Market Discovery (for scanning all markets)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * List markets with optional filters
+ * @param {Object} [params] - Query parameters
+ * @param {string} [params.status] - 'open', 'closed', 'settled'
+ * @param {string} [params.cursor] - Pagination cursor
+ * @param {number} [params.limit] - Max results (default 100, max 1000)
+ * @param {string} [params.series_ticker] - Filter by series
+ * @param {string} [params.event_ticker] - Filter by event
+ * @param {string} [params.min_close_ts] - ISO timestamp, markets closing after this
+ * @param {string} [params.max_close_ts] - ISO timestamp, markets closing before this
+ * @returns {{ markets: Array, cursor: string }}
+ */
+async function listMarkets(params = {}) {
+    const query = new URLSearchParams();
+    for (const [key, val] of Object.entries(params)) {
+        if (val !== undefined && val !== null) query.set(key, val);
+    }
+    const qs = query.toString();
+    const path = '/markets' + (qs ? '?' + qs : '');
+    return kalshiFetch('GET', path, null, 15000); // longer timeout for large lists
+}
+
+/**
+ * Get event details (contains all markets in an event)
+ * @param {string} eventTicker
+ */
+async function getEvent(eventTicker) {
+    return kalshiFetch('GET', `/events/${eventTicker}`);
+}
+
 module.exports = {
     isConfigured,
     getBalance,
@@ -222,4 +256,6 @@ module.exports = {
     getOrders,
     getMarket,
     getOrderbook,
+    listMarkets,
+    getEvent,
 };

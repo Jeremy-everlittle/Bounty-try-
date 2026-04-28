@@ -12,6 +12,7 @@ const decisionLog = require('./decision-logger');
 const tradeExecutor = require('./trade-executor');
 const kalshiAuth = require('./kalshi-auth');
 const db = require('./db');
+const crumbSniper = require('./crumb-sniper');
 
 // Build version — updated each commit (Railway has no .git dir)
 const BUILD_VERSION = {
@@ -695,7 +696,7 @@ function capturePriceSnapshot(periodKey, price, strike, minutesRemaining, histor
 let _lastPeriodicObTime = 0;
 async function capturePeriodicOrderbook(ticker, periodKey, minutesRemaining, btcPrice, strike) {
     const now = Date.now();
-    if (now - _lastPeriodicObTime < 30000) return; // max one per 30s
+    if (now - _lastPeriodicObTime < 10000) return; // max one per 10s (was 30s — need finer resolution for analysis)
     _lastPeriodicObTime = now;
 
     try {
@@ -782,6 +783,8 @@ async function fetchAllData() {
         // Macro event context (no API call needed — calendar-based)
         state.macroEvent = getMacroEventContext();
 
+        // Store previous BRTI price before updating — used for accurate period-end grading
+        const previousBrtiPrice = state.brtiPrice;
         if (brti.status === 'fulfilled' && brti.value) {
             state.brtiPrice = brti.value.price;
             state.brtiSources = brti.value.sources;
@@ -933,8 +936,12 @@ async function fetchAllData() {
                 //  treating it as "still active". We want to exclude the NEW
                 //  period, not the old one that just ended.)
                 if (currentPeriod.periodKey !== null && state.brtiPrice) {
-                    engine.gradeBayesianPrediction(state.brtiPrice, periodKey);
-                    engine.gradePreviousPrediction(state.brtiPrice, periodKey);
+                    // Use the PREVIOUS BRTI price for grading — it's the last price from
+                    // the closing period. state.brtiPrice is already updated to the new
+                    // period's first price, which can differ from the closing price.
+                    const gradingPrice = previousBrtiPrice || state.brtiPrice;
+                    engine.gradeBayesianPrediction(gradingPrice, periodKey);
+                    engine.gradePreviousPrediction(gradingPrice, periodKey);
 
                     // ── Auto-trade: settle position P&L ──
                     // Find the most recently graded entry from the PREVIOUS period
@@ -949,7 +956,7 @@ async function fetchAllData() {
                     console.log(`[server] Period transition ${currentPeriod.periodKey} → ${periodKey} | ` +
                         `predLog size: ${log.length} | lastGraded: ${lastGraded ? lastGraded.periodKey + ' correct=' + lastGraded.correct : 'NONE'}`);
                     if (lastGraded) {
-                        tradeExecutor.onPeriodEnd({
+                        await tradeExecutor.onPeriodEnd({
                             correct: lastGraded.correct,
                             periodKey: lastGraded.periodKey,
                             actualDirection: lastGraded.actualDirection,
@@ -976,7 +983,7 @@ async function fetchAllData() {
                             const correct = currentPeriod.originalPrediction ?
                                 (currentPeriod.originalPrediction.predictedPrice >= currentPeriod.periodStartPrice) === (state.brtiPrice >= currentPeriod.periodStartPrice)
                                 : false;
-                            tradeExecutor.onPeriodEnd({
+                            await tradeExecutor.onPeriodEnd({
                                 correct,
                                 periodKey: currentPeriod.periodKey,
                                 actualDirection,
@@ -1122,6 +1129,81 @@ async function fetchAllData() {
                 // ── DB: price snapshot every tick ──
                 capturePriceSnapshot(periodKey, state.brtiPrice, state.kalshiStrike, minutesAhead, state.history);
 
+                // ── DB: comprehensive cycle data snapshot every tick ──
+                // Captures EVERYTHING the app computed this tick for full post-mortem visibility
+                try {
+                    const ob = state.kalshiOrderBook?.orderbook_fp || state.kalshiOrderBook?.orderbook || state.kalshiOrderBook;
+                    const obDollar = ob ? !!(ob.yes_dollars || ob.no_dollars) : false;
+                    const obYes = ob ? (ob.yes_dollars || ob.yes || []) : [];
+                    const obNo = ob ? (ob.no_dollars || ob.no || []) : [];
+                    const parseOB = (bids) => bids.map(e => {
+                        const raw = parseFloat(e[0]);
+                        return [obDollar ? Math.round(raw * 100) : Math.round(raw), parseFloat(e[1])];
+                    });
+                    const yParsed = parseOB(obYes);
+                    const nParsed = parseOB(obNo);
+                    const bestYesBid = yParsed.length > 0 ? Math.max(...yParsed.map(e => e[0])) : null;
+                    const bestNoBid = nParsed.length > 0 ? Math.max(...nParsed.map(e => e[0])) : null;
+                    const bestYesAsk = bestNoBid != null ? 100 - bestNoBid : null;
+                    const bestNoAsk = bestYesBid != null ? 100 - bestYesBid : null;
+
+                    const distFromStrike = state.brtiPrice && state.kalshiStrike ? state.brtiPrice - state.kalshiStrike : null;
+                    const distPct = state.kalshiStrike ? (Math.abs(distFromStrike) / state.kalshiStrike) * 100 : null;
+
+                    db.saveCycleData({
+                        periodKey,
+                        minutesRemaining: minutesAhead,
+                        btcPrice: state.brtiPrice,
+                        strike: state.kalshiStrike,
+                        distanceFromStrike: distFromStrike,
+                        distancePct: distPct,
+                        kalshiYesBid: bestYesBid,
+                        kalshiYesAsk: bestYesAsk,
+                        kalshiNoBid: bestNoBid,
+                        kalshiNoAsk: bestNoAsk,
+                        kalshiSpread: bestYesBid != null && bestYesAsk != null ? bestYesAsk - bestYesBid : null,
+                        kalshiYesBids: yParsed,
+                        kalshiNoBids: nParsed,
+                        predictedPrice: updated.predictedPrice,
+                        probability: updated.probability,
+                        confidence: updated.confidence,
+                        direction: updated.predictedPrice >= state.kalshiStrike ? 'up' : 'down',
+                        rawSignals: { ...(updated._rawSignals || {}), predictedHigh: updated.predictedHigh, predictedLow: updated.predictedLow },
+                        marketContext: {
+                            fundingRate: state.fundingRate,
+                            ethPrice: state.ethPriceHistory ? state.ethPriceHistory[state.ethPriceHistory.length - 1] : null,
+                            openInterest: state.openInterestHistory ? state.openInterestHistory[state.openInterestHistory.length - 1] : null,
+                            liquidations: state.liquidations,
+                            fearGreed: state.fearGreed,
+                            longShortRatio: state.longShortRatio,
+                            macroEvent: state.macroEvent,
+                            binanceOrderBookImbalance: state.orderBook ? (() => {
+                                const bids = state.orderBook.bids || [];
+                                const asks = state.orderBook.asks || [];
+                                const bidDepth = bids.reduce((s, b) => s + parseFloat(b[1] || 0), 0);
+                                const askDepth = asks.reduce((s, a) => s + parseFloat(a[1] || 0), 0);
+                                return { bidDepth, askDepth, imbalance: bidDepth + askDepth > 0 ? (bidDepth - askDepth) / (bidDepth + askDepth) : 0 };
+                            })() : null,
+                        },
+                        betQuality: updatedBetQuality ? {
+                            shouldBet: updatedBetQuality.shouldBet,
+                            quality: updatedBetQuality.quality,
+                            edge: updatedBetQuality.edge,
+                            betSize: updatedBetQuality.betSize,
+                            convictionTier: updatedBetQuality.convictionTier,
+                            skipReason: updatedBetQuality.skipReason,
+                        } : null,
+                        sellSignal: sellSignal ? {
+                            level: sellSignal.level,
+                            reasons: sellSignal.reasons,
+                            confidence: sellSignal.confidence,
+                        } : null,
+                    }).catch(e => console.error('[cycle-data] Save error:', e.message));
+                } catch (cycleErr) {
+                    // Non-critical — don't break the main loop
+                    console.error('[cycle-data] Capture error:', cycleErr.message);
+                }
+
                 // ── DB: periodic Kalshi orderbook snapshot (throttled to every 30s) ──
                 if (state.kalshiTicker) {
                     capturePeriodicOrderbook(state.kalshiTicker, periodKey, minutesAhead, state.brtiPrice, state.kalshiStrike);
@@ -1213,6 +1295,7 @@ async function fetchAllData() {
             kalshiEnvironment: kalshiAuth.getEnvironment(),
             kalshiOrderBook: state.kalshiOrderBook || null,
             kalshiOrderBookError: state.kalshiOrderBookError || null,
+            crumbSniperStatus: crumbSniper.getStatus(),
         });
 
         console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | Env=${kalshiAuth.getEnvironment()} | ${wss.clients.size} clients`);
@@ -1284,9 +1367,10 @@ wss.on('connection', (ws, req) => {
         try {
             const msg = JSON.parse(raw);
             if (msg.type === 'clearHistory') {
-                console.log('Client requested history clear');
+                console.log('Client requested FULL data purge');
                 store.clearPredictionLog();
                 tradeExecutor.clearTradeLog();
+                db.purgeAllData();
             }
         } catch (e) {}
     });
@@ -1502,6 +1586,179 @@ app.get('/api/db/dump', async (req, res) => {
     }
 });
 
+// ── Cycle Data API — full per-tick data for any period ────────
+app.get('/api/cycle-data/:periodKey', async (req, res) => {
+    const db = require('./db');
+    try {
+        const rows = await db.getCycleData(req.params.periodKey);
+        res.json({ count: rows.length, data: rows });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/cycle-data', async (req, res) => {
+    const db = require('./db');
+    try {
+        const limit = parseInt(req.query.limit || '100', 10);
+        const rows = await db.getRecentCycleData(limit);
+        res.json({ count: rows.length, data: rows });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── Auto-Bettor Performance Analysis Endpoint ────────────────
+app.get('/api/auto-bettor-analysis', async (req, res) => {
+    try {
+        const predictions = store.getPredictionLog();
+        const trades = tradeExecutor.getStatus().recentTrades || [];
+        const dailyStats = await db.getDailyStatsHistory(30);
+        const winByStrategy = await db.getWinRateByStrategy();
+        const winByDirection = await db.getWinRateByDirection();
+        const winByHour = await db.getWinRateByHour();
+        const cumulativePnl = await db.getCumulativePnl();
+
+        // Aggregate trade stats
+        const settles = trades.filter(t => t.type === 'settle');
+        const buys = trades.filter(t => ['buy', 'dip_buy', 'late_lock', 'late_lock_add', 're_entry'].includes(t.type));
+        const sells = trades.filter(t => t.type === 'sell' || t.type === 'flip');
+        const wins = settles.filter(t => t.correct);
+        const losses = settles.filter(t => t.correct === false);
+        const totalPnlCents = settles.reduce((s, t) => s + (t.pnlCents || 0), 0);
+
+        // Win/loss streaks
+        let maxWinStreak = 0, maxLossStreak = 0, curWin = 0, curLoss = 0;
+        for (const s of settles) {
+            if (s.correct) { curWin++; curLoss = 0; maxWinStreak = Math.max(maxWinStreak, curWin); }
+            else { curLoss++; curWin = 0; maxLossStreak = Math.max(maxLossStreak, curLoss); }
+        }
+
+        // Prediction accuracy
+        const graded = predictions.filter(p => p.correct !== null && p.correct !== undefined);
+        const predCorrect = graded.filter(p => p.correct).length;
+
+        // Entry price analysis
+        const entryPrices = buys.map(t => t.entryPrice || t.limitPrice).filter(Boolean);
+        const avgEntry = entryPrices.length > 0 ? entryPrices.reduce((s, v) => s + v, 0) / entryPrices.length : 0;
+
+        // Avg contracts per trade
+        const contractCounts = buys.map(t => t.contracts).filter(Boolean);
+        const avgContracts = contractCounts.length > 0 ? contractCounts.reduce((s, v) => s + v, 0) / contractCounts.length : 0;
+
+        // Conviction tier breakdown
+        const convictionTrades = {};
+        for (const t of buys) {
+            const tier = t.strategy || 'standard';
+            if (!convictionTrades[tier]) convictionTrades[tier] = { count: 0, wins: 0, losses: 0, pnl: 0 };
+            convictionTrades[tier].count++;
+        }
+        // Match settles to strategies
+        for (const s of settles) {
+            const matchingBuy = buys.find(b => b.periodKey === s.periodKey);
+            const tier = matchingBuy?.strategy || 'standard';
+            if (!convictionTrades[tier]) convictionTrades[tier] = { count: 0, wins: 0, losses: 0, pnl: 0 };
+            if (s.correct) convictionTrades[tier].wins++;
+            else convictionTrades[tier].losses++;
+            convictionTrades[tier].pnl += (s.pnlCents || 0);
+        }
+
+        // Periods where we bet vs didn't
+        const tradedPeriods = new Set(buys.map(t => t.periodKey));
+        const betPeriods = graded.filter(p => tradedPeriods.has(p.periodKey));
+        const skipPeriods = graded.filter(p => !tradedPeriods.has(p.periodKey));
+        const betCorrect = betPeriods.filter(p => p.correct).length;
+        const skipCorrect = skipPeriods.filter(p => p.correct).length;
+
+        // Sell signal analysis
+        const earlyExits = sells.filter(t => t.reason && t.reason !== 'settlement');
+        const flipTrades = trades.filter(t => t.type === 'flip');
+
+        // Per-cycle data for deep analysis (last 20 cycles)
+        const recentPeriodKeys = [...new Set(predictions.slice(-20).map(p => p.periodKey))];
+        const cycleDetails = [];
+        for (const pk of recentPeriodKeys) {
+            try {
+                const rows = await db.getCycleData(pk);
+                if (rows.length === 0) continue;
+                const pred = predictions.find(p => p.periodKey === pk);
+                const periodTrades = trades.filter(t => t.periodKey === pk);
+                const settle = periodTrades.find(t => t.type === 'settle');
+                const firstTick = rows[0];
+                const lastTick = rows[rows.length - 1];
+                const prices = rows.map(r => parseFloat(r.btc_price));
+                const strike = parseFloat(firstTick.strike);
+                const probs = rows.map(r => parseFloat(r.probability) || 0);
+                const confs = rows.map(r => parseFloat(r.confidence) || 0);
+
+                // Direction changes
+                let dirFlips = 0;
+                for (let i = 1; i < rows.length; i++) {
+                    if (rows[i].direction && rows[i - 1].direction && rows[i].direction !== rows[i - 1].direction) dirFlips++;
+                }
+
+                cycleDetails.push({
+                    periodKey: pk,
+                    tickCount: rows.length,
+                    priceStart: prices[0],
+                    priceEnd: prices[prices.length - 1],
+                    priceMin: Math.min(...prices),
+                    priceMax: Math.max(...prices),
+                    priceMove: prices[prices.length - 1] - prices[0],
+                    strike,
+                    endedAboveStrike: prices[prices.length - 1] >= strike,
+                    avgProb: probs.reduce((s, v) => s + v, 0) / probs.length,
+                    avgConf: confs.reduce((s, v) => s + v, 0) / confs.length,
+                    directionFlips: dirFlips,
+                    finalDirection: lastTick.direction,
+                    predicted: pred ? pred.predictedDirection : null,
+                    correct: pred ? pred.correct : null,
+                    traded: periodTrades.length > 0,
+                    pnlCents: settle ? settle.pnlCents : null,
+                    strategy: periodTrades.find(t => t.strategy)?.strategy || null,
+                });
+            } catch (e) { /* skip */ }
+        }
+
+        res.json({
+            summary: {
+                totalPredictions: graded.length,
+                predictionAccuracy: graded.length > 0 ? (predCorrect / graded.length * 100).toFixed(1) : '0',
+                totalTrades: settles.length,
+                wins: wins.length,
+                losses: losses.length,
+                winRate: settles.length > 0 ? (wins.length / settles.length * 100).toFixed(1) : '0',
+                totalPnlCents,
+                avgPnlPerTrade: settles.length > 0 ? Math.round(totalPnlCents / settles.length) : 0,
+                maxWinStreak,
+                maxLossStreak,
+                avgEntryPrice: Math.round(avgEntry),
+                avgContracts: Math.round(avgContracts),
+                earlyExits: earlyExits.length,
+                flips: flipTrades.length,
+            },
+            betVsSkip: {
+                betPeriods: betPeriods.length,
+                betCorrect,
+                betAccuracy: betPeriods.length > 0 ? (betCorrect / betPeriods.length * 100).toFixed(1) : '0',
+                skipPeriods: skipPeriods.length,
+                skipCorrect,
+                skipAccuracy: skipPeriods.length > 0 ? (skipCorrect / skipPeriods.length * 100).toFixed(1) : '0',
+            },
+            convictionTrades,
+            winByStrategy,
+            winByDirection,
+            winByHour,
+            dailyStats,
+            cumulativePnl,
+            cycleDetails,
+        });
+    } catch (e) {
+        console.error('[auto-bettor-analysis] Error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ── Snapshot / Cycle Analysis API Endpoints ──────────────────
 
 app.get('/api/snapshots/predictions', async (req, res) => {
@@ -1590,6 +1847,11 @@ app.use(express.json());
 app.post('/api/trading/kill-switch', (req, res) => {
     const active = req.body?.active !== false; // default to activating
     tradeExecutor.setKillSwitch(active);
+    // Stop crumb sniper when auto-bettor is killed
+    if (active && crumbSniper.getStatus().isRunning) {
+        crumbSniper.stop();
+        console.log('[crumb-sniper] Auto-stopped: auto-bettor kill switch activated');
+    }
     res.json({ killSwitch: active, message: active ? 'Kill switch ACTIVATED — all trading halted' : 'Kill switch deactivated' });
 });
 
@@ -1707,6 +1969,32 @@ app.post('/api/trading/paper-balance', (req, res) => {
         newBalance = tradeExecutor.addPaperBalance(env, cents);
     }
     res.json({ environment: env, balanceCents: newBalance, balanceDollars: (newBalance / 100).toFixed(2) });
+});
+
+// ── Crumb Sniper endpoints ──
+app.get('/api/crumb-sniper/status', (req, res) => {
+    res.json(crumbSniper.getStatus());
+});
+
+app.post('/api/crumb-sniper/start', (req, res) => {
+    // Crumb sniper inherits paperMode from the auto-bettor (trade executor)
+    // and can only start when the auto-bettor is running (kill switch off)
+    const ts = tradeExecutor.getStatus();
+    if (ts.killSwitch) {
+        return res.json({ ok: false, error: 'Auto-bettor is off. Start the auto-bettor first.' });
+    }
+    crumbSniper.start({ paperMode: ts.paperMode });
+    res.json({ ok: true, status: 'started', paperMode: ts.paperMode });
+});
+
+app.post('/api/crumb-sniper/stop', (req, res) => {
+    crumbSniper.stop();
+    res.json({ ok: true, status: 'stopped' });
+});
+
+app.post('/api/crumb-sniper/config', (req, res) => {
+    if (req.body) crumbSniper.updateConfig(req.body);
+    res.json({ ok: true, config: crumbSniper.CONFIG });
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -1860,7 +2148,7 @@ server.listen(PORT, () => {
     // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
     async function fetchLoop() {
         await fetchAllData();
-        setTimeout(fetchLoop, 5000);
+        setTimeout(fetchLoop, 2000);
     }
     fetchLoop();
 });
