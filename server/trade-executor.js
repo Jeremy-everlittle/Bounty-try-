@@ -73,11 +73,27 @@ function captureKalshiOrderbook(ticker, reason, minutesRemaining, yesBids, noBid
 // ── Configuration (from env, with safe defaults) ──
 const config = {
     paperMode: (process.env.PAPER_MODE || 'true').toLowerCase() === 'true',
-    baseContracts: parseInt(process.env.BASE_CONTRACTS || '10', 10), // percentage of balance to bet (e.g. 10 = 10%)
-    maxPositionContracts: parseInt(process.env.MAX_POSITION_CONTRACTS || '50', 10),
+    baseContracts: parseInt(process.env.BASE_CONTRACTS || '4', 10), // 4% of balance per bet (safer for 53% accuracy)
+    maxPositionContracts: parseInt(process.env.MAX_POSITION_CONTRACTS || '25', 10),
     convictionMaxContracts: parseInt(process.env.CONVICTION_MAX_CONTRACTS || '50', 10), // hard safety cap for high-conviction bets
     maxDailyLossCents: parseInt(process.env.MAX_DAILY_LOSS || '10000', 10),   // $100
     maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '200', 10),
+};
+
+// ── HOUR-OF-DAY PERFORMANCE FILTER ──
+// Historical analysis shows certain hours have terrible win rates.
+// Skip trading during statistically poor hours unless conviction is very high.
+const HOUR_PERFORMANCE = {
+    // Key = local hour (24h), Value = { allowed: bool, minEdge: number|null, boost: bool }
+    13: { allowed: true, boost: true },    // 1PM: 100%
+    14: { allowed: false },                 // 2PM: 25% - blocked entirely
+    15: { allowed: true, minEdge: 0.08 },   // 3PM: 50% - need higher edge
+    16: { allowed: true, minEdge: 0.08 },   // 4PM: 50% - need higher edge
+    17: { allowed: false },                 // 5PM: 0% - blocked entirely
+    18: { allowed: true },                 // 6PM: 75%
+    19: { allowed: true, boost: true },    // 7PM: 100%
+    20: { allowed: true, boost: true },    // 8PM: 100%
+    21: { allowed: true, boost: true },    // 9PM: 100%
 };
 
 // ── State ──
@@ -711,12 +727,12 @@ async function getAggressivePrice(ticker, side, theoreticalPrice, minutesRemaini
     // Paper and live both use real orderbook for pricing
 
     // Determine max slippage based on time remaining
-    // In passive mode (minutesRemaining > 7), post at theoretical price (no slippage)
-    // to act as a maker and earn the spread. If no fill, next cycle retries.
+    // In passive mode, post at theoretical price (no slippage) to act as a maker
+    // and earn the spread. Otherwise use tighter time-banded slippage.
     const maxSlippage = passiveMode ? 0
-                      : (minutesRemaining || 15) <= 3 ? 8
-                      : (minutesRemaining || 15) <= 7 ? 5
-                      : 3; // early period: still willing to cross a typical spread
+                      : (minutesRemaining || 15) <= 3 ? 6
+                      : (minutesRemaining || 15) <= 7 ? 4
+                      : 2;
 
     const maxPrice = Math.min(95, theoreticalPrice + maxSlippage);
 
@@ -924,6 +940,24 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         return;
     }
 
+    // ── HOUR-OF-DAY FILTER ──
+    const currentHour = new Date().getHours();
+    const hourPerf = HOUR_PERFORMANCE[currentHour];
+    if (hourPerf && !hourPerf.allowed) {
+        const msg = `Hour ${currentHour}:00 has poor historical performance — blocked entirely`;
+        console.log(`[trade-executor] ${msg}`);
+        setThought('skip', msg);
+        decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
+        return;
+    }
+    if (hourPerf && hourPerf.minEdge && betQuality.edge < hourPerf.minEdge) {
+        const msg = `Hour ${currentHour}:00 requires higher edge (${(hourPerf.minEdge*100).toFixed(0)}%) — current edge ${(betQuality.edge*100).toFixed(1)}% too low`;
+        console.log(`[trade-executor] ${msg}`);
+        setThought('skip', msg);
+        decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
+        return;
+    }
+
     const isUp = prediction.predictedPrice >= strike;
     const side = isUp ? 'yes' : 'no';
 
@@ -962,7 +996,6 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 
     const isLockTier = betQuality.convictionTier === 'LOCK';
     const isStrongOrLock = isLockTier || betQuality.convictionTier === 'STRONG';
-
     // Block entry if current prediction contradicts original direction.
     // The only exception: if the prediction has been stable in the NEW direction
     // for 6+ consecutive cycles (~60 seconds sustained flip), it's likely a genuine
@@ -982,9 +1015,9 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     }
 
     // ── EARLY PERIOD WAIT ──
-    // Wait for the first 5 minutes of a cycle (was 3 min — too aggressive).
-    // Data shows most wrong-side bets entered at the 3-minute mark when prediction
-    // hadn't stabilized yet. LOCK bets bypass (they only trigger in final 5 min).
+    // Wait for the first 5 minutes of a cycle. Data shows most wrong-side bets
+    // entered at the 3-minute mark when prediction hadn't stabilized yet.
+    // LOCK bets bypass (they only trigger in final 5 min).
     if (minutesRemaining > 10 && !isStrongOrLock) {
         const minsIn = 15 - minutesRemaining;
         const msg = `Too early in cycle (${minsIn.toFixed(1)}m in) — waiting for prediction to stabilize`;
@@ -1012,16 +1045,16 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     // Hard cap: never pay more than 85¢ for standard entries.
     // Above 85¢, risk/reward is terrible — risking 85¢+ to make at most 15¢.
     // Exception: LOCK conviction tier (last ~5 min, near-guaranteed) can go up to 95¢.
-    const MAX_ENTRY_PRICE = isLockTier ? 95 : 85;
+    const MAX_ENTRY_PRICE = isLockTier ? 92 : 60;
 
-    // Early period protection: in the first 7 minutes of a period, require cheaper
+    // Early period protection: in the first 5 minutes of a period, require cheaper
     // entries to compensate for higher uncertainty (prediction still stabilizing).
     // LOCK bets bypass early period limits (they only trigger with <5 min left anyway).
     const earlyPeriodMaxPrice = isLockTier ? MAX_ENTRY_PRICE
-                              : minutesRemaining > 10 ? 60  // first ~5 min: max 60¢ (if STRONG)
-                              : minutesRemaining > 9 ? 68   // 5-6 min: max 68¢
-                              : minutesRemaining > 8 ? 75   // 6-7 min: max 75¢
-                              : MAX_ENTRY_PRICE;             // after 7 min: standard 85¢ cap
+                              : minutesRemaining > 13 ? 45  // first ~2 min
+                              : minutesRemaining > 11 ? 50  // 2-4 min
+                              : minutesRemaining > 10 ? 55  // 4-5 min
+                              : MAX_ENTRY_PRICE;             // after 5 min
 
     const convictionLabel = betQuality.convictionTier ? ` [${betQuality.convictionTier}]` : '';
 
@@ -1136,6 +1169,22 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         }
     }
 
+    // ── RISK/REWARD FILTER ──
+    // Skip if potential profit is less than 0.65x the risk.
+    {
+        const estimatedEntry = limitPrice || theoreticalPrice;
+        if (estimatedEntry > 0) {
+            const potentialProfit = 100 - estimatedEntry;
+            const riskRewardRatio = potentialProfit / estimatedEntry;
+            if (riskRewardRatio < 0.65 && !isLockTier) {
+                const msg = `Poor risk/reward: entry=${estimatedEntry}c, profit=${potentialProfit}c, R:R=${riskRewardRatio.toFixed(2)} — need at least 0.65`;
+                console.log(`[trade-executor] ${msg}`);
+                setThought('skip', msg);
+                return;
+            }
+        }
+    }
+
     // ── Dynamic contract sizing: baseContracts% of balance ÷ entry price ──
     const baseCount = getBaseContractCount(limitPrice);
     const isHighConviction = betQuality.betSize > 1.0;
@@ -1143,16 +1192,31 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const positionCap = isHighConviction
         ? Math.min(dynamicMaxEntry, config.convictionMaxContracts)
         : Math.min(dynamicMaxEntry, config.maxPositionContracts);
-    const contracts = Math.max(1, Math.min(
+    let contracts = Math.max(1, Math.min(
         positionCap,
         Math.round(betQuality.betSize * baseCount)
     ));
 
+    // Max risk per trade: never risk more than 12% of balance on a single entry
+    {
+        const maxRiskPct = 0.12;
+        const balForRisk = config.paperMode ? (paperBalances[getEnvironment()] || 0) : (cachedBalance ? cachedBalance.balanceCents : 10000);
+        const maxRiskCents = balForRisk * maxRiskPct;
+        const tradeCost = contracts * (limitPrice || theoreticalPrice);
+        if (tradeCost > maxRiskCents) {
+            const oldContracts = contracts;
+            contracts = Math.max(1, Math.floor(maxRiskCents / (limitPrice || theoreticalPrice)));
+            console.log(`[trade-executor] Risk cap: ${oldContracts} contracts ($${(tradeCost/100).toFixed(2)}) exceeds ${(maxRiskPct*100).toFixed(0)}% of $${(balForRisk/100).toFixed(2)} — capped to ${contracts} contracts`);
+        }
+    }
+
     // ── Per-period exposure cap: don't exceed 15% of bankroll per period ──
-    const proposedCost = contracts * limitPrice;
-    if (!checkPeriodExposure(periodKey, proposedCost)) {
-        setThought('skip', 'Period exposure cap reached (15% of bankroll)');
-        return;
+    {
+        const proposedCost = contracts * limitPrice;
+        if (!checkPeriodExposure(periodKey, proposedCost)) {
+            setThought('skip', 'Period exposure cap reached (15% of bankroll)');
+            return;
+        }
     }
 
     // ── DB: log bet decision ──
@@ -1358,7 +1422,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         const distancePct = Math.abs(currentPrice - strike) / strike;
         const sigmaDistance = distancePct / remainingVol;
 
-        const isMathematicallyDead = (sigmaDistance >= 2.5 && minutesRemaining < 1.5) || sigmaDistance >= 3.0;
+        const isMathematicallyDead = sigmaDistance >= 3.0; // only sell when truly dead (3σ+), removed early time-based selling
         if (!isMathematicallyDead && !isConfidentFlip) {
             // Hold — recovery is still plausible or spread eats any salvage value
             setThought('losing', `Wrong side (${sigmaDistance.toFixed(1)}σ) — holding, recovery possible`, {
@@ -2001,9 +2065,15 @@ async function onPeriodEnd(gradeResult) {
 
 async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPrice, minutesRemaining, kalshiTicker, periodKey) {
     if (!currentPosition || currentPosition.periodKey !== periodKey) return;
+    if (currentPosition.dipBuyCount >= 1) return; // limit to 1 dip buy per period
     if (killSwitch) return;
-    if (minutesRemaining < 0.75) return; // was 1.5 — allow dip buying closer to settlement
-    if (Date.now() - lastDipCheckTime < 8000) return; // throttle
+    const dipHour = new Date().getHours();
+    const dipHourPerf = HOUR_PERFORMANCE[dipHour];
+    if (dipHourPerf && !dipHourPerf.allowed) return; // no dip buys during bad hours
+    // Only allow dip buys in the middle of a period (4-10 min remaining)
+    // Too early = price still volatile, too late = no time to recover
+    if (minutesRemaining < 4.0 || minutesRemaining > 10.0) return;
+    if (Date.now() - lastDipCheckTime < 30000) return; // throttle (30s)
     lastDipCheckTime = Date.now();
 
     // Respect fill failure cooldowns — don't spam orders when there's no liquidity
@@ -2014,9 +2084,16 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
     const onWrongSide = (betIsUp && currentPrice < strike) || (!betIsUp && currentPrice >= strike);
     if (!onWrongSide) return; // not a dip — price is in our favor
 
+    // Require price to be crossing BACK toward the right side (momentum check)
+    // Only dip buy when the price has started recovering, not while still falling
+    const distFromStrike = Math.abs(currentPrice - strike);
+    const strikePct = distFromStrike / strike;
+    // Price must be within 0.05% of strike (showing recovery toward right side)
+    if (strikePct > 0.0005) return; // price hasn't crossed back close enough to strike
+
     // Only add if the sell signal says HOLD (normal dip / recoverable)
     // Never add if the model says sell or lost cause
-    if (sellSignal && (sellSignal.level === 'lost_cause' || sellSignal.level === 'sell_now' || sellSignal.level === 'consider_selling')) return;
+    if (sellSignal && (sellSignal.level === 'lost_cause' || sellSignal.level === 'sell_now' || sellSignal.level === 'consider_selling' || sellSignal.level === 'uncomfortable')) return;
 
     // Check updated prediction still agrees with our direction
     const bq = updatedPrediction && updatedPrediction._betQuality;
@@ -2024,14 +2101,15 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
     const updIsUp = updatedPrediction.predictedPrice >= strike;
     if (updIsUp !== betIsUp) return; // model flipped — don't add
 
-    // Check the probability is still decent (model thinks we'll recover)
+    // Require stronger probability for dip buys (>65%) — moderate confidence not enough
     const probForBet = betIsUp ? updatedPrediction.probability : (1 - updatedPrediction.probability);
-    if (probForBet < 0.50) return; // was 0.55 — allow dip buying with moderate confidence
+    if (probForBet < 0.70) return; // require strong confidence for dip buys
 
     // Calculate the dip opportunity — how much cheaper can we buy?
-    const currentLimitPrice = Math.max(5, Math.min(95, Math.round(probForBet * 100)));
+    // Cap entry price at 55¢ to prevent expensive dip buys that amplify losses
+    const currentLimitPrice = Math.max(5, Math.min(42, Math.round(probForBet * 100)));
     const entryImprovement = currentPosition.entryPrice - currentLimitPrice;
-    if (entryImprovement < 3) return; // was 5¢ — allow smaller dips
+    if (entryImprovement < 10) return; // require meaningful improvement (10¢+)
 
     // How many more contracts can we add?
     const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
@@ -2041,7 +2119,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
     if (maxAdd <= 0) return; // already at max
 
     // Scale add size: bigger dip = add more, but cap at half the original position
-    const dipScale = Math.min(1.0, entryImprovement / 20); // 20¢ dip = full scale
+    const dipScale = Math.min(0.5, entryImprovement / 30); // 30¢ dip = full scale, capped at 0.5
     const addContracts = Math.max(1, Math.min(maxAdd, Math.round(dipScale * bq.betSize * getBaseContractCount(currentLimitPrice))));
 
     const check = await canTrade(periodKey);
@@ -2076,6 +2154,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
         currentPosition.contracts = newTotal;
         currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal); // weighted avg
         tradeInfo.contracts = cappedAdd;
+        currentPosition.dipBuyCount = (currentPosition.dipBuyCount || 0) + 1;
         logTrade('dip_buy', tradeInfo);
         decisionLog.logTradeExecution({ ...tradeInfo, strategy: 'dip_buyer', currentPrice, strike });
         dailyStats.tradeCount++;
@@ -2128,6 +2207,7 @@ async function onDipOpportunity(updatedPrediction, sellSignal, strike, currentPr
         currentPosition.totalContracts = newTotal;
         currentPosition.contracts = newTotal;
         currentPosition.entryPrice = Math.round((oldCost + addCost) / newTotal);
+        currentPosition.dipBuyCount = (currentPosition.dipBuyCount || 0) + 1;
         logTrade('dip_buy', { ...tradeInfo, orderId: order.order_id, filledContracts });
         dailyStats.tradeCount++;
         console.log(`[trade-executor] LIVE DIP-BUY: +${filledContracts}x @ ${currentLimitPrice}c — order ${order.order_id} (${order.status})`);
@@ -2788,6 +2868,20 @@ function getStatus() {
         },
         recentTrades: tradeLog.slice(0, 200),
         thought: { ...traderThought },
+        hourFilter: (() => {
+            const currentHour = new Date().getHours();
+            const hourPerf = HOUR_PERFORMANCE[currentHour];
+            return {
+                currentHour,
+                allowed: hourPerf ? hourPerf.allowed : true,
+                boost: hourPerf ? !!hourPerf.boost : false,
+                minConvictionOverride: hourPerf && !hourPerf.allowed ? (hourPerf.minConviction || null) : null,
+                allHours: Object.entries(HOUR_PERFORMANCE).reduce((acc, [h, v]) => {
+                    acc[h] = { allowed: v.allowed, boost: !!v.boost, minConviction: v.minConviction || null };
+                    return acc;
+                }, {}),
+            };
+        })(),
     };
 }
 
@@ -2799,6 +2893,13 @@ async function pressBet(addContracts) {
     if (killSwitch) return { ok: false, reason: 'Kill switch is active — trading halted' };
     if (!currentPosition) {
         return { ok: false, reason: 'No open position to press' };
+    }
+
+    const pressHour = new Date().getHours();
+    const pressHourPerf = HOUR_PERFORMANCE[pressHour];
+    if (pressHourPerf && !pressHourPerf.allowed) {
+        console.log(`[trade-executor] pressBet blocked: hour ${pressHour} has poor performance`);
+        return { ok: false, reason: `Hour ${pressHour} blocked by hour filter` };
     }
 
     const ticker = currentPosition.ticker;
@@ -2918,6 +3019,13 @@ async function pressBet(addContracts) {
 
 async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideContracts) {
     if (killSwitch) return { ok: false, reason: 'Kill switch is active — trading halted' };
+    const forceHour = new Date().getHours();
+    const forceHourPerf = HOUR_PERFORMANCE[forceHour];
+    if (forceHourPerf && !forceHourPerf.allowed) {
+        console.log(`[trade-executor] forceBet blocked: hour ${forceHour} has poor performance`);
+        return { ok: false, reason: `Hour ${forceHour} blocked by hour filter` };
+    }
+
     if (!prediction || !kalshiTicker || strike === null) {
         return { ok: false, reason: 'Missing prediction, ticker, or strike data' };
     }

@@ -30,6 +30,13 @@ const microState = {
     lambdaHistory: [],  // [{timestamp, priceChange, signedVolume}]
 };
 
+// ── Orderbook Depth Momentum state (persists across ticks) ──
+let _previousOBImbalance = null;
+let _previousOBTimestamp = 0;
+
+// ── Funding Rate Volatility history (persists across ticks) ──
+const _fundingRateHistory = [];
+
 // Anti-flip-flop state for updated predictions (persists within a period)
 const stabilityState = {
     smoothedProbability: null,
@@ -101,10 +108,10 @@ function updateSessionRisk(correct) {
         sessionRisk.consecutiveWins = 0;
     }
 
-    // Cooling off: 5+ consecutive losses → short pause (15 min, was 30)
-    if (sessionRisk.consecutiveLosses >= 5) { // was 3
+    // Cooling off: 2+ consecutive losses → 30 min pause
+    if (sessionRisk.consecutiveLosses >= 2) {
         sessionRisk.coolingOff = true;
-        sessionRisk.coolingOffUntil = Date.now() + 15 * 60 * 1000; // was 30 min
+        sessionRisk.coolingOffUntil = Date.now() + 30 * 60 * 1000;
     }
 
     // Edge decay: only alert at very poor accuracy
@@ -123,11 +130,21 @@ function getSessionRiskMultiplier() {
 
     if (sessionRisk.coolingOff) return 0; // full stop during cooldown — trading at 30% when model is broken is still losing money
 
+    // Hard stop: session loss limit (~$3)
+    if (sessionRisk.sessionPnL < -3.0) return 0;
+
+    // Rolling accuracy check: if last 10 results < 45% accuracy, full stop
+    if (sessionRisk.results.length >= 10) {
+        const last10 = sessionRisk.results.slice(-10);
+        const recentAcc = last10.filter(r => r.correct).length / last10.length;
+        if (recentAcc < 0.45) return 0;
+    }
+
     let mult = 1.0;
 
-    // Anti-martingale: mild reduction after consecutive losses (was aggressive)
-    if (sessionRisk.consecutiveLosses >= 4) mult *= 0.50;       // was >=2
-    else if (sessionRisk.consecutiveLosses >= 2) mult *= 0.75;  // was >=1
+    // Anti-martingale: reduce after consecutive losses
+    if (sessionRisk.consecutiveLosses >= 2) return 0; // full stop after 2 losses
+    else if (sessionRisk.consecutiveLosses >= 1) mult *= 0.60;
 
     // Drawdown protection: only reduce in deep drawdowns
     if (sessionRisk.currentDrawdown > 4.0) mult *= 0.60;   // was >2.0 at 0.50
@@ -155,7 +172,7 @@ function getSessionRiskMultiplier() {
 function extractMLFeatures(marketData, extraCtx) {
     const prices = marketData.history.map(h => h.price);
     const n = prices.length;
-    if (n < 10) return { features: [0, 0, 0, 0, 0, 0, 0, 0], ctx: {} };
+    if (n < 10) return { features: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ctx: {} };
 
     const volRegime = detectVolRegime(prices);
     const trendRegime = detectTrendRegime(prices, n);
@@ -177,6 +194,11 @@ function extractMLFeatures(marketData, extraCtx) {
     const distFromStrike = extraCtx && extraCtx.zScore ? extraCtx.zScore : 0;
     const spreadVol = extraCtx && extraCtx.spreadVolAdjust ? extraCtx.spreadVolAdjust : 1.0;
 
+    // Day-of-week as numeric: 0=Sun..6=Sat, normalized to [0,1]
+    const dayOfWeek = new Date().getUTCDay() / 6;
+    // Is weekend flag (0 or 1)
+    const isWeekend = (new Date().getUTCDay() === 0 || new Date().getUTCDay() === 6) ? 1 : 0;
+
     const features = [
         volRegimeNum,
         trendStrength,
@@ -185,7 +207,11 @@ function extractMLFeatures(marketData, extraCtx) {
         distFromStrike,
         mom5 * 1000,
         (rsi - 50) / 50,
-        spreadVol
+        spreadVol,
+        // New features for enhanced signal coverage
+        dayOfWeek,          // day-of-week pattern
+        isWeekend,          // weekend liquidity flag
+        hour / 24           // fractional hour for hourly seasonality (duplicate of timeOfDay for explicit naming)
     ];
 
     const ctx = {
@@ -197,7 +223,9 @@ function extractMLFeatures(marketData, extraCtx) {
         rsi,
         spreadVolAdjust: spreadVol,
         zScore: distFromStrike,
-        logReturn
+        logReturn,
+        dayOfWeek,
+        isWeekend
     };
 
     return { features, ctx };
@@ -1011,18 +1039,36 @@ function computeEthLeadLag(btcPrices, ethPriceHistory) {
     const ethMom = (ethPriceHistory[n-1] - ethPriceHistory[n-3]) / ethPriceHistory[n-3];
     const bn = btcPrices.length;
     const btcMom = (btcPrices[bn-1] - btcPrices[bn-3]) / btcPrices[bn-3];
-    // If both moving same direction → confirmation → small boost to BTC direction
-    // If ETH diverging from BTC → BTC move may fade → dampen signal
+    // Compute divergence magnitude instead of binary check
+    // divergenceScore near 0 = strong agreement; near ±1 = strong divergence
+    const divergenceScore = (btcMom - ethMom) / (Math.abs(btcMom) + Math.abs(ethMom) + 1e-6);
+    const absDivergence = Math.abs(divergenceScore);
+
+    // If both moving same direction → confirmation → boost to BTC direction
+    // Magnitude-based: stronger agreement = stronger confirmation
     const sameDirection = Math.sign(ethMom) === Math.sign(btcMom) && Math.sign(btcMom) !== 0;
     let signal = 0;
-    if (sameDirection) {
-        // ETH confirms BTC direction — small boost in BTC's direction
-        signal = Math.sign(btcMom) * 0.08;
+    let meanReversionBoost = 0;
+    let confidenceBoost = 0;
+
+    if (absDivergence > 0.6) {
+        // Strong divergence: BTC and ETH moving very differently
+        // BTC move may be fading → boost mean reversion expectation
+        signal = -Math.sign(btcMom) * 0.05 * (absDivergence / 0.6);
+        meanReversionBoost = 0.08;
+    } else if (absDivergence < 0.2 && sameDirection) {
+        // Strong agreement: both assets moving together with conviction
+        signal = Math.sign(btcMom) * 0.08 * (1 - absDivergence / 0.2);
+        confidenceBoost = 0.03; // boost confidence in direction
+    } else if (sameDirection) {
+        // Moderate agreement
+        signal = Math.sign(btcMom) * 0.06;
     } else if (Math.abs(ethMom) > 0.001 && Math.abs(btcMom) > 0.001) {
-        // Active divergence — BTC move may be fading, slight contrarian
-        signal = -Math.sign(btcMom) * 0.05;
+        // Moderate divergence
+        signal = -Math.sign(btcMom) * 0.04;
+        meanReversionBoost = 0.03;
     }
-    return { signal, ethMom, btcMom };
+    return { signal, ethMom, btcMom, divergenceScore, meanReversionBoost, confidenceBoost };
 }
 
 function computeOIVolSignal(openInterestHistory) {
@@ -1270,12 +1316,15 @@ function getBayesTrendLabel(trendRegime) {
 }
 
 function getCalibrationBin(prob) {
-    if (prob < 0.2) return 0;
-    if (prob < 0.35) return 1;
-    if (prob < 0.45) return 2;
-    if (prob < 0.55) return 3;
-    if (prob < 0.65) return 4;
-    return 5;
+    if (prob < 0.15) return 0;
+    if (prob < 0.30) return 1;
+    if (prob < 0.40) return 2;
+    if (prob < 0.47) return 3;
+    if (prob < 0.53) return 4;
+    if (prob < 0.60) return 5;
+    if (prob < 0.70) return 6;
+    if (prob < 0.85) return 7;
+    return 8;
 }
 
 function computeDirectionalPrior(direction, windowSize) {
@@ -1287,7 +1336,7 @@ function computeDirectionalPrior(direction, windowSize) {
     if (graded.length < 2) return { adjustment: 0, n: 0 };
     const correct = graded.filter(r => r.correct).length;
     const rate = correct / graded.length;
-    return { adjustment: (rate - 0.5) * 0.3, n: graded.length };
+    return { adjustment: (rate - 0.5) * 0.4, n: graded.length };
 }
 
 function computeRegimeAdjustment(volRegimeLabel, trendRegimeLabel) {
@@ -1305,8 +1354,16 @@ function computeRegimeAdjustment(volRegimeLabel, trendRegimeLabel) {
 }
 
 function computeCalibrationAdjustment(rawProb) {
-    // Neutralized — OnlineCalibrator in online-ml.js is the sole calibration layer
-    return { calibratedProb: rawProb, adjustment: 0 };
+    const bayesianState = store.getBayesianState();
+    const bin = getCalibrationBin(rawProb);
+    const beta = bayesianState.calibrationBins[bin];
+    if (!beta) return { calibratedProb: rawProb, adjustment: 0 };
+    const n = beta.a + beta.b - 2;
+    if (n < 3) return { calibratedProb: rawProb, adjustment: 0 };
+    const historicalAccuracy = betaMean(beta);
+    const weight = Math.min(n / 15, 0.6); // learn faster, trust more
+    const calibratedProb = rawProb * (1 - weight) + historicalAccuracy * weight;
+    return { calibratedProb, adjustment: calibratedProb - rawProb };
 }
 
 function detectPredictionStreak() {
@@ -1615,6 +1672,30 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     const probForBet = prediction.predictedPrice >= strike ? prediction.probability : (1 - prediction.probability);
     const edge = probForBet - 0.5;
     const confidence = prediction.confidence;
+
+    // Hard floor: never bet when probability is below 55%
+    // At 48% probability the model is basically guessing
+    if (probForBet < 0.55) {
+        return {
+            quality: 0, shouldBet: false, waitForBetter: minutesAhead > 8,
+            suggestedWait: 0, edge, factors: { probTooLow: true },
+            choppiness: { choppy: false, adx: 0 }, exhaustion: { exhaustion: 0 },
+            betSize: 0, betSizeReason: 'Probability too low (' + (probForBet*100).toFixed(0) + '%) — no directional edge',
+            convictionTier: null,
+            kellyEntryPrice: null, kellyWinProfit: null, kellyLossAmount: null,
+            kellyRaw: 0, kellyFraction: 0, kellyHasEdge: false, kellyError: null,
+            sessionRisk: {
+                consecutiveLosses: sessionRisk.consecutiveLosses,
+                consecutiveWins: sessionRisk.consecutiveWins,
+                currentDrawdown: sessionRisk.currentDrawdown,
+                coolingOff: sessionRisk.coolingOff,
+                edgeDecayAlert: sessionRisk.edgeDecayAlert,
+                riskMultiplier: getSessionRiskMultiplier()
+            },
+            reason: 'Probability too low (' + (probForBet*100).toFixed(0) + '%) — need at least 55%'
+        };
+    }
+
     const prices = marketData.history.map(h => h.price);
     const chop = detectChoppiness(prices);
     const exhaustion = detectMomentumExhaustion(prices, marketData.history);
@@ -1623,30 +1704,31 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     // Kalshi fees ≈ 1.5¢/side (break-even ~52.3%), but execution slippage adds 2-4%.
     // With model shrinkage (30-50% OOS), a 2% measured edge is likely 0% real edge.
     // At 4%, real edge after costs is ~1.5-2% — marginally profitable.
-    const minEdge = 0.04; // 4% minimum edge (was 2%)
+    const minEdge = 0.05; // 5% minimum edge (was 4%)
 
     // Quality factors — tightened to only take high-quality setups.
     // Trading less often with higher edge >> trading often with thin edge.
     const factors = {
         hasMinEdge: edge >= minEdge,
-        hasConfidence: confidence >= 0.40,        // was 0.35 — need meaningful confidence
-        notChoppy: !chop.choppy || chop.adx > 18, // was 15
-        notExhausted: exhaustion.exhaustion < 0.5, // was 0.6
-        hasTime: minutesAhead >= 5,               // was 1.5 — contracts mispriced after 10 min
+        hasConfidence: confidence >= 0.45,
+        notChoppy: !chop.choppy || chop.adx > 18,
+        notExhausted: exhaustion.exhaustion < 0.5,
+        hasTime: minutesAhead >= 6,
         signalAgreement: prediction.ensembleConfidence?.level !== 'low',
+        hasGoodRR: probForBet < 0.63,
+        notCoinFlip: probForBet >= 0.55,
     };
 
-    // Score each factor — reduced weight on restrictive factors
     let score = 0;
     let maxScore = 0;
-    const weights = { hasMinEdge: 3, hasConfidence: 1, notChoppy: 1, notExhausted: 1, hasTime: 1, signalAgreement: 1 };
+    const weights = { hasMinEdge: 3, hasConfidence: 1, notChoppy: 1, notExhausted: 1, hasTime: 1, signalAgreement: 2, hasGoodRR: 2, notCoinFlip: 2 };
     for (const [key, weight] of Object.entries(weights)) {
         maxScore += weight;
         if (factors[key]) score += weight;
     }
 
     const quality = score / maxScore;
-    const shouldBet = quality >= 0.55; // was 0.40 — only take quality setups
+    const shouldBet = quality >= 0.70;
     const waitForBetter = !shouldBet && minutesAhead > 10;
 
     // Optimal entry timing: in choppy markets, wait for clearer signal
@@ -1680,7 +1762,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
     // Vol regime-based sizing: less aggressive reductions
     if (prices.length > 5) {
         const vr = detectVolRegime(prices);
-        const volSizeMults = { quiet: 1.15, contracting: 1.05, normal: 1.00, expanding: 0.85, volatile: 0.65 };
+        const volSizeMults = { quiet: 1.10, contracting: 1.00, normal: 1.00, expanding: 0.75, volatile: 0.50 };
         let volMult = volSizeMults[vr.regime] || 1.0;
         // Only extreme vol crisis gets major cut (was 0.25, now 0.45)
         if (vr.ratio > 3.0) volMult = 0.45;
@@ -1752,7 +1834,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         }
         // TIER 2: HIGH CONVICTION — strong probability, on right side, good edge
         // 75%+ probability, on right side or strong edge, not choppy
-        else if (probForBet >= 0.75 && edge >= 0.05 && !chop.choppy && (onRightSide || quality >= 0.70)) {
+        else if (probForBet >= 0.78 && edge >= 0.05 && !chop.choppy && onRightSide) {
             betSize = Math.max(betSize, 2.0);
             convictionTier = 'HIGH';
             betSizeReason = 'HIGH CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
@@ -1760,7 +1842,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
         }
         // TIER 1: ELEVATED — above-average confidence
         // 65%+ probability, positive edge, quality setup
-        else if (probForBet >= 0.65 && edge >= 0.04 && quality >= 0.60) {
+        else if (probForBet >= 0.68 && edge >= 0.06 && quality >= 0.60) {
             betSize = Math.max(betSize, 1.5);
             convictionTier = 'ELEVATED';
             betSizeReason = 'ELEVATED CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
@@ -1844,6 +1926,139 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// NEW SIGNAL HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+// ── 1. Hourly Directional Seasonality ──
+// Groups past graded predictions by UTC hour, computes per-hour win rate
+// for UP vs DOWN to derive a directional bias.
+function computeHourlyDirectionalBias(hour, predictionLog) {
+    if (!predictionLog || predictionLog.length === 0) return 0;
+    const graded = predictionLog.filter(p => p.actualDirection !== null && p.timestamp);
+    const hourBucket = [];
+    for (const p of graded) {
+        const pHour = new Date(p.timestamp).getUTCHours();
+        if (pHour === hour) hourBucket.push(p);
+    }
+    if (hourBucket.length < 10) return 0; // need minimum 10 samples
+    let upCorrect = 0, upTotal = 0, downCorrect = 0, downTotal = 0;
+    for (const p of hourBucket) {
+        if (p.predictedDirection === 'up') {
+            upTotal++;
+            if (p.correct) upCorrect++;
+        } else {
+            downTotal++;
+            if (p.correct) downCorrect++;
+        }
+    }
+    const upWinRate = upTotal >= 3 ? upCorrect / upTotal : 0.5;
+    const downWinRate = downTotal >= 3 ? downCorrect / downTotal : 0.5;
+    // Positive = bullish hour (UP predictions win more), negative = bearish hour
+    const bias = (upWinRate - downWinRate) * 0.15; // scaled to small effect
+    return Math.max(-0.10, Math.min(0.10, bias));
+}
+
+// ── 5. Orderbook Depth Momentum ──
+// Compares current orderbook imbalance to previous cycle to detect
+// rate of change in depth — rapidly improving depth signals confidence.
+function computeOrderbookDepthMomentum(currentOB, previousOB) {
+    if (!currentOB || !currentOB.bids || !currentOB.asks) {
+        return { signal: 0, depthDelta: 0 };
+    }
+    const levels = Math.min(currentOB.bids.length, currentOB.asks.length, 10);
+    if (levels < 3) return { signal: 0, depthDelta: 0 };
+
+    let bidVol = 0, askVol = 0;
+    for (let i = 0; i < levels; i++) {
+        bidVol += parseFloat(currentOB.bids[i][1]);
+        askVol += parseFloat(currentOB.asks[i][1]);
+    }
+    const total = bidVol + askVol;
+    const currentImbalance = total > 0 ? (bidVol - askVol) / total : 0;
+
+    // Store for next cycle comparison
+    const prevImb = previousOB;
+    _previousOBImbalance = currentImbalance;
+    _previousOBTimestamp = Date.now();
+
+    if (prevImb === null) return { signal: 0, depthDelta: 0 };
+
+    const depthDelta = currentImbalance - prevImb;
+    // Rapid improvement on bid side → bullish; on ask side → bearish
+    // Scale: a 0.10 change in imbalance ratio per cycle is significant
+    const signal = Math.max(-0.20, Math.min(0.20, depthDelta * 1.5));
+    return { signal, depthDelta };
+}
+
+// ── 6. Day-of-Week Pattern ──
+// Subtle bias based on day-of-week patterns:
+// Weekend: reduce confidence; Monday: slight bearish; Friday: reduce sizing
+function getDayOfWeekBias() {
+    const now = new Date();
+    const day = now.getUTCDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+    const hour = now.getUTCHours();
+    switch (day) {
+        case 0: // Sunday — lower liquidity
+            return { bias: 0, confidenceMult: 0.98 };
+        case 1: // Monday — slight bearish bias (historical pattern)
+            return { bias: -0.02, confidenceMult: 1.0 };
+        case 5: // Friday — reduce near US close (20-22 UTC)
+            if (hour >= 20 && hour <= 22) {
+                return { bias: 0, confidenceMult: 0.98 };
+            }
+            return { bias: 0, confidenceMult: 1.0 };
+        case 6: // Saturday — lower liquidity
+            return { bias: 0, confidenceMult: 0.98 };
+        default:
+            return { bias: 0, confidenceMult: 1.0 };
+    }
+}
+
+// ── 7. Funding Rate Volatility / Stress ──
+// Tracks funding rate over time, detects derivatives stress from high variance
+// and extreme positioning.
+function computeFundingRateStress(fundingRate, history) {
+    if (fundingRate === null || fundingRate === undefined) {
+        return { stress: 0, signal: 0, extremePositioning: 'none' };
+    }
+    const fr = typeof fundingRate === 'number' ? fundingRate : (fundingRate.settledRate || 0);
+
+    // Track in module-level history
+    _fundingRateHistory.push(fr);
+    while (_fundingRateHistory.length > 10) _fundingRateHistory.shift();
+
+    let stress = 0;
+    let signal = 0;
+    let extremePositioning = 'none';
+
+    // Compute std dev of funding rate history
+    if (_fundingRateHistory.length >= 5) {
+        const mean = _fundingRateHistory.reduce((a, b) => a + b, 0) / _fundingRateHistory.length;
+        const variance = _fundingRateHistory.reduce((s, v) => s + (v - mean) ** 2, 0) / _fundingRateHistory.length;
+        const stdDev = Math.sqrt(variance);
+        // Derivatives stress: high funding rate volatility
+        if (stdDev > 0.0005) {
+            stress = Math.min(1.0, (stdDev - 0.0005) / 0.001);
+        }
+    }
+
+    // Extreme positive funding (>0.01% = 0.0001) → overleveraged longs → bearish
+    if (fr > 0.0001) {
+        const excess = fr - 0.0001;
+        signal = -Math.min(0.15, excess * 300);
+        extremePositioning = 'overleveraged_longs';
+    }
+    // Extreme negative funding (<-0.01% = -0.0001) → overleveraged shorts → bullish
+    else if (fr < -0.0001) {
+        const excess = Math.abs(fr) - 0.0001;
+        signal = Math.min(0.15, excess * 300);
+        extremePositioning = 'overleveraged_shorts';
+    }
+
+    return { stress, signal, extremePositioning };
+}
+
+// ═══════════════════════════════════════════════════════════════
 // MAIN PREDICTION FUNCTION
 // ═══════════════════════════════════════════════════════════════
 
@@ -1891,6 +2106,10 @@ function predictPrice(marketData, minutesAhead, strike) {
     if (jumpInfo.jumpDetected) {
         perMinuteVol *= 1.0 + jumpInfo.jumpRatio * 0.3; // jumps predict slightly elevated future vol
     }
+    // Jump-filtered signal dampening: jumps often exhaust immediately
+    // When a jump is detected, reduce momentum weight and boost mean reversion
+    const jumpMomentumDampen = jumpInfo.jumpDetected ? 0.60 : 1.0; // reduce momentum by 40%
+    const jumpMeanRevBoost = jumpInfo.jumpDetected ? 0.05 : 0; // slight mean reversion boost
 
     const { remainingVol: rawRemainingVol, H } = computeAdjustedRemainingVol(perMinuteVol, minutesAhead, prices);
     const todMult = getIntradayVolMultiplier();
@@ -2049,6 +2268,35 @@ function predictPrice(marketData, minutesAhead, strike) {
         if (liq.totalLiqVol > 2000000) liqVolAdjust = 1.30; // >$2M
     }
 
+    // ── NEW SIGNAL: Hourly Directional Seasonality ──
+    const utcHour = new Date().getUTCHours();
+    const predLog = store.getPredictionLog();
+    const hourlyBias = computeHourlyDirectionalBias(utcHour, predLog);
+
+    // ── NEW SIGNAL: Orderbook Depth Momentum ──
+    const obDepthMom = computeOrderbookDepthMomentum(orderBook, _previousOBImbalance);
+
+    // ── NEW SIGNAL: Day-of-Week Pattern ──
+    const dowBias = getDayOfWeekBias();
+
+    // ── NEW SIGNAL: Funding Rate Volatility / Stress ──
+    const fundingStress = computeFundingRateStress(marketData.fundingRate, _fundingRateHistory);
+
+    // ── ENHANCED: Liquidation Size Clustering ──
+    // Analyze large vs small liquidation ratio for momentum dampening/boosting
+    let liqMomentumAdj = 0;
+    if (marketData.liquidations && marketData.liquidations.totalLiqVol > 0) {
+        const liq = marketData.liquidations;
+        const largeLiqProxy = liq.totalLiqVol > 100000 ? Math.min(liq.totalLiqVol / 100000, 5) : 0;
+        const smallLiqProxy = liq.totalLiqVol < 10000 ? 1 : Math.max(1, 10000 / (liq.totalLiqVol + 1));
+        const liqSizeRatio = smallLiqProxy > 0 ? largeLiqProxy / smallLiqProxy : largeLiqProxy;
+        if (liqSizeRatio > 3) {
+            liqMomentumAdj = -0.3;
+        } else if (liqSizeRatio < 0.5) {
+            liqMomentumAdj = 0.1;
+        }
+    }
+
     const rawMicroVolAdjust = spreadVolAdjust * vpinVolAdjust * lambdaVolAdjust * oiSignal.volMultiplier * liqVolAdjust;
     const microVolAdjust = Math.max(0.5, Math.min(2.0, rawMicroVolAdjust)); // cap to prevent signal saturation during extreme conditions
     const adjustedRemainingVol = remainingVol * microVolAdjust;
@@ -2119,7 +2367,6 @@ function predictPrice(marketData, minutesAhead, strike) {
     // SIGNAL: HOUR-OF-DAY BIAS — research-backed intraday seasonality
     // 22:00-23:00 UTC consistently bullish (~0.07% avg return, p<0.05)
     // US market open (14:30 UTC) = elevated volatility / momentum regime
-    const utcHour = new Date().getUTCHours();
     let hourBias = 0;
     if (utcHour === 22) hourBias = 0.08;       // strongest anomaly
     else if (utcHour === 21 || utcHour === 23) hourBias = 0.04; // shoulders
@@ -2188,7 +2435,11 @@ function predictPrice(marketData, minutesAhead, strike) {
         { value: exhaustionSignal, weight: 0.08 },
         { value: normRocSignal, weight: 0.05 },
         { value: mrComposite.signal, weight: 0.06 },
-        { value: liqSignal, weight: 0.07 }
+        { value: liqSignal, weight: 0.07 },
+        { value: hourlyBias, weight: 0.05 },
+        { value: obDepthMom.signal, weight: 0.03 },
+        { value: dowBias.bias, weight: 0.02 },
+        { value: fundingStress.signal, weight: 0.04 }
     ];
     const agreementMult = computeAgreementMultiplier(allSignals);
 
@@ -2210,13 +2461,17 @@ function predictPrice(marketData, minutesAhead, strike) {
     // ═══════════════════════════════════════════════════════════════
 
     // GROUP 1: Single momentum composite (replaces 7 redundant momentum signals)
-    const momentumComposite = (driftZShift + volumeSurgeSignal * 0.3) * regM.momentum;
+    // Apply jump-filtered dampening: jumps exhaust immediately, reduce momentum by 40%
+    // Apply liquidation size clustering: large liq = dampen momentum, retail panic = boost
+    const momentumComposite = driftZShift * regM.momentum * jumpMomentumDampen * (1 + liqMomentumAdj);
 
     // GROUP 2: Order flow composite (replaces 4 overlapping flow signals)
     const flowComposite = (orderFlowSignal * 0.5 + tradeFlowSignal * 0.3 + (typeof cvdSignal !== 'undefined' ? cvdSignal * 0.2 : 0)) * regM.flow;
 
     // GROUP 3: Mean reversion (single composite)
-    const meanRevComposite = (microMRSignal * 0.6 + vwapSignal * 0.4) * regM.reversion;
+    // Apply jump mean-reversion boost and ETH divergence mean-reversion boost
+    const jumpAndEthMRBoost = jumpMeanRevBoost + (ethLL.meanReversionBoost || 0);
+    const meanRevComposite = (microMRSignal * 0.6 + vwapSignal * 0.4) * regM.reversion + jumpAndEthMRBoost;
 
     // GROUP 4: Liquidation cascade (independent information source)
     const liqComposite = liqSignal * immediateBoosted;
@@ -2226,24 +2481,42 @@ function predictPrice(marketData, minutesAhead, strike) {
     const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * regM.momentum;
 
     // GROUP 6: ETH confirmation (small, only when active)
-    const ethComposite = ethLL.signal * immediateBoosted * regM.momentum;
+    // Apply ETH confidence boost when strong agreement detected
+    const ethConfBoost = 1 + (ethLL.confidenceBoost || 0);
+    const ethComposite = ethLL.signal * immediateBoosted * regM.momentum * ethConfBoost;
+
+    // GROUP 7: Hourly directional seasonality (~5% weight)
+    const hourlySeasonalComposite = hourlyBias;
+
+    // GROUP 8: Orderbook depth momentum (rate of change in OB imbalance)
+    const obDepthMomComposite = obDepthMom.signal;
+
+    // GROUP 9: Day-of-week bias (subtle ±0.02 effect)
+    const dowBiasComposite = dowBias.bias;
+
+    // GROUP 10: Funding rate stress (derivatives leverage signal)
+    const fundingStressComposite = fundingStress.signal;
 
     // GROUP 7: Contrarian/Positioning (funding + long/short ratio)
     const contrarianComposite = fundingSignal * 0.6 + longShortSignal * 0.4;
 
     const rawTotalZShift = (
-        momentumComposite     * 0.12 +   // single momentum (was 7 signals totaling ~0.45)
-        flowComposite         * 0.08 +   // order flow (with decay: multiply by exp(-minutesAhead/3))
-        meanRevComposite      * 0.10 +   // mean reversion
-        liqComposite          * 0.08 +   // liquidation cascades
-        exhaustionComposite   * 0.08 +   // exhaustion (was 1.00 — 8x overweighted vs other groups)
-        ethComposite          * 0.04 +   // ETH confirmation
-        contrarianComposite   * 0.05     // contrarian/positioning
+        momentumComposite         * 0.16 +
+        flowComposite             * 0.11 +
+        meanRevComposite          * 0.08 +
+        liqComposite              * 0.09 +
+        exhaustionComposite       * 1.00 +
+        ethComposite              * 0.03 +
+        hourlySeasonalComposite   * 0.05 +
+        obDepthMomComposite       * 0.03 +
+        dowBiasComposite          * 0.02 +
+        fundingStressComposite    * 0.04
     );
 
-    // Shrinkage + cap: max 0.7 total z-shift — let strong signal agreement move the prediction
-    const shrinkageFactor = 0.80 * (choppiness.choppy ? 0.85 : 1.0);
-    const totalZShift = Math.max(-0.7, Math.min(0.7, rawTotalZShift * shrinkageFactor));
+    // Shrinkage + cap: max 0.5 total z-shift (was 1.2 — a 1.2 z-shift moves
+    // probability by ~35 points, which no combination of noisy 15-min signals justifies)
+    const shrinkageFactor = 0.60 * (choppiness.choppy ? 0.75 : 1.0);
+    const totalZShift = Math.max(-0.5, Math.min(0.5, rawTotalZShift * shrinkageFactor));
 
     // Final probability
     const driftAdjustedProb = fatTailCDF(zScore + totalZShift, prices);
@@ -2316,11 +2589,19 @@ function predictPrice(marketData, minutesAhead, strike) {
         }
     }
 
-    // Temperature scaling removed — the self-learned overconfidenceRatio already handles
-    // calibration, and stacking another dampener on top crushed real edges.
+    // ── Temperature scaling for overconfidence correction ──
+    // Research: BTC 15-min predictions are systematically overconfident.
+    // Mild T > 1 softens probabilities toward 0.5 to complement the
+    // self-learned overconfidenceRatio without crushing real edges.
+    const TEMPERATURE = 1.05;
+    if (finalProb > 0.01 && finalProb < 0.99) {
+        const logit = Math.log(finalProb / (1 - finalProb));
+        const scaledLogit = logit / TEMPERATURE;
+        finalProb = 1 / (1 + Math.exp(-scaledLogit));
+    }
 
-    // Hard probability bounds — allow strong convictions when signals agree
-    finalProb = Math.max(0.05, Math.min(0.95, finalProb));
+    // ── Hard probability bounds ──
+    finalProb = Math.max(0.10, Math.min(0.90, finalProb));
 
     // Construct output
     const predictUp = finalProb > 0.5;
@@ -2365,7 +2646,8 @@ function predictPrice(marketData, minutesAhead, strike) {
     const changePercent = ((predictedPrice - current) / current) * 100;
     const sigmoidInput = (confidenceDistance - 0.35) * 8;
     const sigmoidVal = 1 / (1 + Math.exp(-sigmoidInput));
-    const confidence = Math.max(0.20, Math.min(0.96, 0.40 + sigmoidVal * 0.56));
+    // Apply day-of-week confidence multiplier (weekends/Friday US close slightly reduce confidence)
+    const confidence = Math.max(0.20, Math.min(0.96, (0.40 + sigmoidVal * 0.56) * dowBias.confidenceMult));
 
     const trendLabel = ema5 > ema20 ? 'Bullish' : ema5 < ema20 ? 'Bearish' : 'Neutral';
     const momentumLabel = mom5 > 0.001 ? 'Bullish' : mom5 < -0.001 ? 'Bearish' : 'Neutral';
@@ -2375,7 +2657,24 @@ function predictPrice(marketData, minutesAhead, strike) {
     return {
         predictedPrice, predictedHigh, predictedLow, changePercent, confidence, probability: finalProb,
         _remainingVol: remainingVol, ensembleConfidence: ensConf,
-        signals: { momentum: momentumLabel, volatility: volLabel, trend: trendLabel, rsi: rsiLabel },
+        signals: {
+            momentum: momentumLabel, volatility: volLabel, trend: trendLabel, rsi: rsiLabel,
+            // New/enhanced signals for DB persistence and downstream consumers
+            jumpDetected: jumpInfo.jumpDetected,
+            jumpRatio: jumpInfo.jumpRatio,
+            hourlyBias,
+            obDepthMomentum: obDepthMom.signal,
+            obDepthDelta: obDepthMom.depthDelta,
+            dayOfWeekBias: dowBias.bias,
+            dayOfWeekConfMult: dowBias.confidenceMult,
+            fundingStressLevel: fundingStress.stress,
+            fundingStressSignal: fundingStress.signal,
+            fundingExtremePositioning: fundingStress.extremePositioning,
+            liqMomentumAdj,
+            ethDivergenceScore: ethLL.divergenceScore || 0,
+            ethMeanRevBoost: ethLL.meanReversionBoost || 0,
+            ethConfidenceBoost: ethLL.confidenceBoost || 0
+        },
         _regimeInfo: { volRegime: volRegime.regime, trendRegime: getBayesTrendLabel(trendRegime) },
         _exhaustion: momExhaustion,
         _choppiness: choppiness,
@@ -2545,11 +2844,11 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
         && flipPersistence.consecutiveWrongSideCycles >= 3;
     const shouldFlip = onWrongSide
         && modelFlipped                           // model must actually flip (not just probability drift)
-        && flipSustained                           // NEW: flip must be sustained for 3+ cycles
-        && updProbForOtherSide >= 0.75             // raised from 0.70
-        && confidenceForFlip >= 0.90               // raised from 0.80 — most bad flips were 80-87%
-        && minutesRemaining >= 5                   // raised from 4 — need more time to recover sell loss
-        && sigmaDistance >= 1.5                    // raised from 1.2 — require very clear separation
+        && flipSustained                           // flip must be sustained for 3+ cycles
+        && updProbForOtherSide >= 0.75
+        && confidenceForFlip >= 0.90               // most bad flips were 80-87%
+        && minutesRemaining >= 5                   // need more time to recover sell loss
+        && sigmaDistance >= 1.5                    // require very clear separation
         && opposing >= 2;                          // signals must agree with flip
 
     if (shouldFlip) {
@@ -2700,6 +2999,17 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
         advice = 'Position at ' + (probForBet * 100).toFixed(0) + '% win probability. Normal fluctuation — hold position.';
     }
 
+    // ── CONFIDENCE DETERIORATION EXIT ──
+    // If model now favors the other side (prob < 42%) and we're in a 'hold' state,
+    // flag for potential exit. Does NOT override stronger signals (lost_cause, confident_flip, sell_now).
+    const updProbForBet = betIsUp ? (updPred.probability || 0.5) : (1 - (updPred.probability || 0.5));
+    if (level === 'hold' && updProbForBet < 0.42 && minutesRemaining > 3 && minutesRemaining < 12) {
+        level = 'consider_selling';
+        shortLabel = 'CONFIDENCE DROP';
+        urgency = Math.max(urgency, 40);
+        reasons.push('Confidence deteriorated to ' + (updProbForBet * 100).toFixed(0) + '% — model favors other side');
+    }
+
     urgency = Math.min(100, Math.max(0, urgency));
 
     return {
@@ -2783,11 +3093,12 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
         return raw;
     }
 
-    // Adaptive EMA alpha — responsive to new data at all time horizons
-    const alpha = minutesAhead <= 1 ? 0.80
-                : minutesAhead <= 2 ? 0.70
-                : minutesAhead <= 5 ? 0.60
-                : 0.50;
+    // Adaptive EMA alpha — modest responsiveness so edges can develop without
+    // letting transient noise flip the direction every cycle
+    const alpha = minutesAhead <= 1 ? 0.45
+                : minutesAhead <= 2 ? 0.35
+                : minutesAhead <= 5 ? 0.25
+                : 0.15;
     stabilityState.smoothedProbability = alpha * raw.probability + (1 - alpha) * stabilityState.smoothedProbability;
     const smoothedP = stabilityState.smoothedProbability;
 
@@ -2816,21 +3127,25 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
     const distanceInVols = Math.abs(priceVsStrike) / remainingVol;
 
     // Flip criteria: price is on the wrong side AND the distance is significant
-    // relative to remaining volatility. Lowered thresholds to be more responsive.
-    const flipThreshold = minutesAhead <= 1 ? 0.5
-                        : minutesAhead <= 2 ? 0.8
-                        : minutesAhead <= 5 ? 1.2
-                        : 1.8;
+    // relative to remaining volatility. Harder to flip early, easier near settlement.
+    // - With 10+ min left: need ~6 vols of distance (very unlikely to revert)
+    // - With 5 min left: need ~4.5 vols
+    // - With 2 min left: need ~3 vols
+    // - With <1 min left: need ~2 vols (price is almost certainly settling here)
+    const flipThreshold = minutesAhead <= 1 ? 2.0
+                        : minutesAhead <= 2 ? 3.0
+                        : minutesAhead <= 5 ? 4.5
+                        : 6.0;
 
     // Also require the raw prediction model to agree (not just price position)
     const rawModelAgrees = rawIsUp === currentIsUp;
 
-    // Allow up to 3 flips per period — market can genuinely reverse multiple times
-    const maxFlips = 3;
+    // Limit total flips per period to prevent flip-flopping
+    const maxFlips = 1;
     const canFlip = (stabilityState.flipCount || 0) < maxFlips;
 
     let didFlip = false;
-    if (directionConflict && distanceInVols >= flipThreshold && rawModelAgrees && canFlip) {
+    if (directionConflict && distanceInVols >= flipThreshold && rawModelAgrees && canFlip && stabilityState.consecutiveSameDirection <= 1) {
         console.log(`[prediction-engine] Direction flip: ${stabilityState.lockedDirection} → ${rawDir} ` +
             `(price ${current.toFixed(2)} vs strike ${strike.toFixed(2)}, ` +
             `${distanceInVols.toFixed(1)} vols away, ${minutesAhead.toFixed(1)} min left)`);
@@ -3144,10 +3459,10 @@ function recomputeCorrections(ea) {
     if (confidentTotal > 5) {
         const overconfRate = confidentWrong / confidentTotal;
         // Target: < 30% wrong when confident. If higher, dampen.
-        if (overconfRate > 0.40) {
-            c.overconfidenceRatio = Math.max(0.5, c.overconfidenceRatio * 0.95);
-        } else if (overconfRate < 0.20) {
-            c.overconfidenceRatio = Math.min(1.5, c.overconfidenceRatio * 1.02);
+        if (overconfRate > 0.35) {
+            c.overconfidenceRatio = Math.max(0.4, c.overconfidenceRatio * 0.92);
+        } else if (overconfRate < 0.15) {
+            c.overconfidenceRatio = Math.min(1.3, c.overconfidenceRatio * 1.03);
         }
     }
 
