@@ -1105,6 +1105,35 @@
 
     <script>
         // ═══════════════════════════════════════════════════════════════
+        // DASHBOARD API KEY — server protects /api/* and WebSocket when
+        // DASHBOARD_API_KEY env var is set. Capture key from "?key=…"
+        // URL parameter and persist for subsequent visits.
+        // ═══════════════════════════════════════════════════════════════
+        (function captureKey() {
+            try {
+                const params = new URLSearchParams(location.search);
+                const k = params.get('key');
+                if (k) {
+                    localStorage.setItem('dashKey', k);
+                    // Strip the key from the visible URL so it's not bookmarked / shared
+                    params.delete('key');
+                    const clean = location.pathname + (params.toString() ? '?' + params.toString() : '') + location.hash;
+                    history.replaceState(null, '', clean);
+                }
+            } catch (e) {}
+        })();
+        const DASH_KEY = (function () {
+            try { return localStorage.getItem('dashKey') || ''; } catch (e) { return ''; }
+        })();
+
+        function authFetch(url, opts) {
+            opts = opts || {};
+            const headers = Object.assign({}, opts.headers || {});
+            if (DASH_KEY) headers['X-API-Key'] = DASH_KEY;
+            return fetch(url, Object.assign({}, opts, { headers }));
+        }
+
+        // ═══════════════════════════════════════════════════════════════
         // WEBSOCKET CONNECTION — Receives data from always-on server
         // ═══════════════════════════════════════════════════════════════
         let ws = null;
@@ -1127,8 +1156,8 @@
             // Cancel any pending reconnect timer to prevent overlapping connections
             if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = protocol + '//' + location.host;
-            console.log('Connecting to WebSocket:', wsUrl);
+            const wsUrl = protocol + '//' + location.host + (DASH_KEY ? '?apiKey=' + encodeURIComponent(DASH_KEY) : '');
+            console.log('Connecting to WebSocket');
 
             ws = new WebSocket(wsUrl);
 
@@ -2395,7 +2424,7 @@
                 const ts = serverData && serverData.tradingStatus;
                 const newPaperMode = ts ? !ts.paperMode : true;
                 if (!newPaperMode && !confirm('Switch to LIVE trading? Real money will be used.')) return;
-                await fetch('/api/trading/mode', {
+                await authFetch('/api/trading/mode', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ paperMode: newPaperMode })
@@ -2408,7 +2437,7 @@
             const amount = parseFloat(input && input.value);
             if (!amount || amount <= 0) { showToast('Enter a valid amount', 'error'); return; }
             try {
-                const resp = await fetch('/api/trading/paper-balance', {
+                const resp = await authFetch('/api/trading/paper-balance', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ action, amount })
@@ -2423,7 +2452,7 @@
         async function switchEnvironment(env) {
             try {
                 if (env === 'production' && !confirm('Switch to PRODUCTION? This uses real money on Kalshi.')) return;
-                const resp = await fetch('/api/trading/environment', {
+                const resp = await authFetch('/api/trading/environment', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ environment: env })
@@ -2536,7 +2565,7 @@
             btn.textContent = 'PLACING...';
             btn.disabled = true;
             try {
-                const resp = await fetch('/api/trading/force-bet', {
+                const resp = await authFetch('/api/trading/force-bet', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({})
@@ -2579,7 +2608,7 @@
             btn.textContent = 'PRESSING...';
             btn.disabled = true;
             try {
-                const resp = await fetch('/api/trading/press-bet', {
+                const resp = await authFetch('/api/trading/press-bet', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({})
@@ -2592,7 +2621,7 @@
                     btn.style.borderColor = 'rgba(63,185,80,0.4)';
                     // Refresh trading status so UI shows updated position immediately
                     try {
-                        const statusResp = await fetch('/api/trading/status');
+                        const statusResp = await authFetch('/api/trading/status');
                         const status = await statusResp.json();
                         if (serverData) serverData.tradingStatus = status;
                     } catch(e) { /* next WS broadcast will catch up */ }
@@ -2628,7 +2657,7 @@
             btn.textContent = 'SELLING...';
             btn.disabled = true;
             try {
-                const resp = await fetch('/api/trading/force-sell', {
+                const resp = await authFetch('/api/trading/force-sell', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({})
@@ -2667,7 +2696,7 @@
                 if (activate) {
                     if (!confirm('KILL SWITCH: This will stop ALL trading and emergency sell any open position. Are you sure?')) return;
                 }
-                await fetch('/api/trading/kill-switch', {
+                await authFetch('/api/trading/kill-switch', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ active: activate })
@@ -3534,7 +3563,7 @@
             btn.textContent = 'Saving...';
             btn.disabled = true;
             try {
-                const resp = await fetch('/api/trading/config', {
+                const resp = await authFetch('/api/trading/config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body)
