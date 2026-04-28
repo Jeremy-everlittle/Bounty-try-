@@ -770,92 +770,6 @@
         .login-error { color: #f85149; font-size: 12px; margin-top: 8px; display: none; }
         #dashboard-content { display: none; }
         #dashboard-content.visible { display: block; }
-
-        /* ── Crumb Sniper (inside Auto Trading card) ── */
-        #crumb-sniper-toggle.active {
-            background: #1a7f37;
-            color: #fff;
-            border-color: #238636;
-        }
-        #crumb-sniper-body {
-            padding: 12px 16px;
-        }
-        .crumb-stats {
-            display: flex;
-            gap: 16px;
-            margin-bottom: 12px;
-            flex-wrap: wrap;
-        }
-        .crumb-stat {
-            font-size: 12px;
-            color: #8b949e;
-        }
-        .crumb-panel {
-            margin-top: 10px;
-            border: 1px solid #21262d;
-            border-radius: 8px;
-            overflow: hidden;
-        }
-        .crumb-panel-title {
-            padding: 6px 12px;
-            font-size: 12px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            background: #161b22;
-        }
-        .crumb-panel-title.watching { color: #58a6ff; }
-        .crumb-panel-title.betting { color: #f0883e; }
-        .crumb-panel-title.settled { color: #8b949e; }
-        .crumb-list {
-            max-height: 350px;
-            overflow-y: auto;
-        }
-        .crumb-empty {
-            padding: 12px;
-            text-align: center;
-            color: #484f58;
-            font-size: 12px;
-        }
-        .crumb-item {
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-            padding: 8px 12px;
-            border-bottom: 1px solid #21262d;
-            font-size: 12px;
-        }
-        .crumb-item:last-child { border-bottom: none; }
-        .crumb-item-row1 {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .crumb-item-row2 {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 6px;
-        }
-        .crumb-item .ticker { color: #e6edf3; font-weight: 600; font-size: 11px; }
-        .crumb-item .title { color: #8b949e; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
-        .crumb-item .countdown {
-            font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
-            padding: 1px 6px; border-radius: 4px; min-width: 36px; text-align: center;
-        }
-        .crumb-item .countdown.urgent { background: rgba(248,81,73,0.2); color: #f85149; }
-        .crumb-item .countdown.soon { background: rgba(210,153,34,0.2); color: #e3b341; }
-        .crumb-item .countdown.normal { background: rgba(56,139,253,0.15); color: #58a6ff; }
-        .crumb-item .side-badge {
-            font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
-            text-transform: uppercase; letter-spacing: 0.3px;
-        }
-        .crumb-item .side-badge.yes { background: rgba(63,185,80,0.2); color: #3fb950; }
-        .crumb-item .side-badge.no { background: rgba(248,81,73,0.2); color: #f85149; }
-        .crumb-item .side-badge.none { background: rgba(139,148,158,0.15); color: #484f58; }
-        .crumb-item .price { color: #e6edf3; font-weight: 600; }
-        .crumb-item .profit { color: #3fb950; font-weight: 600; }
-        .crumb-item .loss { color: #f85149; font-weight: 600; }
     </style>
 </head>
 <body>
@@ -894,9 +808,6 @@
             <span class="period-delta" id="period-delta"></span>
         </div>
     </div>
-
-    <!-- ═══ Crumb Sniper Section ═══ -->
-    <!-- Crumb Sniper moved inside Auto Trading card -->
 
     <div class="card" id="prediction-card">
         <div class="card-label">Prediction for</div>
@@ -1077,42 +988,6 @@
                     </div>
                 </div>
                 <button class="trading-btn" id="cfg-save-btn" onclick="saveConfig()" style="width:100%;margin-top:8px;padding:6px 0;font-size:12px;font-weight:700;background:rgba(63,185,80,0.15);border-color:rgba(63,185,80,0.4);color:#3fb950;">Save Settings</button>
-            </div>
-
-            <!-- Crumb Sniper (inside Auto Trading card) -->
-            <div id="crumb-sniper-section" style="margin-top:10px;border:1px solid rgba(240,136,62,0.3);border-radius:8px;overflow:hidden;">
-                <div id="crumb-sniper-header" onclick="toggleCrumbSniper()" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(240,136,62,0.08);cursor:pointer;">
-                    <span style="font-size:12px;font-weight:700;color:#f0883e;letter-spacing:0.5px;">CRUMB SNIPER</span>
-                    <div style="display:flex;align-items:center;gap:8px;">
-                        <span id="crumb-sniper-status-badge" style="font-size:10px;color:#484f58;">OFF</span>
-                        <button id="crumb-sniper-toggle" onclick="event.stopPropagation(); toggleCrumbSniperRunning()" style="padding:2px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#8b949e;font-size:10px;cursor:pointer;font-weight:600;">Start</button>
-                    </div>
-                </div>
-                <div id="crumb-sniper-body" style="display:none;padding:8px 12px;">
-                    <div class="crumb-stats">
-                        <div class="crumb-stat">P&L: <span id="crumb-pnl">$0.00</span></div>
-                        <div class="crumb-stat">Bets: <span id="crumb-bets">0</span></div>
-                        <div class="crumb-stat">W/L: <span id="crumb-wl">0/0</span></div>
-                    </div>
-                    <div class="crumb-panel">
-                        <div class="crumb-panel-title watching">Watching</div>
-                        <div id="crumb-watch-list" class="crumb-list">
-                            <div class="crumb-empty">Scanning for opportunities...</div>
-                        </div>
-                    </div>
-                    <div class="crumb-panel">
-                        <div class="crumb-panel-title betting">Betting</div>
-                        <div id="crumb-bet-list" class="crumb-list">
-                            <div class="crumb-empty">No active bets</div>
-                        </div>
-                    </div>
-                    <div class="crumb-panel">
-                        <div class="crumb-panel-title settled">Recent Settled</div>
-                        <div id="crumb-settled-list" class="crumb-list">
-                            <div class="crumb-empty">No settled bets yet</div>
-                        </div>
-                    </div>
-                </div>
             </div>
         </div>
 
@@ -1350,7 +1225,6 @@
                             mergePredictionLogs(msg.predictionLog);
                             renderPredictionHistory();
                         }
-                        if (msg.crumbSniperStatus) updateCrumbSniperUI(msg.crumbSniperStatus);
                     } else if (msg.type === 'trade') {
                         handleTradeNotification(msg.trade);
                     }
@@ -4081,149 +3955,6 @@
                 btn.disabled = false;
             }
         }
-
-        // ── Crumb Sniper UI ──
-        let crumbSniperExpanded = false;
-        let crumbSniperRunning = false;
-
-        function toggleCrumbSniper() {
-            crumbSniperExpanded = !crumbSniperExpanded;
-            const body = document.getElementById('crumb-sniper-body');
-            if (body) body.style.display = crumbSniperExpanded ? 'block' : 'none';
-        }
-
-        async function toggleCrumbSniperRunning() {
-            const btn = document.getElementById('crumb-sniper-toggle');
-            try {
-                if (crumbSniperRunning) {
-                    await authFetch('/api/crumb-sniper/stop', { method: 'POST' });
-                    crumbSniperRunning = false;
-                } else {
-                    // Check if auto-bettor is running (kill switch off)
-                    const ts = serverData && serverData.tradingStatus;
-                    if (ts && ts.killSwitch) {
-                        alert('Start the auto-bettor first (deactivate kill switch)');
-                        return;
-                    }
-                    const resp = await authFetch('/api/crumb-sniper/start', { method: 'POST' });
-                    const data = await resp.json();
-                    if (data.ok === false) {
-                        alert(data.error || 'Cannot start crumb sniper');
-                        return;
-                    }
-                    crumbSniperRunning = true;
-                    crumbSniperExpanded = true;
-                    const body = document.getElementById('crumb-sniper-body');
-                    if (body) body.style.display = 'block';
-                }
-                if (btn) { btn.textContent = crumbSniperRunning ? 'Stop' : 'Start'; btn.classList.toggle('active', crumbSniperRunning); }
-            } catch (err) {
-                console.error('Crumb sniper toggle error:', err);
-            }
-        }
-
-        function updateCrumbSniperUI(status) {
-            if (!status) return;
-
-            crumbSniperRunning = status.isRunning;
-            const btn = document.getElementById('crumb-sniper-toggle');
-            const badge = document.getElementById('crumb-sniper-status-badge');
-            const ts = serverData && serverData.tradingStatus;
-            const autoBettorOff = ts && ts.killSwitch;
-
-            if (btn) {
-                btn.textContent = crumbSniperRunning ? 'Stop' : 'Start';
-                btn.classList.toggle('active', crumbSniperRunning);
-                // Disable start button when auto-bettor is off
-                if (autoBettorOff && !crumbSniperRunning) {
-                    btn.disabled = true;
-                    btn.style.opacity = '0.4';
-                    btn.title = 'Start the auto-bettor first';
-                } else {
-                    btn.disabled = false;
-                    btn.style.opacity = '1';
-                    btn.title = '';
-                }
-            }
-            if (badge) {
-                const modeLabel = crumbSniperRunning
-                    ? (status.paperMode ? 'PAPER' : 'LIVE')
-                    : (autoBettorOff ? 'DISABLED' : 'OFF');
-                const modeColor = crumbSniperRunning
-                    ? (status.paperMode ? '#e3b341' : '#3fb950')
-                    : '#484f58';
-                badge.textContent = modeLabel;
-                badge.style.color = modeColor;
-            }
-
-            if (status.pnl !== undefined) {
-                const pnlEl = document.getElementById('crumb-pnl');
-                if (pnlEl) { pnlEl.textContent = '$' + status.pnl.toFixed(2); pnlEl.style.color = status.pnl >= 0 ? '#3fb950' : '#f85149'; }
-            }
-            const betsEl = document.getElementById('crumb-bets');
-            if (betsEl && status.totalBets !== undefined) betsEl.textContent = status.totalBets;
-            const wlEl = document.getElementById('crumb-wl');
-            if (wlEl && status.wins !== undefined) wlEl.textContent = status.wins + '/' + status.losses;
-
-            const emptyMessages = { watch: 'Scanning for opportunities...', bet: 'No active bets', settled: 'No settled bets yet' };
-            renderCrumbList('crumb-watch-list', status.watching || [], 'watch');
-            renderCrumbList('crumb-bet-list', status.activeBets || [], 'bet');
-            renderCrumbList('crumb-settled-list', status.settled || [], 'settled');
-        }
-
-        function renderCrumbList(id, items, type) {
-            const el = document.getElementById(id);
-            if (!el) return;
-            const emptyMessages = { watch: 'Scanning for opportunities...', bet: 'No active bets', settled: 'No settled bets yet' };
-            if (!items.length) {
-                el.innerHTML = '<div class="crumb-empty">' + (crumbSniperRunning ? emptyMessages[type] : 'Sniper not running') + '</div>';
-                return;
-            }
-            el.innerHTML = items.map(item => {
-                // Countdown timer
-                const secs = item.secsLeft || 0;
-                const countdownClass = secs <= 30 ? 'urgent' : secs <= 120 ? 'soon' : 'normal';
-                const mins = Math.floor(Math.abs(secs) / 60);
-                const remSecs = Math.abs(secs) % 60;
-                const countdownStr = secs <= 0 ? 'CLOSED'
-                    : mins > 0 ? mins + ':' + remSecs.toString().padStart(2, '0')
-                    : remSecs + 's';
-
-                // Market title — use title if available, otherwise extract from ticker
-                const title = item.title || item.ticker || '?';
-                const ticker = item.ticker || '?';
-
-                // Resolution side and price
-                const side = item.side || null;
-                const sideBadge = side
-                    ? '<span class="side-badge ' + side + '">' + side.toUpperCase() + '</span>'
-                    : '<span class="side-badge none">--</span>';
-                const priceCents = item.priceCents || 0;
-                const priceStr = priceCents > 0 ? priceCents + '\u00A2' : '--';
-
-                // Profit for settled items
-                const profitClass = (item.profit || 0) >= 0 ? 'profit' : 'loss';
-                const profitStr = item.profit !== undefined
-                    ? '<span class="' + profitClass + '">' + (item.profit >= 0 ? '+' : '') + '$' + item.profit.toFixed(2) + '</span>'
-                    : '';
-
-                return '<div class="crumb-item">' +
-                    '<div class="crumb-item-row1">' +
-                        '<span class="ticker">' + ticker + '</span>' +
-                        '<span class="countdown ' + countdownClass + '">' + countdownStr + '</span>' +
-                    '</div>' +
-                    '<div class="crumb-item-row2">' +
-                        '<span class="title" title="' + title.replace(/"/g, '&quot;') + '">' + title + '</span>' +
-                        '<span style="display:flex;align-items:center;gap:6px">' +
-                            sideBadge +
-                            '<span class="price">' + priceStr + '</span>' +
-                            profitStr +
-                        '</span>' +
-                    '</div>' +
-                '</div>';
-            }).join('');
-        }
-
         async function toggleKillSwitch() {
             try {
                 const ts = serverData && serverData.tradingStatus;
