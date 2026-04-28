@@ -91,11 +91,14 @@ async function getPositions(eventTicker) {
 
 /**
  * Place an order on Kalshi
+ * Uses the post-March-12 API format: count_fp (string), yes/no_price_dollars (string).
+ * Callers still pass cents integers — we convert here.
+ *
  * @param {Object} params
- * @param {string} params.ticker - Market ticker (e.g. KXBTC15M-26MAR18-T96850)
+ * @param {string} params.ticker - Market ticker
  * @param {'yes'|'no'} params.side - yes or no
  * @param {'buy'|'sell'} params.action - buy or sell
- * @param {number} params.count - Number of contracts
+ * @param {number} params.count - Number of contracts (integer)
  * @param {number} [params.yesPrice] - Limit price in cents (1-99) for yes side
  * @param {number} [params.noPrice] - Limit price in cents (1-99) for no side
  * @param {string} [params.type='limit'] - Order type
@@ -103,23 +106,57 @@ async function getPositions(eventTicker) {
  * @returns {Object} Order response with order_id, status, etc.
  */
 async function placeOrder({ ticker, side, action, count, yesPrice, noPrice, type = 'limit', timeInForce }) {
+    // ── Validate critical parameters before sending to Kalshi ──
+    const priceCentsRaw = yesPrice !== undefined ? yesPrice : noPrice;
+    if (priceCentsRaw === undefined || priceCentsRaw === null || isNaN(priceCentsRaw) || !isFinite(priceCentsRaw)) {
+        const err = new Error(`[kalshi-trading] Invalid price: ${priceCentsRaw} — aborting order`);
+        console.error(err.message);
+        throw err;
+    }
+    if (!count || isNaN(count) || count <= 0) {
+        const err = new Error(`[kalshi-trading] Invalid count: ${count} — aborting order`);
+        console.error(err.message);
+        throw err;
+    }
+    if (!ticker) {
+        const err = new Error(`[kalshi-trading] Missing ticker — aborting order`);
+        console.error(err.message);
+        throw err;
+    }
+
     const clientOrderId = crypto.randomUUID();
+
+    // Convert cents (integer) → dollars (string) for the new API format
+    // e.g. 58 cents → "0.58", 5 cents → "0.05"
+    const centsToDollars = (cents) => (cents / 100).toFixed(2);
+
     const body = {
         ticker,
         side,
         action,
-        count,
+        count: count,                          // legacy integer (still accepted)
+        count_fp: count.toFixed(2),             // new: string like "5.00"
         type,
         client_order_id: clientOrderId,
     };
 
-    if (yesPrice !== undefined) body.yes_price = yesPrice;
-    if (noPrice !== undefined) body.no_price = noPrice;
+    // Use new dollar-string format (post-March-12 migration)
+    // Only ONE of yes_price/no_price/yes_price_dollars/no_price_dollars allowed
+    if (yesPrice !== undefined) {
+        body.yes_price_dollars = centsToDollars(yesPrice);
+    }
+    if (noPrice !== undefined) {
+        body.no_price_dollars = centsToDollars(noPrice);
+    }
     if (timeInForce) body.time_in_force = timeInForce;
 
-    console.log(`[kalshi-trading] Placing order: ${action} ${count}x ${side} on ${ticker} @ ${yesPrice || noPrice || 'market'}c`);
+    const priceCents = yesPrice || noPrice || 0;
+    console.log(`[kalshi-trading] Placing order: ${action} ${count}x ${side} on ${ticker} @ ${priceCents}c ($${centsToDollars(priceCents)})`);
+    console.log(`[kalshi-trading] REQUEST BODY: ${JSON.stringify(body)}`);
     const result = await kalshiFetch('POST', '/portfolio/orders', body);
-    console.log(`[kalshi-trading] Order placed: ${result.order?.order_id || 'unknown'} status=${result.order?.status || 'unknown'}`);
+    const o = result.order || {};
+    console.log(`[kalshi-trading] FULL RESPONSE: ${JSON.stringify(result)}`);
+    console.log(`[kalshi-trading] Order response: id=${o.order_id} status=${o.status} fill_count_fp=${o.fill_count_fp} remaining_count_fp=${o.remaining_count_fp} yes_price_dollars=${o.yes_price_dollars} no_price_dollars=${o.no_price_dollars}`);
     return result;
 }
 
@@ -129,7 +166,12 @@ async function placeOrder({ ticker, side, action, count, yesPrice, noPrice, type
  */
 async function cancelOrder(orderId) {
     console.log(`[kalshi-trading] Cancelling order: ${orderId}`);
-    return kalshiFetch('DELETE', `/portfolio/orders/${orderId}`);
+    const result = await kalshiFetch('DELETE', `/portfolio/orders/${orderId}`);
+    if (result && result.order) {
+        const o = result.order;
+        console.log(`[kalshi-trading] Cancel response: fill_count_fp=${o.fill_count_fp} remaining_count_fp=${o.remaining_count_fp} status=${o.status}`);
+    }
+    return result;
 }
 
 /**
@@ -170,6 +212,40 @@ async function getOrderbook(ticker) {
     return kalshiFetch('GET', `/markets/${ticker}/orderbook`);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Market Discovery (for scanning all markets)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * List markets with optional filters
+ * @param {Object} [params] - Query parameters
+ * @param {string} [params.status] - 'open', 'closed', 'settled'
+ * @param {string} [params.cursor] - Pagination cursor
+ * @param {number} [params.limit] - Max results (default 100, max 1000)
+ * @param {string} [params.series_ticker] - Filter by series
+ * @param {string} [params.event_ticker] - Filter by event
+ * @param {string} [params.min_close_ts] - ISO timestamp, markets closing after this
+ * @param {string} [params.max_close_ts] - ISO timestamp, markets closing before this
+ * @returns {{ markets: Array, cursor: string }}
+ */
+async function listMarkets(params = {}) {
+    const query = new URLSearchParams();
+    for (const [key, val] of Object.entries(params)) {
+        if (val !== undefined && val !== null) query.set(key, val);
+    }
+    const qs = query.toString();
+    const path = '/markets' + (qs ? '?' + qs : '');
+    return kalshiFetch('GET', path, null, 15000); // longer timeout for large lists
+}
+
+/**
+ * Get event details (contains all markets in an event)
+ * @param {string} eventTicker
+ */
+async function getEvent(eventTicker) {
+    return kalshiFetch('GET', `/events/${eventTicker}`);
+}
+
 module.exports = {
     isConfigured,
     getBalance,
@@ -180,4 +256,6 @@ module.exports = {
     getOrders,
     getMarket,
     getOrderbook,
+    listMarkets,
+    getEvent,
 };
