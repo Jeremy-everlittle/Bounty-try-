@@ -695,6 +695,47 @@
         .trading-btn-danger { color: #f85149; border-color: rgba(248,81,73,0.4); }
         .trading-btn-danger:hover { background: rgba(248,81,73,0.15); }
         .trading-not-configured { font-size: 11px; color: #8b949e; text-align: center; padding: 10px; }
+
+        /* ── Trading Hours Filter ── */
+        .hours-filter { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
+        .hours-filter-row { display: flex; align-items: center; justify-content: space-between; }
+        .hours-filter-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: #8b949e; font-weight: 600; }
+        .hours-filter-status { font-size: 11px; font-weight: 800; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 4px; }
+        .hours-status-blocked { background: rgba(248,81,73,0.2); color: #f85149; border: 1px solid rgba(248,81,73,0.35); }
+        .hours-status-allowed { background: rgba(139,148,158,0.15); color: #b0b8c1; border: 1px solid rgba(139,148,158,0.25); }
+        .hours-status-boosted { background: rgba(63,185,80,0.2); color: #3fb950; border: 1px solid rgba(63,185,80,0.35); }
+        .hours-filter-next { font-size: 10px; color: #8b949e; margin-top: 4px; }
+
+        /* ── Edge Quality Bar ── */
+        .edge-quality-bar { margin-top: 10px; padding: 10px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
+        .edge-bar-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: #8b949e; font-weight: 600; margin-bottom: 6px; }
+        .edge-bar-track { height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; position: relative; }
+        .edge-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease, background 0.5s ease; }
+        .edge-bar-markers { display: flex; justify-content: space-between; margin-top: 3px; font-size: 9px; color: #8b949e; }
+        .edge-bar-value { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
+        .edge-bar-pct { font-size: 16px; font-weight: 700; }
+        .edge-bar-verdict { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+        .edge-no-trade { color: #f85149; }
+        .edge-marginal { color: #d29922; }
+        .edge-good { color: #3fb950; }
+        .rr-display { display: flex; gap: 12px; margin-top: 6px; font-size: 11px; }
+        .rr-item { display: flex; flex-direction: column; }
+        .rr-item-label { font-size: 9px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+        .rr-item-value { font-size: 13px; font-weight: 700; color: #e6edf3; }
+
+        /* ── Model Health Card ── */
+        .model-health { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+        .model-health-item { padding: 8px 10px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
+        .model-health-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.8px; color: #8b949e; font-weight: 600; margin-bottom: 4px; }
+        .model-health-value { font-size: 16px; font-weight: 700; }
+        .model-health-sub { font-size: 10px; color: #8b949e; margin-top: 2px; }
+        .session-pnl-tracker { margin-top: 8px; padding: 10px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
+        .session-pnl-row { display: flex; align-items: center; justify-content: space-between; }
+        .streak-badge { display: inline-block; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 4px; letter-spacing: 0.5px; }
+        .streak-win { background: rgba(63,185,80,0.2); color: #3fb950; }
+        .streak-loss { background: rgba(248,81,73,0.2); color: #f85149; }
+        .streak-neutral { background: rgba(139,148,158,0.12); color: #8b949e; }
+
         /* ── Environment Toggle ── */
         .env-toggle { display: flex; gap: 4px; margin: 8px 0; padding: 4px; background: rgba(0,0,0,0.3); border-radius: 6px; }
         .env-btn { flex: 1; padding: 5px 8px; border: 1px solid transparent; border-radius: 4px; font-size: 10px; font-weight: 800; letter-spacing: 1.2px; text-align: center; cursor: pointer; background: transparent; color: #8b949e; transition: all 0.2s; }
@@ -893,6 +934,36 @@
             </div>
         </div>
 
+        <!-- Edge Quality Bar -->
+        <div class="edge-quality-bar" id="edge-quality-bar" style="display:none;">
+            <div class="edge-bar-label">Edge Quality</div>
+            <div class="edge-bar-track">
+                <div class="edge-bar-fill" id="edge-bar-fill" style="width:0%;background:#f85149;"></div>
+            </div>
+            <div class="edge-bar-markers">
+                <span>0%</span><span style="color:#f85149">3%</span><span style="color:#d29922">5%</span><span>10%+</span>
+            </div>
+            <div class="edge-bar-value">
+                <span class="edge-bar-pct" id="edge-bar-pct">--</span>
+                <span class="edge-bar-verdict" id="edge-bar-verdict">--</span>
+            </div>
+            <!-- Risk/Reward Ratio -->
+            <div class="rr-display" id="rr-display" style="display:none;">
+                <div class="rr-item">
+                    <span class="rr-item-label">Entry Cost</span>
+                    <span class="rr-item-value" id="rr-entry">--</span>
+                </div>
+                <div class="rr-item">
+                    <span class="rr-item-label">Potential Payout</span>
+                    <span class="rr-item-value" id="rr-payout" style="color:#3fb950;">--</span>
+                </div>
+                <div class="rr-item">
+                    <span class="rr-item-label">R:R Ratio</span>
+                    <span class="rr-item-value" id="rr-ratio">--</span>
+                </div>
+            </div>
+        </div>
+
         <!-- Mathematical High/Low Bounds -->
         <div id="bounds-row" style="display:none;margin-top:8px;padding:8px 10px;border:1px solid rgba(139,148,158,0.1);border-radius:8px;background:rgba(0,0,0,0.2);">
             <div style="font-size:9px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;font-weight:600;">Mathematical Range (2σ)</div>
@@ -945,6 +1016,14 @@
                     <div class="trading-stat-label">W/L</div>
                     <div class="trading-stat-value" id="trading-wl">0/0</div>
                 </div>
+            </div>
+            <!-- Trading Hours Filter -->
+            <div class="hours-filter" id="hours-filter">
+                <div class="hours-filter-row">
+                    <span class="hours-filter-label">Hour Filter</span>
+                    <span class="hours-filter-status" id="hours-filter-status">--</span>
+                </div>
+                <div class="hours-filter-next" id="hours-filter-next"></div>
             </div>
             <!-- Paper balance controls (shown only in paper mode) -->
             <div id="paper-balance-controls" style="display:none;margin:6px 0;padding:8px;background:rgba(210,153,34,0.08);border:1px solid rgba(210,153,34,0.25);border-radius:8px;">
@@ -1033,6 +1112,45 @@
                 </div>
             </div>
         </div>
+
+    <!-- Model Health & Session Card -->
+    <div class="card" id="model-health-card" style="display:none;">
+        <div class="card-label">Model Health & Session</div>
+        <!-- Session P&L Tracker -->
+        <div class="session-pnl-tracker" id="session-pnl-tracker">
+            <div class="session-pnl-row">
+                <span style="font-size:10px;text-transform:uppercase;letter-spacing:0.8px;color:#8b949e;font-weight:600;">Session P&L</span>
+                <span style="font-size:18px;font-weight:800;" id="session-pnl-value">$0.00</span>
+            </div>
+            <div class="session-pnl-row" style="margin-top:4px;">
+                <span style="font-size:10px;color:#8b949e;">Streak</span>
+                <span class="streak-badge streak-neutral" id="streak-badge">No trades</span>
+            </div>
+        </div>
+        <!-- Model Health Metrics -->
+        <div class="model-health" id="model-health-grid">
+            <div class="model-health-item">
+                <div class="model-health-label">Calibration</div>
+                <div class="model-health-value" id="mh-calibration">--</div>
+                <div class="model-health-sub" id="mh-calibration-sub">Is model overconfident?</div>
+            </div>
+            <div class="model-health-item">
+                <div class="model-health-label">Direction Accuracy</div>
+                <div class="model-health-value" id="mh-direction">--</div>
+                <div class="model-health-sub" id="mh-direction-sub">Current hour</div>
+            </div>
+            <div class="model-health-item">
+                <div class="model-health-label">Signal Agreement</div>
+                <div class="model-health-value" id="mh-agreement">--</div>
+                <div class="model-health-sub" id="mh-agreement-sub">Original vs Updated</div>
+            </div>
+            <div class="model-health-item">
+                <div class="model-health-label">Risk Multiplier</div>
+                <div class="model-health-value" id="mh-risk-mult">--</div>
+                <div class="model-health-sub" id="mh-risk-mult-sub">Session risk adj.</div>
+            </div>
+        </div>
+    </div>
 
         <!-- Kalshi Orderbook Card -->
         <div class="card" id="kalshi-orderbook-card" style="display:none;">
@@ -3416,6 +3534,243 @@
             }
         }
 
+        // ── Trading Hours Filter Rendering ──
+        const HOUR_PERFORMANCE_CLIENT = {
+            13: { allowed: true, boost: true },
+            14: { allowed: false, minConviction: 'LOCK' },
+            15: { allowed: true },
+            16: { allowed: true },
+            17: { allowed: false, minConviction: 'LOCK' },
+            18: { allowed: true },
+            19: { allowed: true, boost: true },
+            20: { allowed: true, boost: true },
+            21: { allowed: true, boost: true },
+        };
+
+        function renderHoursFilter() {
+            const el = document.getElementById('hours-filter-status');
+            const nextEl = document.getElementById('hours-filter-next');
+            if (!el) return;
+
+            const currentHour = new Date().getHours();
+            const perf = HOUR_PERFORMANCE_CLIENT[currentHour];
+
+            let statusText, statusClass;
+            if (!perf) {
+                // Hours not in the map are allowed by default (no special filter)
+                statusText = 'ALLOWED';
+                statusClass = 'hours-status-allowed';
+            } else if (!perf.allowed) {
+                statusText = 'BLOCKED';
+                statusClass = 'hours-status-blocked';
+            } else if (perf.boost) {
+                statusText = 'BOOSTED';
+                statusClass = 'hours-status-boosted';
+            } else {
+                statusText = 'ALLOWED';
+                statusClass = 'hours-status-allowed';
+            }
+            el.textContent = currentHour + ':00 — ' + statusText;
+            el.className = 'hours-filter-status ' + statusClass;
+
+            // Find next allowed/boosted hour
+            if (perf && !perf.allowed) {
+                let nextHour = currentHour + 1;
+                let found = false;
+                for (let i = 0; i < 24; i++) {
+                    const h = (currentHour + 1 + i) % 24;
+                    const hp = HOUR_PERFORMANCE_CLIENT[h];
+                    if (!hp || hp.allowed) {
+                        nextHour = h;
+                        found = true;
+                        break;
+                    }
+                }
+                nextEl.textContent = found ? 'Next allowed: ' + nextHour + ':00' + (HOUR_PERFORMANCE_CLIENT[nextHour] && HOUR_PERFORMANCE_CLIENT[nextHour].boost ? ' (boosted)' : '') : '';
+                nextEl.style.display = '';
+            } else {
+                // Find next boosted hour
+                let nextBoosted = null;
+                for (let i = 1; i <= 24; i++) {
+                    const h = (currentHour + i) % 24;
+                    const hp = HOUR_PERFORMANCE_CLIENT[h];
+                    if (hp && hp.boost) {
+                        nextBoosted = h;
+                        break;
+                    }
+                }
+                nextEl.textContent = nextBoosted !== null ? 'Next boosted: ' + nextBoosted + ':00' : '';
+                nextEl.style.display = nextBoosted !== null ? '' : 'none';
+            }
+        }
+
+        // ── Edge Quality Bar Rendering ──
+        function renderEdgeQualityBar() {
+            const bar = document.getElementById('edge-quality-bar');
+            if (!bar) return;
+
+            const bq = serverData && serverData.betQuality;
+            if (!bq) { bar.style.display = 'none'; return; }
+
+            bar.style.display = '';
+            const edgePct = (bq.edge || 0) * 100;
+            const fillEl = document.getElementById('edge-bar-fill');
+            const pctEl = document.getElementById('edge-bar-pct');
+            const verdictEl = document.getElementById('edge-bar-verdict');
+
+            // Map edge to bar width (0-10% maps to 0-100% bar width)
+            const barWidth = Math.min(100, Math.max(0, edgePct * 10));
+            fillEl.style.width = barWidth + '%';
+
+            let color, verdict, verdictBg;
+            if (edgePct < 3) {
+                color = '#f85149'; verdict = 'NO TRADE'; verdictBg = 'rgba(248,81,73,0.15)';
+            } else if (edgePct < 5) {
+                color = '#d29922'; verdict = 'MARGINAL'; verdictBg = 'rgba(210,153,34,0.15)';
+            } else {
+                color = '#3fb950'; verdict = 'GOOD SETUP'; verdictBg = 'rgba(63,185,80,0.15)';
+            }
+
+            fillEl.style.background = color;
+            pctEl.textContent = edgePct.toFixed(1) + '%';
+            pctEl.style.color = color;
+            verdictEl.textContent = verdict;
+            verdictEl.style.color = color;
+            verdictEl.style.background = verdictBg;
+
+            // Risk/Reward Ratio
+            const rrDisplay = document.getElementById('rr-display');
+            const ts = serverData && serverData.tradingStatus;
+            const pred = serverData && serverData.prediction;
+            const activePred = pred && (pred.updatedPrediction || pred.originalPrediction);
+
+            if (bq.shouldBet && activePred) {
+                rrDisplay.style.display = '';
+                // Entry cost is approximately the probability (in cents per contract)
+                const probForBet = activePred.probability || 0.5;
+                const entryPrice = Math.round(probForBet * 100); // cents
+                const payout = 100; // binary option pays $1
+                const risk = entryPrice;
+                const reward = payout - entryPrice;
+                const rrRatio = risk > 0 ? (reward / risk) : 0;
+
+                document.getElementById('rr-entry').textContent = entryPrice + '\u00A2';
+                document.getElementById('rr-payout').textContent = payout + '\u00A2';
+                const rrColor = rrRatio >= 1.5 ? '#3fb950' : rrRatio >= 1.0 ? '#d29922' : '#f85149';
+                document.getElementById('rr-ratio').textContent = rrRatio.toFixed(2) + ':1';
+                document.getElementById('rr-ratio').style.color = rrColor;
+            } else {
+                rrDisplay.style.display = 'none';
+            }
+        }
+
+        // ── Model Health Card Rendering ──
+        function renderModelHealth() {
+            const card = document.getElementById('model-health-card');
+            if (!card) return;
+
+            const ts = serverData && serverData.tradingStatus;
+            const sr = serverData && serverData.sessionRisk;
+            const bq = serverData && serverData.betQuality;
+
+            // Show card if we have any useful data
+            if (!ts && !sr) { card.style.display = 'none'; return; }
+            card.style.display = '';
+
+            // Session P&L
+            if (ts && ts.daily) {
+                const pnl = ts.daily.pnlCents / 100;
+                const pnlEl = document.getElementById('session-pnl-value');
+                pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+                pnlEl.style.color = pnl >= 0 ? '#3fb950' : '#f85149';
+            }
+
+            // Streak
+            if (sr) {
+                const streakEl = document.getElementById('streak-badge');
+                if (sr.consecutiveWins > 0) {
+                    streakEl.textContent = sr.consecutiveWins + 'W streak';
+                    streakEl.className = 'streak-badge streak-win';
+                } else if (sr.consecutiveLosses > 0) {
+                    streakEl.textContent = sr.consecutiveLosses + 'L streak';
+                    streakEl.className = 'streak-badge streak-loss';
+                } else {
+                    streakEl.textContent = 'Even';
+                    streakEl.className = 'streak-badge streak-neutral';
+                }
+            }
+
+            // Calibration — check if model is overconfident
+            const pred = serverData && serverData.prediction;
+            const activePred = pred && (pred.updatedPrediction || pred.originalPrediction);
+            const calEl = document.getElementById('mh-calibration');
+            const calSub = document.getElementById('mh-calibration-sub');
+            if (activePred && activePred.confidence) {
+                const conf = (activePred.confidence * 100).toFixed(0);
+                calEl.textContent = conf + '%';
+                if (activePred.confidence > 0.75) {
+                    calEl.style.color = '#d29922';
+                    calSub.textContent = 'High confidence — may be overfit';
+                } else if (activePred.confidence > 0.6) {
+                    calEl.style.color = '#3fb950';
+                    calSub.textContent = 'Well calibrated';
+                } else {
+                    calEl.style.color = '#8b949e';
+                    calSub.textContent = 'Low confidence';
+                }
+            }
+
+            // Direction accuracy (from trading W/L as proxy)
+            const dirEl = document.getElementById('mh-direction');
+            const dirSub = document.getElementById('mh-direction-sub');
+            if (ts && ts.daily && (ts.daily.wins + ts.daily.losses) > 0) {
+                const total = ts.daily.wins + ts.daily.losses;
+                const acc = ((ts.daily.wins / total) * 100).toFixed(0);
+                dirEl.textContent = acc + '%';
+                dirEl.style.color = acc >= 55 ? '#3fb950' : acc >= 45 ? '#d29922' : '#f85149';
+                dirSub.textContent = ts.daily.wins + 'W / ' + ts.daily.losses + 'L today';
+            } else {
+                dirEl.textContent = '--';
+                dirEl.style.color = '#8b949e';
+                dirSub.textContent = 'No trades yet';
+            }
+
+            // Signal agreement (original vs updated)
+            const agreeEl = document.getElementById('mh-agreement');
+            const agreeSub = document.getElementById('mh-agreement-sub');
+            if (pred && pred.originalPrediction && pred.updatedPrediction) {
+                const origUp = pred.originalPrediction.predictedPrice >= (serverData.kalshiStrike || 0);
+                const updUp = pred.updatedPrediction.predictedPrice >= (serverData.kalshiStrike || 0);
+                if (origUp === updUp) {
+                    agreeEl.textContent = 'AGREE';
+                    agreeEl.style.color = '#3fb950';
+                    agreeSub.textContent = 'Both say ' + (origUp ? 'UP' : 'DOWN');
+                } else {
+                    agreeEl.textContent = 'SPLIT';
+                    agreeEl.style.color = '#f85149';
+                    agreeSub.textContent = 'Orig: ' + (origUp ? 'UP' : 'DOWN') + ' / Upd: ' + (updUp ? 'UP' : 'DOWN');
+                }
+            } else {
+                agreeEl.textContent = '--';
+                agreeEl.style.color = '#8b949e';
+                agreeSub.textContent = 'Waiting for update';
+            }
+
+            // Risk multiplier
+            const rmEl = document.getElementById('mh-risk-mult');
+            const rmSub = document.getElementById('mh-risk-mult-sub');
+            if (sr && sr.riskMultiplier !== undefined) {
+                const rm = sr.riskMultiplier;
+                rmEl.textContent = rm.toFixed(2) + 'x';
+                rmEl.style.color = rm >= 0.9 ? '#3fb950' : rm >= 0.5 ? '#d29922' : '#f85149';
+                rmSub.textContent = rm >= 0.9 ? 'Full size' : rm >= 0.5 ? 'Reduced size' : 'Minimal size';
+                if (sr.coolingOff) {
+                    rmSub.textContent = 'COOLING OFF';
+                    rmSub.style.color = '#f85149';
+                }
+            }
+        }
+
         async function toggleTradingMode() {
             try {
                 const ts = serverData && serverData.tradingStatus;
@@ -4850,6 +5205,9 @@
 
             // Auto-trading panel
             renderTradingPanel();
+            renderHoursFilter();
+            renderEdgeQualityBar();
+            renderModelHealth();
             renderKalshiOrderbook();
 
             // Wallet rendering removed
