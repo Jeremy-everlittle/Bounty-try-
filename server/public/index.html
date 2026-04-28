@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="theme-color" content="#0d1117">
@@ -1166,6 +1167,11 @@
                             mergePredictionLogs(msg.predictionLog);
                             renderPredictionHistory();
                         }
+                        // Push the new server data through the render pipeline. Without this,
+                        // updateUI() is only called by the polling fallback (when wsConnected
+                        // is false), so a healthy WebSocket leaves the dashboard frozen on
+                        // dashes. fetchPriceData() reads from serverData, so this is cheap.
+                        try { fetchAndPredict(); } catch (e) { console.error('render after WS data failed:', e); }
                     } else if (msg.type === 'trade') {
                         handleTradeNotification(msg.trade);
                     }
