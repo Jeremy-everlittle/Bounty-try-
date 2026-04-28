@@ -465,6 +465,8 @@ const state = {
     kalshiTicker: null,
     kalshiMarket: null,
     orderBook: null,
+    kalshiOrderBook: null,
+    kalshiOrderBookError: null,
     recentTrades: null,
     fundingRate: null,
     ethPrice: null,
@@ -2029,6 +2031,69 @@ app.post('/api/trading/environment', (req, res) => {
             configured,
             message: `Switched to ${env.toUpperCase()}${configured ? '' : ' (credentials not configured!)'}. Kill switch activated — re-enable trading manually.${safetyNote}`
         });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ── Force Bet / Press Bet / Force Sell ──
+app.post('/api/trading/force-bet', express.json(), async (req, res) => {
+    const contracts = req.body?.contracts;
+    const currentPeriod = store.getCurrentPeriod();
+    const prediction = currentPeriod?.updatedPrediction || currentPeriod?.originalPrediction;
+    const ticker = state.kalshiTicker;
+    const strike = state.kalshiStrike;
+    const periodKey = state.periodKey;
+
+    if (!prediction) return res.status(400).json({ error: 'No prediction available for current period' });
+    if (!ticker) return res.status(400).json({ error: 'No Kalshi ticker available' });
+    if (!strike) return res.status(400).json({ error: 'No strike price available' });
+
+    try {
+        const result = await tradeExecutor.forceBet(prediction, ticker, strike, periodKey, contracts || null);
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ ok: false, reason: err.message });
+    }
+});
+
+app.post('/api/trading/press-bet', express.json(), async (req, res) => {
+    const contracts = req.body?.contracts;
+    const currentPeriod = store.getCurrentPeriod();
+    const prediction = currentPeriod?.updatedPrediction || currentPeriod?.originalPrediction;
+    const ticker = state.kalshiTicker;
+    const strike = state.kalshiStrike;
+    const periodKey = state.periodKey;
+
+    if (!prediction) return res.status(400).json({ error: 'No prediction available' });
+    if (!ticker) return res.status(400).json({ error: 'No Kalshi ticker available' });
+
+    try {
+        const result = await tradeExecutor.pressBet(prediction, ticker, strike, periodKey, contracts || null);
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ ok: false, reason: err.message });
+    }
+});
+
+app.post('/api/trading/force-sell', express.json(), async (req, res) => {
+    try {
+        const result = await tradeExecutor.forceSell();
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ ok: false, reason: err.message });
+    }
+});
+
+app.get('/api/trading/config', (req, res) => {
+    res.json(tradeExecutor.config);
+});
+
+app.post('/api/trading/config', express.json(), (req, res) => {
+    try {
+        const updates = req.body;
+        Object.assign(tradeExecutor.config, updates);
+        res.json({ ok: true, config: tradeExecutor.config });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
