@@ -3081,6 +3081,7 @@
                 };
                 for (const [key, val] of Object.entries(activePred.signals)) {
                     const el = document.getElementById('sig-' + key);
+                    if (!el) continue; // only momentum/volatility/trend/rsi have DOM elements
                     el.textContent = val;
                     el.className = 'signal-value ' + (sigClasses[val] || 'neutral');
                 }

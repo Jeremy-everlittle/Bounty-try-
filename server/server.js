@@ -23,7 +23,27 @@ const BUILD_VERSION = {
 
 const app = express();
 const server = http.createServer(app);
+// Hosting platforms (e.g. Railway) terminate idle HTTP connections at ~30s.
+// Bump keep-alive past that so an idle moment doesn't close the underlying
+// TCP socket holding the WebSocket upgrade.
+server.keepAliveTimeout = 120000; // 120s
+server.headersTimeout = 125000;
 const wss = new WebSocketServer({ server });
+
+// Server-side heartbeat to drop half-open WebSockets early instead of letting
+// them linger and confuse the broadcast loop. Sends WS-protocol ping every
+// 30s; if a client misses two consecutive pongs, terminate.
+function noop() {}
+function heartbeat() { this.isAlive = true; }
+wss.on('connection', (ws) => { ws.isAlive = true; ws.on('pong', heartbeat); });
+const wsHeartbeatInterval = setInterval(() => {
+    for (const ws of wss.clients) {
+        if (ws.isAlive === false) { try { ws.terminate(); } catch (e) {} continue; }
+        ws.isAlive = false;
+        try { ws.ping(noop); } catch (e) {}
+    }
+}, 30000);
+wss.on('close', () => clearInterval(wsHeartbeatInterval));
 
 // Serve static frontend
 app.use(express.static(path.join(__dirname, 'public')));
