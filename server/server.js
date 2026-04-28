@@ -49,7 +49,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // DATA FETCHING — Server-side (no CORS issues!)
 // ═══════════════════════════════════════════════════════════════
 
-async function fetchJSON(url, timeout = 8000) {
+async function fetchJSON(url, timeout = 3000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
@@ -92,16 +92,6 @@ async function fetchBRTIApprox() {
                 return t.b && t.a ? (parseFloat(t.b[0]) + parseFloat(t.a[0])) / 2 : null;
             }
         },
-        {
-            name: 'Crypto.com',
-            url: 'https://api.crypto.com/v2/public/get-ticker?instrument_name=BTC_USD',
-            parse: d => d && d.result && d.result.data ? parseFloat(d.result.data.a) : null
-        },
-        {
-            name: 'Coinbase-simple',
-            url: 'https://api.coinbase.com/v2/prices/BTC-USD/spot',
-            parse: d => d && d.data ? parseFloat(d.data.amount) : null
-        }
     ];
 
     const results = await Promise.allSettled(
@@ -789,6 +779,18 @@ async function fetchAllData() {
         if (brti.status === 'fulfilled' && brti.value) {
             state.brtiPrice = brti.value.price;
             state.brtiSources = brti.value.sources;
+            state._lastPriceUpdateTime = Date.now();
+        }
+
+        // Stale data circuit breaker
+        if (state.brtiPrice && state._lastPriceUpdateTime) {
+            const staleness = Date.now() - state._lastPriceUpdateTime;
+            if (staleness > 30000) { // 30 seconds without fresh price
+                console.warn(`[server] STALE DATA: BTC price is ${(staleness/1000).toFixed(0)}s old — pausing trading`);
+                state._staleData = true;
+            } else {
+                state._staleData = false;
+            }
         }
 
         if (kalshi.status === 'fulfilled' && kalshi.value) {
@@ -1105,7 +1107,9 @@ async function fetchAllData() {
                     liquidations: state.liquidations,
                     fearGreed: state.fearGreed,
                     macroEvent: state.macroEvent,
-                    longShortRatio: state.longShortRatio
+                    longShortRatio: state.longShortRatio,
+                    ethPrice: state.ethPrice,
+                    openInterest: state.openInterest,
                 };
                 const updated = engine.handleSamePeriod(marketData, minutesAhead, state.kalshiStrike, periodKey);
                 // Recompute bet quality based on updated prediction
@@ -1210,6 +1214,11 @@ async function fetchAllData() {
                     capturePeriodicOrderbook(state.kalshiTicker, periodKey, minutesAhead, state.brtiPrice, state.kalshiStrike);
                 }
 
+                // ── Auto-trade: skip if stale data ──
+                if (state._staleData) {
+                    console.warn('[server] Skipping auto-trade: stale price data');
+                } else {
+
                 // ── Auto-trade: check current status to avoid redundant calls ──
                 const tradeStatus = tradeExecutor.getStatus();
                 const hasPosition = !!(tradeStatus.currentPosition);
@@ -1244,6 +1253,8 @@ async function fetchAllData() {
                         .catch(e => console.error('[trade-executor] Re-entry error:', e.message));
                 }
 
+                } // end stale data guard
+
                 // Next period preview in last 3 minutes
                 if (minutesAhead <= 3) {
                     const preview = engine.computeNextPeriodPreview(marketData);
@@ -1271,6 +1282,7 @@ async function fetchAllData() {
             history: state.history,
             lastUpdate: state.lastUpdate,
             periodKey: state.periodKey,
+            staleData: state._staleData || false,
             // Prediction data (from server!)
             prediction: store.getCurrentPeriod(),
             predictionLog: store.getPredictionLog(),
@@ -1311,10 +1323,20 @@ async function fetchAllData() {
 // ═══════════════════════════════════════════════════════════════
 
 function broadcast(data) {
-    const msg = JSON.stringify(data);
+    let msg;
+    try {
+        msg = JSON.stringify(data);
+    } catch (e) {
+        console.error('[broadcast] JSON.stringify failed:', e.message);
+        return;
+    }
     for (const client of wss.clients) {
         if (client.readyState === 1) { // WebSocket.OPEN
-            client.send(msg);
+            try {
+                client.send(msg);
+            } catch (e) {
+                console.error('[broadcast] send failed:', e.message);
+            }
         }
     }
 }
@@ -1371,6 +1393,8 @@ wss.on('connection', (ws, req) => {
                 store.clearPredictionLog();
                 tradeExecutor.clearTradeLog();
                 db.purgeAllData();
+            } else if (msg.type === 'ping') {
+                try { ws.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
             }
         } catch (e) {}
     });
@@ -1617,8 +1641,8 @@ app.get('/api/trading/analytics', async (req, res) => {
 app.get('/api/db/dump', async (req, res) => {
     const db = require('./db');
     try {
-        const days = parseInt(req.query.days || '7', 10);
-        const tradeLimit = parseInt(req.query.trades || '200', 10);
+        const days = Math.min(365, Math.max(1, parseInt(req.query.days || '7', 10) || 7));
+        const tradeLimit = Math.min(5000, Math.max(1, parseInt(req.query.trades || '200', 10) || 200));
 
         const [dailyStats, recentTrades, winByStrategy, winByDirection, winByHour, cumulativePnl, totalTrades] = await Promise.all([
             db.getDailyStatsHistory(days),
@@ -1980,11 +2004,12 @@ app.post('/api/trading/config', (req, res) => {
     }
     const cfg = tradeExecutor.config;
     const allowed = ['baseContracts', 'maxPositionContracts', 'convictionMaxContracts', 'maxDailyLossCents', 'maxDailyTrades'];
+    const bounds = { baseContracts: 500, maxPositionContracts: 500, convictionMaxContracts: 500, maxDailyLossCents: 1000000, maxDailyTrades: 1000 };
     const applied = {};
     for (const key of allowed) {
         if (updates[key] !== undefined) {
             const val = parseInt(updates[key], 10);
-            if (!isNaN(val) && val > 0) {
+            if (!isNaN(val) && val > 0 && val <= (bounds[key] || 1000)) {
                 cfg[key] = val;
                 applied[key] = val;
             }
@@ -2221,6 +2246,11 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
     console.error('Unhandled rejection, saving state:', reason);
     store.forceSave();
+    // Activate kill switch on unhandled rejection — unknown failure mode
+    if (tradeExecutor && typeof tradeExecutor.setKillSwitch === 'function') {
+        console.error('[server] CRITICAL: Activating kill switch due to unhandled rejection');
+        tradeExecutor.setKillSwitch(true);
+    }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -2237,6 +2267,17 @@ tradeExecutor.initFromDB().then(async () => {
     console.log('[db] Database initialization complete');
     // Load persistent store data from DB (fills gaps if JSON file was wiped by deploy)
     await store.loadFromDB();
+
+    // Position reconciliation on startup
+    const tradeStatus = tradeExecutor.getStatus();
+    if (tradeStatus.currentPosition) {
+        console.warn(`[server] STARTUP: Found existing position — ${tradeStatus.currentPosition.side} ${tradeStatus.currentPosition.contracts || tradeStatus.currentPosition.totalContracts}x. Verify this matches Kalshi exchange state.`);
+    }
+
+    // Run data retention cleanup every hour
+    setInterval(() => {
+        db.runRetention().catch(e => console.error('[server] Retention error:', e.message));
+    }, 3600000); // 1 hour
 }).catch(e => {
     console.error('[db] Database initialization failed (continuing without DB):', e.message);
 });
@@ -2263,7 +2304,11 @@ server.listen(PORT, () => {
 
     // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
     async function fetchLoop() {
-        await fetchAllData();
+        try {
+            await fetchAllData();
+        } catch (e) {
+            console.error('[server] fetchLoop error (will retry next cycle):', e.message);
+        }
         setTimeout(fetchLoop, 2000);
     }
     fetchLoop();

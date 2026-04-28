@@ -189,13 +189,13 @@ class OnlineLogisticRegression {
         const error = pred - label;
         const lr = this._currentLR();
 
-        // Update weights with L2 regularization
+        // Update weights with L2 regularization and gradient clipping
         for (let i = 0; i < this.numFeatures; i++) {
-            const grad = error * x[i] + this.lambda * this.weights[i];
+            const grad = Math.max(-5, Math.min(5, error * x[i] + this.lambda * this.weights[i]));
             this.weights[i] -= lr * grad;
         }
-        // Bias has no regularization
-        this.bias -= lr * error;
+        // Bias has no regularization (clip to prevent explosion)
+        this.bias -= lr * Math.max(-5, Math.min(5, error));
 
         this.t++;
         this.trainingSamples++;
@@ -377,7 +377,7 @@ class ExponentialWeightedEnsemble {
         }
 
         // Final normalization to ensure sum = 1
-        const finalSum = weights.reduce((a, b) => a + b, 0);
+        const finalSum = weights.reduce((a, b) => a + b, 0) || 1;
         for (let i = 0; i < this.numSignals; i++) {
             weights[i] /= finalSum;
         }
@@ -1317,7 +1317,7 @@ class OnlineRLS {
         for (let i = 0; i < d; i++) {
             const variance = this.featureCount > 1
                 ? this.featureM2[i] / (this.featureCount - 1) : 1;
-            const std = Math.sqrt(variance) || 1;
+            const std = Math.sqrt(Math.max(variance, 1e-10));
             normed[i] = (features[i] - this.featureMean[i]) / std;
         }
         return normed;
@@ -1385,6 +1385,8 @@ class OnlineRLS {
                 this.P[i * d + j] = avg;
                 this.P[j * d + i] = avg;
             }
+            // Tikhonov regularization: prevent ill-conditioning
+            this.P[i * d + i] = Math.max(this.P[i * d + i], 1e-6);
         }
 
         // Track accuracy

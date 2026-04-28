@@ -394,6 +394,10 @@ function readTodaysLog() {
 
 // ── Read log for a specific date ──
 function readLog(date) {
+    // Validate date format to prevent path traversal attacks
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return 'Invalid date format. Use YYYY-MM-DD.';
+    }
     const logPath = path.join(LOG_DIR, `decisions-${date}.log`);
     try {
         return fs.readFileSync(logPath, 'utf8');

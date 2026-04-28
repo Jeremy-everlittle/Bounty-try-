@@ -1033,6 +1033,9 @@ function computeEthLeadLag(btcPrices, ethPriceHistory) {
         return { signal: 0, ethMom: 0, btcMom: 0 };
     }
     const n = ethPriceHistory.length;
+    if (ethPriceHistory[n-3] <= 0 || btcPrices[btcPrices.length-3] <= 0) {
+        return { signal: 0, ethMom: 0, btcMom: 0 };
+    }
     const ethMom = (ethPriceHistory[n-1] - ethPriceHistory[n-3]) / ethPriceHistory[n-3];
     const bn = btcPrices.length;
     const btcMom = (btcPrices[bn-1] - btcPrices[bn-3]) / btcPrices[bn-3];
@@ -1325,7 +1328,7 @@ function getCalibrationBin(prob) {
 }
 
 function computeDirectionalPrior(direction, windowSize) {
-    if (typeof windowSize === 'undefined') windowSize = 5;
+    if (typeof windowSize === 'undefined') windowSize = 20;
     const bayesianState = store.getBayesianState();
     const graded = bayesianState.records.filter(
         r => r.predictedDirection === direction && r.correct !== null
@@ -1364,18 +1367,9 @@ function computeCalibrationAdjustment(rawProb) {
 }
 
 function detectPredictionStreak() {
-    const bayesianState = store.getBayesianState();
-    const graded = bayesianState.records.filter(r => r.actualDirection !== null);
-    if (graded.length < 3) return { streakLength: 0, streakDirection: null, adjustment: 0 };
-    let streak = 0;
-    const lastCorrect = graded[graded.length - 1].correct;
-    for (let i = graded.length - 1; i >= 0; i--) {
-        if (graded[i].correct === lastCorrect) streak++;
-        else break;
-    }
-    if (streak < 3) return { streakLength: streak, streakDirection: null, adjustment: 0 };
-    const adj = lastCorrect ? Math.min(streak * 0.02, 0.1) : -Math.min(streak * 0.03, 0.15);
-    return { streakLength: streak, streakDirection: lastCorrect ? 'correct' : 'wrong', adjustment: adj };
+    // Removed: streak-based probability adjustment is gambler's fallacy.
+    // Winning/losing streaks should NOT adjust probabilities.
+    return { streakLength: 0, streakDirection: null, adjustment: 0 };
 }
 
 function bayesianAdjust(rawProb, volRegimeLabel, trendRegimeLabel) {
@@ -1396,7 +1390,7 @@ function computeBayesianPrior() {
     const predLog = store.getPredictionLog();
     const graded = predLog.filter(p => p.actualDirection !== null);
     if (graded.length < 2) return 0;
-    const recent = graded.slice(-5);
+    const recent = graded.slice(-20);
     let upWeight = 0, totalWeight = 0;
     for (let i = 0; i < recent.length; i++) {
         const w = Math.pow(1.5, i);
@@ -1531,7 +1525,7 @@ function detectMomentumExhaustion(prices, history) {
 // ── Detect choppy/range-bound market (ADX-like) ──
 function detectChoppiness(prices) {
     const n = prices.length;
-    if (n < 15) return { choppy: false, adx: 50, choppiness: 0.5 };
+    if (n < 15) return { choppy: false, adx: 50, choppiness: 0.5, plusDI: 0, minusDI: 0, trending: false };
 
     // Simplified ADX: directional movement index
     const lookback = Math.min(14, n - 1);
@@ -1601,7 +1595,7 @@ function updateProbTracker(periodKey, probForBet, currentPrice, betIsUp, strike)
     }
 
     const h = probTracker.history;
-    if (h.length < 3) return { velocity: 0, acceleration: 0, peakDrawdown: 0, profitAtRisk: 0, trend: 'stable' };
+    if (h.length < 3) return { velocity: 0, acceleration: 0, peakDrawdown: 0, profitAtRisk: 0, trend: 'stable', rawVelocity: 0 };
 
     // Probability velocity (EMA-smoothed first derivative)
     const dt = (h[h.length-1].timestamp - h[h.length-2].timestamp) / 1000; // seconds
@@ -1832,7 +1826,7 @@ function assessBetQuality(prediction, strike, marketData, minutesAhead) {
 
         // TIER 3: LOCK — price is far on our side near settlement, nearly guaranteed
         // 85%+ probability, <5 min left, on right side, strong sigma distance
-        if (probForBet >= 0.85 && minutesLeft <= 5 && onRightSide && sigmaFromStrike >= 1.5 && !chop.choppy) {
+        if (probForBet >= 0.85 && minutesLeft <= 5 && onRightSide && sigmaFromStrike >= 2.0 && !chop.choppy) {
             betSize = Math.max(betSize, 3.0);
             convictionTier = 'LOCK';
             betSizeReason = 'MAX CONVICTION — ' + (probForBet * 100).toFixed(0) + '% prob, ' +
@@ -2236,6 +2230,7 @@ function predictPrice(marketData, minutesAhead, strike) {
         const clustering = computeTradeSizeClustering(recentTrades);
         const rawFlow = computeTradeFlowImbalance(recentTrades);
         const cvd = computeCVD(recentTrades);
+        const cvdSignal = cvd.signal;
         const vpin = computeVPIN(recentTrades);
         tradeFlowSignal = clustering.signal * 0.35 + rawFlow * 0.25 + cvd.signal * 0.25 + vpin.signal * 0.15;
         // VPIN Granger-causes price jumps (research) — strongest microstructure signal
@@ -2292,25 +2287,22 @@ function predictPrice(marketData, minutesAhead, strike) {
     let liqMomentumAdj = 0;
     if (marketData.liquidations && marketData.liquidations.totalLiqVol > 0) {
         const liq = marketData.liquidations;
-        // Use volume imbalance as proxy for large/small ratio when detailed data unavailable
-        // totalLiqVol > $100K suggests large liquidations; scale ratio by total volume
         const largeLiqProxy = liq.totalLiqVol > 100000 ? Math.min(liq.totalLiqVol / 100000, 5) : 0;
         const smallLiqProxy = liq.totalLiqVol < 10000 ? 1 : Math.max(1, 10000 / (liq.totalLiqVol + 1));
         const liqSizeRatio = smallLiqProxy > 0 ? largeLiqProxy / smallLiqProxy : largeLiqProxy;
         if (liqSizeRatio > 3) {
-            // Large/small ratio > 3:1 → institutional liquidations → reversal likely
-            liqMomentumAdj = -0.3; // dampen momentum
+            liqMomentumAdj = -0.3;
         } else if (liqSizeRatio < 0.5) {
-            // Large/small ratio < 0.5:1 → retail panic → continuation likely
-            liqMomentumAdj = 0.1; // boost momentum
+            liqMomentumAdj = 0.1;
         }
     }
 
-    const microVolAdjust = spreadVolAdjust * vpinVolAdjust * lambdaVolAdjust * oiSignal.volMultiplier * liqVolAdjust;
+    const rawMicroVolAdjust = spreadVolAdjust * vpinVolAdjust * lambdaVolAdjust * oiSignal.volMultiplier * liqVolAdjust;
+    const microVolAdjust = Math.max(0.5, Math.min(2.0, rawMicroVolAdjust)); // cap to prevent signal saturation during extreme conditions
     const adjustedRemainingVol = remainingVol * microVolAdjust;
     const driftWithEarlyBias = minutesIntoPeriod <= 3 ? rawDrift * 0.75 + earlyMomentumSignal * 0.25 : rawDrift;
     const adjustedDrift = driftWithEarlyBias * driftMultiplier;
-    const driftZShift = adjustedRemainingVol > 0 ? adjustedDrift / adjustedRemainingVol : 0;
+    const driftZShift = adjustedRemainingVol > 0 && isFinite(adjustedDrift) ? adjustedDrift / adjustedRemainingVol : 0;
 
     // SIGNAL 5: RSI — research shows RSI works as MOMENTUM indicator for BTC,
     // not mean-reversion. High RSI = bullish continuation; low RSI = bearish.
@@ -2485,7 +2477,8 @@ function predictPrice(marketData, minutesAhead, strike) {
     const liqComposite = liqSignal * immediateBoosted;
 
     // GROUP 5: Exhaustion (contrarian, stronger mid/late period)
-    const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * regM.reversion;
+    // Exhaustion is most valuable during trends (reversal signal) and least in mean-reversion
+    const exhaustionComposite = exhaustionSignal * (0.06 + (1 - earlyBoost) * 0.06) * regM.momentum;
 
     // GROUP 6: ETH confirmation (small, only when active)
     // Apply ETH confidence boost when strong agreement detected
@@ -2504,17 +2497,20 @@ function predictPrice(marketData, minutesAhead, strike) {
     // GROUP 10: Funding rate stress (derivatives leverage signal)
     const fundingStressComposite = fundingStress.signal;
 
+    // GROUP 7: Contrarian/Positioning (funding + long/short ratio)
+    const contrarianComposite = fundingSignal * 0.6 + longShortSignal * 0.4;
+
     const rawTotalZShift = (
-        momentumComposite         * 0.16 +   // was 0.18 — reduced to accommodate new signals
-        flowComposite             * 0.11 +   // was 0.12
-        meanRevComposite          * 0.08 +   // unchanged
-        liqComposite              * 0.09 +   // was 0.10
-        exhaustionComposite       * 1.00 +   // keep as-is (already scaled internally)
-        ethComposite              * 0.03 +   // unchanged
-        hourlySeasonalComposite   * 0.05 +   // NEW: ~5% weight for hourly directional bias
-        obDepthMomComposite       * 0.03 +   // NEW: orderbook depth momentum
-        dowBiasComposite          * 0.02 +   // NEW: day-of-week pattern (subtle)
-        fundingStressComposite    * 0.04     // NEW: funding rate stress signal
+        momentumComposite         * 0.16 +
+        flowComposite             * 0.11 +
+        meanRevComposite          * 0.08 +
+        liqComposite              * 0.09 +
+        exhaustionComposite       * 1.00 +
+        ethComposite              * 0.03 +
+        hourlySeasonalComposite   * 0.05 +
+        obDepthMomComposite       * 0.03 +
+        dowBiasComposite          * 0.02 +
+        fundingStressComposite    * 0.04
     );
 
     // Shrinkage + cap: max 0.5 total z-shift (was 1.2 — a 1.2 z-shift moves
@@ -2752,7 +2748,7 @@ function predictPrice(marketData, minutesAhead, strike) {
 // ═══════════════════════════════════════════════════════════════
 
 function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemaining) {
-    if (!origPred || !updPred || strike === null) return null;
+    if (!origPred || !updPred || strike === null || strike === 0) return null;
     const reasons = [];
     const betIsUp = origPred.predictedPrice >= strike;
     const betDirection = betIsUp ? 'UP' : 'DOWN';
@@ -2772,8 +2768,8 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const probVel = updateProbTracker(periodKey, probForBet, currentPrice, betIsUp, strike);
 
     // Get momentum exhaustion and choppiness from updated prediction
-    const exhaustion = updPred._exhaustion || { exhaustion: 0, type: 'none' };
-    const choppiness = updPred._choppiness || { choppy: false, adx: 50 };
+    const exhaustion = updPred._exhaustion || { exhaustion: 0, type: 'none', roc: 0, acceleration: 0 };
+    const choppiness = updPred._choppiness || { choppy: false, adx: 50, choppiness: 0.5, plusDI: 0, minusDI: 0, trending: false };
 
     // Remaining vol estimate for recovery analysis
     const remainingVol = updPred._remainingVol || 0.002;
