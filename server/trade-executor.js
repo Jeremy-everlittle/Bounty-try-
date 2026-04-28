@@ -95,6 +95,7 @@ function persistPosition() {
 let killSwitch = false;
 let soldThisPeriod = null;    // Track sold positions for re-entry: { periodKey, side, ticker, soldAt, reason }
 let flippedThisPeriod = false; // Track if we already flipped this cycle (limit to 1 flip)
+let clearedPosition = null;   // Preserved position data when sync clears it before onPeriodEnd settles
 let lastDipCheckTime = 0;     // Throttle dip checks (one per 10s tick)
 let cachedBalance = null;     // { balanceCents, lastFetched }
 let periodTotalCostCents = 0; // Track total cost spent in current period
@@ -111,6 +112,27 @@ let fillFailedPeriods = {};   // { periodKey: { count, lastAttempt } } — track
 let enteredPeriods = {};      // { periodKey: { side, ticker, entryTime } } — prevent duplicate entries even if position is cleared
 let syncZeroCount = 0;        // consecutive times sync read 0 contracts — require 3 before clearing
 
+// ── Prediction direction stability tracking ──
+// Track consecutive cycles the prediction has pointed the same direction.
+// Data shows 55% of cycles have direction flips — early predictions are unreliable.
+// By waiting for the prediction to stabilize, we avoid entering on early wrong signals.
+let predictionStability = {
+    periodKey: null,
+    lastDirection: null,  // 'yes' or 'no'
+    consecutiveSame: 0,   // how many cycles in a row same direction
+    totalCycles: 0,       // total prediction cycles this period
+};
+
+// ── Original prediction direction per period ──
+// The FIRST prediction of each period is correct 91% of the time.
+// Temporary price moves early in the period cause the prediction to flip,
+// leading to bets against the original direction — these are the biggest losses.
+// RULE: Never enter a bet that contradicts the original prediction direction.
+let originalPredictionDirection = {
+    periodKey: null,
+    direction: null,  // 'yes' or 'no' (the side the original prediction implies)
+};
+
 // Get the current 15-minute period key (matches server.js getPeriodKey format)
 function getCurrentPeriodKey() {
     const now = new Date();
@@ -123,7 +145,7 @@ function getCurrentPeriodKey() {
 // If the position is from a previous period, auto-settle it to prevent phantom positions.
 // This is critical for paper mode (no Kalshi API to sync with) and also catches
 // stale positions restored from DB after server restart.
-function validateCurrentPosition() {
+async function validateCurrentPosition() {
     if (!currentPosition) return;
     const currentPeriod = getCurrentPeriodKey();
     if (currentPosition.periodKey && currentPosition.periodKey !== currentPeriod) {
@@ -131,26 +153,38 @@ function validateCurrentPosition() {
         // Only clear if position is old enough (>2 min) to avoid race conditions at period boundaries
         if (positionAge > 120000) {
             console.log(`[trade-executor] Stale position detected: position period=${currentPosition.periodKey}, current period=${currentPeriod}, age=${Math.round(positionAge/1000)}s — auto-settling`);
-            // In paper mode, settle the position (assume loss conservatively)
+            // In paper mode, settle the position using Kalshi result or price-based grading
             if (config.paperMode) {
                 const contracts = currentPosition.totalContracts || currentPosition.contracts;
                 const cost = currentPosition.totalCostCents || (contracts * currentPosition.entryPrice);
-                // We don't know the result, but the position should have been settled by onPeriodEnd.
-                // If it wasn't (missed period end), assume loss.
-                dailyStats.losses++;
-                dailyStats.pnlCents -= cost;
+                // Try to determine actual outcome from Kalshi or price vs strike
+                let positionWon = false;
+                let settleNote = 'auto-settled stale phantom position (missed period end)';
+                try {
+                    const marketData = await trading.getMarket(currentPosition.ticker);
+                    const market = marketData?.market;
+                    if (market && market.result) {
+                        positionWon = (market.result === currentPosition.side);
+                        settleNote += ` — Kalshi result: ${market.result}`;
+                    }
+                } catch (e) {
+                    console.warn(`[trade-executor] Could not fetch Kalshi result for stale position: ${e.message}`);
+                }
+                const pnl = positionWon ? (contracts * 100) - cost : -cost;
+                if (positionWon) { dailyStats.wins++; } else { dailyStats.losses++; }
+                dailyStats.pnlCents += pnl;
                 const env = getEnvironment();
-                // Don't add back proceeds — assume worst case (total loss)
+                if (positionWon) { paperBalances[env] = (paperBalances[env] || 0) + (contracts * 100); }
                 logTrade('settle', {
                     ticker: currentPosition.ticker,
                     side: currentPosition.side,
                     contracts,
                     entryPrice: currentPosition.entryPrice,
-                    correct: false,
-                    pnlCents: -cost,
+                    correct: positionWon,
+                    pnlCents: pnl,
                     dailyPnlCents: dailyStats.pnlCents,
                     periodKey: currentPosition.periodKey,
-                    note: 'auto-settled stale phantom position (missed period end)',
+                    note: settleNote,
                 });
             }
             currentPosition = null;
@@ -204,6 +238,7 @@ function getMaxContractsForRisk(entryPriceCents, maxRiskPct) {
 // Required contracts = (lossCents + minProfitCents) / profitPerContract
 // We take the MAX of this and the normal base sizing.
 const FLIP_MIN_PROFIT_PCT = 0.20; // require at least 20% profit on top of loss recovery
+const FLIP_MAX_BALANCE_PCT = 0.25; // flips can use at most 25% of balance (reduced from 50% — data shows flips are wrong ~50% of the time)
 
 function getFlipRecoveryContracts(lossCents, flipPriceCents, originalContracts) {
     if (!lossCents || lossCents <= 0) return 0; // no loss to recover
@@ -768,7 +803,7 @@ async function capContractsByBalance(contracts, pricePerContract) {
 // ═══════════════════════════════════════════════════════════════
 
 async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
-    validateCurrentPosition(); // Clear stale positions from previous periods
+    await validateCurrentPosition(); // Clear stale positions from previous periods
     if (!prediction || !kalshiTicker || strike === null) return;
 
     const betQuality = prediction._betQuality;
@@ -830,28 +865,52 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         return;
     }
 
-    // Close stale position from a previous period — settle it instead of silently discarding
+    // Close stale position from a previous period — settle using Kalshi result or price-based
     if (currentPosition && currentPosition.periodKey !== periodKey) {
         console.log(`[trade-executor] Stale position from ${currentPosition.periodKey} — auto-settling before new entry`);
-        // We don't know the actual result, but the position should have been settled by onPeriodEnd.
-        // If it wasn't (race condition), settle as unknown/loss to be conservative.
         const staleContracts = currentPosition.totalContracts || currentPosition.contracts;
         const staleCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
         const staleEntry = staleContracts > 0 ? Math.round(staleCost / staleContracts) : currentPosition.entryPrice;
         if (staleContracts > 0 && staleCost > 0) {
-            const pnl = -staleCost; // assume loss (worst case)
-            dailyStats.losses++;
+            // Try Kalshi for actual result, then fall back to price-based
+            let positionWon = false;
+            let settleNote = 'auto-settled stale position (missed onPeriodEnd)';
+            try {
+                const marketData = await trading.getMarket(currentPosition.ticker);
+                const market = marketData?.market;
+                if (market && market.result) {
+                    positionWon = (market.result === currentPosition.side);
+                    settleNote += ` — Kalshi result: ${market.result}`;
+                } else if (currentPosition.strike) {
+                    // Use gradeResult or current price vs strike
+                    const settlePrice = gradeResult?.settlementPrice || null;
+                    if (settlePrice) {
+                        const priceAboveStrike = settlePrice >= currentPosition.strike;
+                        positionWon = (currentPosition.side === 'yes' && priceAboveStrike) ||
+                                      (currentPosition.side === 'no' && !priceAboveStrike);
+                        settleNote += ` — price-based: $${settlePrice.toFixed(2)} vs strike $${currentPosition.strike.toFixed(2)}`;
+                    }
+                }
+            } catch (e) {
+                console.warn(`[trade-executor] Could not fetch Kalshi result for stale position: ${e.message}`);
+            }
+            const pnl = positionWon ? (staleContracts * 100) - staleCost : -staleCost;
+            if (positionWon) { dailyStats.wins++; } else { dailyStats.losses++; }
             dailyStats.pnlCents += pnl;
+            if (config.paperMode && positionWon) {
+                const env = getEnvironment();
+                paperBalances[env] = (paperBalances[env] || 0) + (staleContracts * 100);
+            }
             logTrade('settle', {
                 ticker: currentPosition.ticker,
                 side: currentPosition.side,
                 contracts: staleContracts,
                 entryPrice: staleEntry,
-                correct: false,
+                correct: positionWon,
                 pnlCents: pnl,
                 dailyPnlCents: dailyStats.pnlCents,
                 periodKey: currentPosition.periodKey,
-                note: 'auto-settled stale position (missed onPeriodEnd)',
+                note: settleNote,
             });
         }
         currentPosition = null;
@@ -874,14 +933,75 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     const periodEnd = (Math.floor(mins / 15) + 1) * 15;
     const minutesRemaining = Math.max(0.5, periodEnd - mins - (now.getSeconds() / 60));
 
-    // ── EARLY PERIOD WAIT ──
-    // In the first 3 minutes of a cycle, the model has very little data.
-    // Unless conviction is STRONG or LOCK, wait for the picture to develop.
+    // ── PREDICTION DIRECTION STABILITY TRACKING ──
+    // Track how many consecutive cycles the prediction has pointed the same direction.
+    // Data shows 55% of cycles have direction flips — early predictions are unreliable.
+    if (predictionStability.periodKey !== periodKey) {
+        // New period — reset tracking
+        predictionStability = { periodKey, lastDirection: side, consecutiveSame: 1, totalCycles: 1 };
+    } else {
+        predictionStability.totalCycles++;
+        if (side === predictionStability.lastDirection) {
+            predictionStability.consecutiveSame++;
+        } else {
+            console.log(`[trade-executor] Prediction direction flip: was ${predictionStability.lastDirection.toUpperCase()}, now ${side.toUpperCase()} (cycle ${predictionStability.totalCycles}, was stable for ${predictionStability.consecutiveSame})`);
+            predictionStability.lastDirection = side;
+            predictionStability.consecutiveSame = 1;
+        }
+    }
+
+    // ── ORIGINAL PREDICTION DIRECTION LOCK ──
+    // Record the FIRST prediction direction of each period. The original prediction
+    // is correct 91% of the time. Early price moves cause the prediction to temporarily
+    // flip, leading to bets against the original — these are the biggest losses.
+    // RULE: Never enter a NEW bet that contradicts the original prediction direction.
+    if (originalPredictionDirection.periodKey !== periodKey) {
+        originalPredictionDirection = { periodKey, direction: side };
+        console.log(`[trade-executor] Original prediction for ${periodKey}: ${side.toUpperCase()}`);
+    }
+
     const isLockTier = betQuality.convictionTier === 'LOCK';
     const isStrongOrLock = isLockTier || betQuality.convictionTier === 'STRONG';
-    if (minutesRemaining > 12 && !isStrongOrLock) {
+
+    // Block entry if current prediction contradicts original direction.
+    // The only exception: if the prediction has been stable in the NEW direction
+    // for 6+ consecutive cycles (~60 seconds sustained flip), it's likely a genuine
+    // reversal, not noise. LOCK tier also bypasses (high conviction, late in period).
+    if (side !== originalPredictionDirection.direction && !isLockTier) {
+        const sustainedFlip = predictionStability.consecutiveSame >= 6;
+        if (!sustainedFlip) {
+            const msg = `Prediction (${side.toUpperCase()}) contradicts original direction (${originalPredictionDirection.direction.toUpperCase()}) — blocking entry (stable for ${predictionStability.consecutiveSame}/6 cycles)`;
+            console.log(`[trade-executor] ${msg}`);
+            setThought('blocked', msg);
+            decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
+            return;
+        }
+        // Sustained flip — update the original direction since prediction has genuinely changed
+        console.log(`[trade-executor] Sustained direction change: original ${originalPredictionDirection.direction.toUpperCase()} → ${side.toUpperCase()} (stable ${predictionStability.consecutiveSame} cycles). Updating original.`);
+        originalPredictionDirection.direction = side;
+    }
+
+    // ── EARLY PERIOD WAIT ──
+    // Wait for the first 5 minutes of a cycle (was 3 min — too aggressive).
+    // Data shows most wrong-side bets entered at the 3-minute mark when prediction
+    // hadn't stabilized yet. LOCK bets bypass (they only trigger in final 5 min).
+    if (minutesRemaining > 10 && !isStrongOrLock) {
         const minsIn = 15 - minutesRemaining;
-        const msg = `Too early in cycle (${minsIn.toFixed(1)}m in) — waiting for price direction to establish`;
+        const msg = `Too early in cycle (${minsIn.toFixed(1)}m in) — waiting for prediction to stabilize`;
+        console.log(`[trade-executor] ${msg}`);
+        setThought('waiting', msg);
+        decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
+        return;
+    }
+
+    // ── PREDICTION STABILITY GATE ──
+    // Don't enter until prediction direction has been stable for at least 3 consecutive
+    // cycles (~30 seconds). This prevents entering on the initial noisy readings that
+    // flip 55% of the time. LOCK/STRONG bypass (high conviction).
+    // After 8+ minutes (< 7 min remaining), relax to 2 consecutive (enough data by then).
+    const requiredStability = minutesRemaining < 7 ? 2 : 3;
+    if (!isStrongOrLock && predictionStability.consecutiveSame < requiredStability) {
+        const msg = `Prediction unstable — ${side.toUpperCase()} for ${predictionStability.consecutiveSame}/${requiredStability} cycles, waiting`;
         console.log(`[trade-executor] ${msg}`);
         setThought('waiting', msg);
         decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike });
@@ -894,16 +1014,30 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
     // Exception: LOCK conviction tier (last ~5 min, near-guaranteed) can go up to 95¢.
     const MAX_ENTRY_PRICE = isLockTier ? 95 : 85;
 
-    // Early period protection: in the first 5 minutes of a period, require cheaper
-    // entries to compensate for the higher uncertainty.
+    // Early period protection: in the first 7 minutes of a period, require cheaper
+    // entries to compensate for higher uncertainty (prediction still stabilizing).
     // LOCK bets bypass early period limits (they only trigger with <5 min left anyway).
     const earlyPeriodMaxPrice = isLockTier ? MAX_ENTRY_PRICE
-                              : minutesRemaining > 13 ? 65  // first ~2 min: max 65¢ (if STRONG)
-                              : minutesRemaining > 11 ? 72  // 2-4 min: max 72¢
-                              : minutesRemaining > 10 ? 82  // 4-5 min: max 82¢ (was 78¢ — too tight)
-                              : MAX_ENTRY_PRICE;             // after 5 min: standard 85¢ cap
+                              : minutesRemaining > 10 ? 60  // first ~5 min: max 60¢ (if STRONG)
+                              : minutesRemaining > 9 ? 68   // 5-6 min: max 68¢
+                              : minutesRemaining > 8 ? 75   // 6-7 min: max 75¢
+                              : MAX_ENTRY_PRICE;             // after 7 min: standard 85¢ cap
 
     const convictionLabel = betQuality.convictionTier ? ` [${betQuality.convictionTier}]` : '';
+
+    // ── NEGATIVE EDGE GUARD ──
+    // Data shows entries at -17% to -24% edge result in consistent losses.
+    // Block entries when Kelly edge is deeply negative (model prob far below market price).
+    // Exception: LOCK tier (near-guaranteed, sigma-based, not edge-based).
+    if (!isLockTier && betQuality.edge !== undefined && betQuality.edge < -0.10) {
+        const msg = `Edge too negative (${(betQuality.edge * 100).toFixed(1)}%) — model probability far below market price, no value`;
+        console.log(`[trade-executor] ${msg}`);
+        setThought('skip', msg);
+        decisionLog.logSkip({ periodKey, reason: msg, currentPrice: prediction?.predictedPrice, strike,
+            edge: betQuality.edge, probability: prediction.probability });
+        return;
+    }
+
     setThought('buying', `Placing ${isUp ? 'UP' : 'DOWN'} bet${convictionLabel}`, {
         edge: betQuality.edge, quality: betQuality.quality, betSize: betQuality.betSize,
         conviction: betQuality.convictionTier || 'normal',
@@ -1040,6 +1174,11 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         reason: 'Good entry',
     }).catch(e => console.error('[db] Decision log error:', e.message));
 
+    // Build reason string explaining why this bet was placed
+    const stabilityInfo = predictionStability.consecutiveSame >= 3 ? 'stable' : 'early';
+    const convInfo = betQuality.convictionTier ? betQuality.convictionTier : 'normal';
+    const entryReason = `Prediction ${isUp ? 'UP' : 'DOWN'} (${stabilityInfo}, ${convInfo} conviction, ${(betQuality.edge * 100).toFixed(1)}% edge, ${(15 - minutesRemaining).toFixed(0)}m into cycle)`;
+
     const tradeInfo = {
         ticker: kalshiTicker,
         side,
@@ -1051,6 +1190,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
         edge: (betQuality.edge * 100).toFixed(1) + '%',
         quality: (betQuality.quality * 100).toFixed(0) + '%',
         betSize: betQuality.betSize.toFixed(2),
+        reason: entryReason,
     };
 
     if (config.paperMode) {
@@ -1071,6 +1211,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             entryTime: Date.now(),
             totalCostCents: costCents,
             totalContracts: cappedContracts,
+            strike,
         };
         enteredPeriods[periodKey] = { side, ticker: kalshiTicker, entryTime: Date.now() };
         tradeInfo.contracts = cappedContracts;
@@ -1154,6 +1295,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
             entryTime: Date.now(),
             totalCostCents: filledContracts * limitPrice,
             totalContracts: filledContracts,
+            strike,
         };
         // enteredPeriods already marked before order placement
         syncZeroCount = 0; // reset sync counter on new entry
@@ -1186,7 +1328,7 @@ async function onNewPrediction(prediction, kalshiTicker, strike, periodKey) {
 // ═══════════════════════════════════════════════════════════════
 
 async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, strike, currentPrice) {
-    validateCurrentPosition(); // Clear stale positions from previous periods
+    await validateCurrentPosition(); // Clear stale positions from previous periods
     if (!currentPosition || !sellSignal) return;
 
     // ── BINARY OPTIONS: ALMOST NEVER SELL (except confident flips) ──
@@ -1264,7 +1406,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         const env = getEnvironment();
         paperBalances[env] = (paperBalances[env] || 0) + sellProceeds;
         console.log(`[trade-executor] PAPER SELL: ${sellContracts}x ${currentPosition.side.toUpperCase()} on ${currentPosition.ticker} @ ${sellPrice}c — reason: ${sellSignal.level} | Proceeds=$${(sellProceeds/100).toFixed(2)} | Loss=$${(sellLossCents/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
-        logTrade('sell', tradeInfo);
+        logTrade('sell', { ...tradeInfo, limitPrice: sellPrice, sellProceeds, originalCost: originalCostCents });
         decisionLog.logSellDecision({ sellSignal, minutesRemaining, acted: true, reason: sellSignal.level, currentPrice, strike });
         dailyStats.tradeCount++;
         // Record for potential re-entry
@@ -1280,49 +1422,71 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
             lossCents: sellLossCents,
         };
         currentPosition = null;
+        persistPosition(); // Clear position in DB so it's not restored as stale on restart
 
         // ── FLIP: immediately enter the opposite side (max 1 flip per cycle) ──
         // Size the flip to recover the loss from selling + a profit margin
+        // GUARD: Never flip against the prediction direction — data shows prediction is correct 83%+ of the time
         if (isConfidentFlip && !flippedThisPeriod && updatedPrediction && soldTicker && soldPeriodKey) {
             const flipSide = soldSide === 'yes' ? 'no' : 'yes';
-            console.log(`[trade-executor] CONFIDENT FLIP: sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()} (need to recover $${(sellLossCents/100).toFixed(2)} loss)`);
-            const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
-            if (flipPrice !== null) {
-                // Use the LARGER of: base sizing or loss-recovery sizing
-                const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
-                const recoverySizing = getFlipRecoveryContracts(sellLossCents, flipPrice, sellContracts);
-                const targetContracts = Math.max(baseSizing, recoverySizing);
-                const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
-                if (flipContracts > 0) {
-                    const flipCost = flipContracts * flipPrice;
-                    const expectedProfit = flipContracts * (100 - flipPrice);
-                    const netAfterRecovery = expectedProfit - sellLossCents;
+            const predictionIsUp = updatedPrediction.predictedPrice >= strike;
+            const predictionSide = predictionIsUp ? 'yes' : 'no';
+            if (flipSide !== predictionSide) {
+                console.log(`[trade-executor] FLIP BLOCKED: flip would bet ${flipSide.toUpperCase()} but prediction says ${predictionSide.toUpperCase()} — trusting prediction`);
+                setThought('skip', `Flip blocked — would go against prediction (${predictionSide.toUpperCase()})`);
+            } else {
+                console.log(`[trade-executor] CONFIDENT FLIP: sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()} (need to recover $${(sellLossCents/100).toFixed(2)} loss)`);
+                const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
+                if (flipPrice !== null) {
+                    // Use the LARGER of: base sizing or loss-recovery sizing
+                    // BUT cap to 60% of maxPositionContracts and 25% of balance (risk management)
+                    // Data shows flips are wrong ~50% of the time — size conservatively
+                    const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
+                    const recoverySizing = getFlipRecoveryContracts(sellLossCents, flipPrice);
+                    let targetContracts = Math.max(baseSizing, recoverySizing);
+                    // Cap 1: flips capped at 60% of maxPositionContracts — inherently riskier
+                    const flipContractCap = Math.round(config.maxPositionContracts * 0.6);
+                    targetContracts = Math.min(targetContracts, flipContractCap);
+                    // Cap 2: flips can use at most 25% of available balance (reduced from 50%)
                     const env = getEnvironment();
-                    paperBalances[env] = (paperBalances[env] || 0) - flipCost;
-                    currentPosition = {
-                        ticker: soldTicker, side: flipSide, contracts: flipContracts,
-                        entryPrice: flipPrice, orderId: 'flip-paper-' + Date.now(),
-                        periodKey: soldPeriodKey, entryTime: Date.now(),
-                        totalCostCents: flipCost, totalContracts: flipContracts,
-                        flipped: true, originalSide: soldSide,
-                        flipLossCents: sellLossCents,
-                    };
-                    enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
-                    flippedThisPeriod = true;
-                    logTrade('buy', {
-                        ticker: soldTicker, side: flipSide, action: 'buy',
-                        contracts: flipContracts, limitPrice: flipPrice,
-                        periodKey: soldPeriodKey, direction: flipSide === 'yes' ? 'UP' : 'DOWN',
-                        strategy: 'confident_flip', fillStatus: 'paper-flip',
-                        flipped: true, originalSide: soldSide,
-                        flipLossCents: sellLossCents, expectedProfit, netAfterRecovery,
-                    });
-                    dailyStats.tradeCount++;
-                    setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipContracts}x @ ${flipPrice}c (recovering $${(sellLossCents/100).toFixed(2)} loss, expected net +$${(netAfterRecovery/100).toFixed(2)})`, {
-                        contracts: flipContracts, side: flipSide, strategy: 'confident_flip',
-                        flipLossCents: sellLossCents, expectedProfit, netAfterRecovery,
-                    });
-                    console.log(`[trade-executor] PAPER FLIP: ${flipContracts}x ${flipSide.toUpperCase()} @ ${flipPrice}c | Loss to recover=$${(sellLossCents/100).toFixed(2)} | Expected profit=$${(expectedProfit/100).toFixed(2)} | Net=$${(netAfterRecovery/100).toFixed(2)}`);
+                    const flipBudgetCents = Math.floor((paperBalances[env] || 0) * FLIP_MAX_BALANCE_PCT);
+                    const maxByBudget = Math.floor(flipBudgetCents / flipPrice);
+                    if (targetContracts > maxByBudget && maxByBudget > 0) {
+                        console.log(`[trade-executor] Flip risk cap: ${targetContracts} → ${maxByBudget} contracts (50% of balance = ${flipBudgetCents}c @ ${flipPrice}c each)`);
+                        targetContracts = maxByBudget;
+                    }
+                    const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
+                    if (flipContracts > 0) {
+                        const flipCost = flipContracts * flipPrice;
+                        const expectedProfit = flipContracts * (100 - flipPrice);
+                        const netAfterRecovery = expectedProfit - sellLossCents;
+                        const env = getEnvironment();
+                        paperBalances[env] = (paperBalances[env] || 0) - flipCost;
+                        currentPosition = {
+                            ticker: soldTicker, side: flipSide, contracts: flipContracts,
+                            entryPrice: flipPrice, orderId: 'flip-paper-' + Date.now(),
+                            periodKey: soldPeriodKey, entryTime: Date.now(),
+                            totalCostCents: flipCost, totalContracts: flipContracts,
+                            flipped: true, originalSide: soldSide, strike,
+                            flipLossCents: sellLossCents,
+                        };
+                        enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
+                        flippedThisPeriod = true;
+                        logTrade('buy', {
+                            ticker: soldTicker, side: flipSide, action: 'buy',
+                            contracts: flipContracts, limitPrice: flipPrice,
+                            periodKey: soldPeriodKey, direction: flipSide === 'yes' ? 'UP' : 'DOWN',
+                            strategy: 'confident_flip', fillStatus: 'paper-flip',
+                            flipped: true, originalSide: soldSide,
+                            flipLossCents: sellLossCents, expectedProfit, netAfterRecovery,
+                        });
+                        dailyStats.tradeCount++;
+                        setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipContracts}x @ ${flipPrice}c (recovering $${(sellLossCents/100).toFixed(2)} loss, expected net +$${(netAfterRecovery/100).toFixed(2)})`, {
+                            contracts: flipContracts, side: flipSide, strategy: 'confident_flip',
+                            flipLossCents: sellLossCents, expectedProfit, netAfterRecovery,
+                        });
+                        console.log(`[trade-executor] PAPER FLIP: ${flipContracts}x ${flipSide.toUpperCase()} @ ${flipPrice}c | Loss to recover=$${(sellLossCents/100).toFixed(2)} | Expected profit=$${(expectedProfit/100).toFixed(2)} | Net=$${(netAfterRecovery/100).toFixed(2)}`);
+                    }
                 }
             }
         } else if (isConfidentFlip && flippedThisPeriod) {
@@ -1393,7 +1557,7 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         const liveSellProceeds = filledContracts * (fills.avgPrice || currentPosition.entryPrice);
         const liveOriginalCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
         const liveSellLossCents = Math.max(0, liveOriginalCost - liveSellProceeds);
-        logTrade('sell', { ...tradeInfo, orderId: order.order_id, fillStatus: order.status, filledContracts, lossCents: liveSellLossCents });
+        logTrade('sell', { ...tradeInfo, limitPrice: fills.avgPrice || currentPosition.entryPrice, orderId: order.order_id, fillStatus: order.status, filledContracts, lossCents: liveSellLossCents });
         dailyStats.tradeCount++;
         const soldTicker = currentPosition.ticker;
         const soldPeriodKey = currentPosition.periodKey;
@@ -1410,73 +1574,88 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 
         // ── FLIP: immediately enter the opposite side (live, max 1 flip per cycle) ──
         // Size to recover the loss from selling + a profit margin
+        // GUARD: Never flip against the prediction direction — data shows prediction is correct 83%+ of the time
         if (isConfidentFlip && !flippedThisPeriod && updatedPrediction && soldTicker && soldPeriodKey) {
             const flipSide = soldSide === 'yes' ? 'no' : 'yes';
-            console.log(`[trade-executor] CONFIDENT FLIP (live): sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()} (need to recover $${(liveSellLossCents/100).toFixed(2)} loss)`);
-            const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
-            if (flipPrice !== null) {
-                // Use the LARGER of: base sizing or loss-recovery sizing
-                const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
-                const recoverySizing = getFlipRecoveryContracts(liveSellLossCents, flipPrice, filledContracts);
-                const dynamicMaxFlip = getMaxContractsForRisk(flipPrice, 0.15);
-                const targetContracts = Math.min(Math.max(baseSizing, recoverySizing), dynamicMaxFlip);
-                const flipCost = targetContracts * flipPrice;
-                if (!checkPeriodExposure(soldPeriodKey, flipCost)) {
-                    console.log(`[trade-executor] Flip blocked: period exposure cap exceeded`);
-                } else {
-                const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
-                if (flipContracts > 0) {
-                    orderInFlight = true;
+            const predictionIsUp = updatedPrediction.predictedPrice >= strike;
+            const predictionSide = predictionIsUp ? 'yes' : 'no';
+            if (flipSide !== predictionSide) {
+                console.log(`[trade-executor] FLIP BLOCKED (live): flip would bet ${flipSide.toUpperCase()} but prediction says ${predictionSide.toUpperCase()} — trusting prediction`);
+                setThought('skip', `Flip blocked — would go against prediction (${predictionSide.toUpperCase()})`);
+            } else {
+                console.log(`[trade-executor] CONFIDENT FLIP (live): sold ${soldSide.toUpperCase()}, now entering ${flipSide.toUpperCase()} (need to recover $${(liveSellLossCents/100).toFixed(2)} loss)`);
+                const flipPrice = await getMarketPrice(soldTicker, flipSide, minutesRemaining);
+                if (flipPrice !== null) {
+                    // Use the LARGER of: base sizing or loss-recovery sizing
+                    // BUT cap to 60% of maxPositionContracts and 25% of balance (risk management)
+                    const baseSizing = Math.max(1, getBaseContractCount(flipPrice));
+                    const recoverySizing = getFlipRecoveryContracts(liveSellLossCents, flipPrice);
+                    let targetContracts = Math.max(baseSizing, recoverySizing);
+                    // Cap 1: flips capped at 60% of maxPositionContracts — inherently riskier
+                    const flipContractCap = Math.round(config.maxPositionContracts * 0.6);
+                    targetContracts = Math.min(targetContracts, flipContractCap);
+                    // Cap 2: flips use at most 25% of balance — fetch live balance for cap
                     try {
-                        const flipResult = await trading.placeOrder({
-                            ticker: soldTicker, side: flipSide, action: 'buy', count: flipContracts,
-                            yesPrice: flipSide === 'yes' ? flipPrice : undefined,
-                            noPrice: flipSide === 'no' ? flipPrice : undefined,
-                        });
-                        let flipOrder = flipResult.order || {};
-                        if (flipOrder.status === 'resting' || flipOrder.status === 'open') {
-                            flipOrder = await waitForFill(flipOrder.order_id, flipOrder, 8000);
+                        const balResp = await trading.getBalance();
+                        const flipBudgetCents = Math.floor(balResp.balance * FLIP_MAX_BALANCE_PCT);
+                        const maxByBudget = Math.floor(flipBudgetCents / flipPrice);
+                        if (targetContracts > maxByBudget && maxByBudget > 0) {
+                            console.log(`[trade-executor] Flip risk cap (live): ${targetContracts} → ${maxByBudget} contracts (50% of balance = ${flipBudgetCents}c @ ${flipPrice}c each)`);
+                            targetContracts = maxByBudget;
                         }
-                        const flipFills = parseOrderFills(flipOrder);
-                        if (flipFills.filled > 0) {
-                            const avgPrice = flipFills.avgPrice || flipPrice;
-                            const flipCost = flipFills.filled * avgPrice;
-                            const expectedProfit = flipFills.filled * (100 - avgPrice);
-                            const netAfterRecovery = expectedProfit - liveSellLossCents;
-                            currentPosition = {
-                                ticker: soldTicker, side: flipSide, contracts: flipFills.filled,
-                                entryPrice: avgPrice, orderId: flipOrder.order_id,
-                                periodKey: soldPeriodKey, entryTime: Date.now(),
-                                totalCostCents: flipCost, totalContracts: flipFills.filled,
-                                flipped: true, originalSide: soldSide,
-                                flipLossCents: liveSellLossCents,
-                            };
-                            enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
-                            flippedThisPeriod = true;
-                            logTrade('buy', {
-                                ticker: soldTicker, side: flipSide, action: 'buy',
-                                contracts: flipFills.filled, limitPrice: avgPrice,
-                                periodKey: soldPeriodKey, direction: flipSide === 'yes' ? 'UP' : 'DOWN',
-                                strategy: 'confident_flip', orderId: flipOrder.order_id,
-                                flipped: true, originalSide: soldSide,
-                                flipLossCents: liveSellLossCents, expectedProfit, netAfterRecovery,
+                    } catch (balErr) {
+                        console.warn(`[trade-executor] Flip balance check failed: ${balErr.message} — using position cap only`);
+                    }
+                    const flipContracts = await capContractsByBalance(targetContracts, flipPrice);
+                    if (flipContracts > 0) {
+                        try {
+                            const flipResult = await trading.placeOrder({
+                                ticker: soldTicker, side: flipSide, action: 'buy', count: flipContracts,
+                                yesPrice: flipSide === 'yes' ? flipPrice : undefined,
+                                noPrice: flipSide === 'no' ? flipPrice : undefined,
                             });
-                            dailyStats.tradeCount++;
-                            setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipFills.filled}x @ ${avgPrice}c (recovering $${(liveSellLossCents/100).toFixed(2)} loss, expected net +$${(netAfterRecovery/100).toFixed(2)})`, {
-                                contracts: flipFills.filled, side: flipSide, strategy: 'confident_flip',
-                                flipLossCents: liveSellLossCents, expectedProfit, netAfterRecovery,
-                            });
-                            console.log(`[trade-executor] LIVE FLIP: ${flipFills.filled}x ${flipSide.toUpperCase()} @ ${avgPrice}c | Loss to recover=$${(liveSellLossCents/100).toFixed(2)} | Expected profit=$${(expectedProfit/100).toFixed(2)} | Net=$${(netAfterRecovery/100).toFixed(2)} — order ${flipOrder.order_id}`);
+                            let flipOrder = flipResult.order || {};
+                            if (flipOrder.status === 'resting' || flipOrder.status === 'open') {
+                                flipOrder = await waitForFill(flipOrder.order_id, flipOrder, 8000);
+                            }
+                            const flipFills = parseOrderFills(flipOrder);
+                            if (flipFills.filled > 0) {
+                                const avgPrice = flipFills.avgPrice || flipPrice;
+                                const flipCost = flipFills.filled * avgPrice;
+                                const expectedProfit = flipFills.filled * (100 - avgPrice);
+                                const netAfterRecovery = expectedProfit - liveSellLossCents;
+                                currentPosition = {
+                                    ticker: soldTicker, side: flipSide, contracts: flipFills.filled,
+                                    entryPrice: avgPrice, orderId: flipOrder.order_id,
+                                    periodKey: soldPeriodKey, entryTime: Date.now(),
+                                    totalCostCents: flipCost, totalContracts: flipFills.filled,
+                                    flipped: true, originalSide: soldSide, strike,
+                                    flipLossCents: liveSellLossCents,
+                                };
+                                enteredPeriods[soldPeriodKey] = { side: flipSide, ticker: soldTicker, entryTime: Date.now() };
+                                flippedThisPeriod = true;
+                                logTrade('buy', {
+                                    ticker: soldTicker, side: flipSide, action: 'buy',
+                                    contracts: flipFills.filled, limitPrice: avgPrice,
+                                    periodKey: soldPeriodKey, direction: flipSide === 'yes' ? 'UP' : 'DOWN',
+                                    strategy: 'confident_flip', orderId: flipOrder.order_id,
+                                    flipped: true, originalSide: soldSide,
+                                    flipLossCents: liveSellLossCents, expectedProfit, netAfterRecovery,
+                                });
+                                dailyStats.tradeCount++;
+                                setThought('bought', `Flipped to ${flipSide.toUpperCase()} — ${flipFills.filled}x @ ${avgPrice}c (recovering $${(liveSellLossCents/100).toFixed(2)} loss, expected net +$${(netAfterRecovery/100).toFixed(2)})`, {
+                                    contracts: flipFills.filled, side: flipSide, strategy: 'confident_flip',
+                                    flipLossCents: liveSellLossCents, expectedProfit, netAfterRecovery,
+                                });
+                                console.log(`[trade-executor] LIVE FLIP: ${flipFills.filled}x ${flipSide.toUpperCase()} @ ${avgPrice}c | Loss to recover=$${(liveSellLossCents/100).toFixed(2)} | Expected profit=$${(expectedProfit/100).toFixed(2)} | Net=$${(netAfterRecovery/100).toFixed(2)} — order ${flipOrder.order_id}`);
+                            }
+                        } catch (flipErr) {
+                            console.error(`[trade-executor] Flip buy failed:`, flipErr.message);
+                            logTrade('flip_error', { ticker: soldTicker, side: flipSide, error: flipErr.message });
                         }
-                    } catch (flipErr) {
-                        console.error(`[trade-executor] Flip buy failed:`, flipErr.message);
-                        logTrade('flip_error', { ticker: soldTicker, side: flipSide, error: flipErr.message });
-                    } finally {
-                        orderInFlight = false;
                     }
                 }
             }
-            } // close period exposure check else
         } else if (isConfidentFlip && flippedThisPeriod) {
             console.log(`[trade-executor] FLIP BLOCKED (live): already flipped once this cycle — not flipping again`);
             setThought('skip', 'Flip blocked — already flipped once this cycle');
@@ -1496,31 +1675,98 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
 // Period end: called when prediction is graded
 // ═══════════════════════════════════════════════════════════════
 
-function onPeriodEnd(gradeResult) {
+async function onPeriodEnd(gradeResult) {
     if (!gradeResult || !gradeResult.periodKey || !gradeResult.actualDirection) {
         console.error('[trade-executor] onPeriodEnd: invalid gradeResult — missing required fields:', JSON.stringify(gradeResult));
         return;
+    }
+    // If currentPosition was cleared by sync but we saved the data, restore it for settlement
+    if (!currentPosition && clearedPosition && clearedPosition.periodKey === gradeResult.periodKey) {
+        console.log(`[trade-executor] onPeriodEnd: restoring cleared position for proper settlement of ${gradeResult.periodKey}`);
+        currentPosition = clearedPosition;
+        clearedPosition = null;
+        // Fall through to normal settlement below
     }
     // If currentPosition was cleared (e.g., by sync bug) but we know we entered this period,
     // still log a settlement so the frontend can show WIN/LOSS instead of PENDING
     if (!currentPosition && enteredPeriods[gradeResult.periodKey]) {
         const ep = enteredPeriods[gradeResult.periodKey];
+        // Check if a real settlement was already logged for this period (avoid duplicate)
+        const alreadySettled = tradeLog.some(t => t.type === 'settle' && t.periodKey === gradeResult.periodKey && t.pnlCents !== 0);
+        if (alreadySettled) {
+            console.log(`[trade-executor] onPeriodEnd: skipping enteredPeriods fallback — real settlement already exists for ${gradeResult.periodKey}`);
+            soldThisPeriod = null;
+            flippedThisPeriod = false;
+            syncZeroCount = 0;
+            clearedPosition = null;
+            return;
+        }
         console.log(`[trade-executor] onPeriodEnd: no currentPosition but enteredPeriods has ${gradeResult.periodKey} — logging settlement from entry record`);
-        const positionWon = (ep.side === 'yes' && gradeResult.actualDirection === 'up') ||
-                            (ep.side === 'no' && gradeResult.actualDirection === 'down');
+        let positionWon;
+        if (gradeResult.settlementPrice && gradeResult.strikePrice) {
+            const priceAboveStrike = gradeResult.settlementPrice >= gradeResult.strikePrice;
+            positionWon = (ep.side === 'yes' && priceAboveStrike) ||
+                          (ep.side === 'no' && !priceAboveStrike);
+        } else {
+            positionWon = (ep.side === 'yes' && gradeResult.actualDirection === 'up') ||
+                          (ep.side === 'no' && gradeResult.actualDirection === 'down');
+        }
         if (positionWon) {
             dailyStats.wins++;
         } else {
             dailyStats.losses++;
         }
+        // Try to compute P&L from trade history if possible
+        let fallbackPnl = 0;
+        const periodBuys = tradeLog.filter(t => t.periodKey === gradeResult.periodKey &&
+            (t.type === 'buy' || t.type === 'dip_buy' || t.type === 'late_lock' || t.type === 're_entry'));
+        const periodSells = tradeLog.filter(t => t.periodKey === gradeResult.periodKey && t.type === 'sell');
+        if (periodBuys.length > 0) {
+            // IMPORTANT: tradeLog is newest-first (unshift), so newer entries have LOWER indices.
+            // To find buys AFTER the last sell (flip buys), we need buys with LOWER index than sell.
+            // Use timestamps for clarity and correctness.
+            const lastSellTime = periodSells.length > 0 ?
+                Math.max(...periodSells.map(s => new Date(s.time).getTime())) : 0;
+            const activeBuys = lastSellTime > 0 ?
+                periodBuys.filter(b => new Date(b.time).getTime() > lastSellTime) : periodBuys;
+
+            if (activeBuys.length > 0) {
+                // There are buys after the sell (flip position) — compute P&L from the flip
+                const totalContracts = activeBuys.reduce((sum, b) => sum + (b.contracts || 0), 0);
+                const totalCost = activeBuys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
+                const flipLoss = activeBuys.find(b => b.flipLossCents)?.flipLossCents || 0;
+                if (positionWon) {
+                    fallbackPnl = (totalContracts * 100) - totalCost - flipLoss;
+                } else {
+                    fallbackPnl = -totalCost - flipLoss;
+                }
+                console.log(`[trade-executor] Computed fallback P&L from flip position: ${fallbackPnl}c (contracts=${totalContracts}, cost=${totalCost}, flipLoss=${flipLoss})`);
+            } else if (periodSells.length > 0) {
+                // Sold early, no flip — P&L is sell proceeds minus buy cost
+                const totalBuyCost = periodBuys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
+                const totalSellProceeds = periodSells.reduce((sum, s) => sum + (s.contracts || 0) * (s.limitPrice || 0), 0);
+                fallbackPnl = totalSellProceeds - totalBuyCost; // negative = loss from selling at lower price
+                console.log(`[trade-executor] Computed fallback P&L from early sell: ${fallbackPnl}c (bought=${totalBuyCost}c, sold=${totalSellProceeds}c)`);
+            } else {
+                // No sells — position expired/settled normally but was somehow cleared
+                const totalContracts = periodBuys.reduce((sum, b) => sum + (b.contracts || 0), 0);
+                const totalCost = periodBuys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
+                if (positionWon) {
+                    fallbackPnl = (totalContracts * 100) - totalCost;
+                } else {
+                    fallbackPnl = -totalCost;
+                }
+                console.log(`[trade-executor] Computed fallback P&L from position: ${fallbackPnl}c (contracts=${totalContracts}, cost=${totalCost})`);
+            }
+        }
         logTrade('settle', {
             ticker: ep.ticker,
             side: ep.side,
-            contracts: 0, // unknown — position was cleared
+            contracts: 0,
             entryPrice: 0,
             correct: positionWon,
             predictionCorrect: gradeResult.correct,
-            pnlCents: 0, // unknown — position was cleared
+            pnlCents: fallbackPnl,
             dailyPnlCents: dailyStats.pnlCents,
             periodKey: gradeResult.periodKey,
             note: 'settled from enteredPeriods (position was cleared before settlement)',
@@ -1528,9 +1774,13 @@ function onPeriodEnd(gradeResult) {
             strikePrice: gradeResult.strikePrice,
             settlementPrice: gradeResult.settlementPrice,
         });
+        if (fallbackPnl !== 0) {
+            dailyStats.pnlCents += fallbackPnl;
+        }
         soldThisPeriod = null;
         flippedThisPeriod = false;
         syncZeroCount = 0;
+        clearedPosition = null;
         return;
     }
     if (!currentPosition) {
@@ -1540,24 +1790,76 @@ function onPeriodEnd(gradeResult) {
     console.log(`[trade-executor] onPeriodEnd: settling position ${currentPosition.periodKey}, gradeResult:`, JSON.stringify(gradeResult));
 
     // Position auto-settles on Kalshi. Track the P&L.
-    // IMPORTANT: Win/loss is determined by POSITION SIDE vs ACTUAL DIRECTION,
-    // NOT by whether the prediction was correct. The position side may diverge
-    // from the latest prediction (e.g. bet placed on earlier prediction, then
-    // prediction direction changed mid-period).
+    // PRIORITY ORDER for determining win/loss:
+    // 1. Kalshi market.result (ground truth from exchange)
+    // 2. gradeResult settlement price vs strike (BRTI approximation, only if period key matches)
+    // 3. Position's own strike vs current price (last resort)
     const predictionCorrect = gradeResult && gradeResult.correct;
     let positionWon;
-    if (gradeResult && gradeResult.actualDirection) {
-        // YES wins when price goes UP, NO wins when price goes DOWN
-        positionWon = (currentPosition.side === 'yes' && gradeResult.actualDirection === 'up') ||
-                      (currentPosition.side === 'no' && gradeResult.actualDirection === 'down');
-    } else {
-        // Fallback if actualDirection not available
-        positionWon = predictionCorrect;
+    let settlementSource = 'unknown';
+    let kalshiSettlementDebug = null; // Store Kalshi API response for UI debugging
+
+    // 1. Try Kalshi settlement result (ground truth)
+    try {
+        const marketData = await trading.getMarket(currentPosition.ticker);
+        const market = marketData?.market;
+        kalshiSettlementDebug = {
+            status: market?.status || 'no-market',
+            result: market?.result || null,
+            ticker: currentPosition.ticker,
+            yes_sub_title: market?.yes_sub_title || null,
+            no_sub_title: market?.no_sub_title || null,
+        };
+        if (market && market.result) {
+            positionWon = (market.result === currentPosition.side);
+            settlementSource = 'kalshi';
+            console.log(`[trade-executor] Kalshi settlement for ${currentPosition.ticker}: result=${market.result.toUpperCase()}, position ${currentPosition.side.toUpperCase()} → ${positionWon ? 'WON' : 'LOST'}`);
+        } else {
+            console.warn(`[trade-executor] Kalshi market ${currentPosition.ticker}: status=${market?.status}, result=${market?.result || 'undefined'} — no settlement result yet`);
+        }
+    } catch (e) {
+        kalshiSettlementDebug = { error: e.message, status: e.status || null, ticker: currentPosition.ticker };
+        console.warn(`[trade-executor] Could not fetch Kalshi settlement for ${currentPosition.ticker}: ${e.message}`);
     }
+
+    // 2. Fallback: gradeResult (only if period key matches position)
+    if (positionWon === undefined && gradeResult) {
+        // CRITICAL: Validate period key matches — gradeResult from wrong period = wrong outcome
+        if (gradeResult.periodKey && currentPosition.periodKey &&
+            gradeResult.periodKey !== currentPosition.periodKey) {
+            console.warn(`[trade-executor] PERIOD MISMATCH: gradeResult is for ${gradeResult.periodKey} but position is from ${currentPosition.periodKey} — skipping gradeResult`);
+        } else if (gradeResult.settlementPrice && gradeResult.strikePrice) {
+            const priceAboveStrike = gradeResult.settlementPrice >= gradeResult.strikePrice;
+            positionWon = (currentPosition.side === 'yes' && priceAboveStrike) ||
+                          (currentPosition.side === 'no' && !priceAboveStrike);
+            settlementSource = 'gradeResult-price';
+        } else if (gradeResult.actualDirection) {
+            positionWon = (currentPosition.side === 'yes' && gradeResult.actualDirection === 'up') ||
+                          (currentPosition.side === 'no' && gradeResult.actualDirection === 'down');
+            settlementSource = 'gradeResult-direction';
+        }
+    }
+
+    // 3. Last resort: position's own strike vs gradeResult settlement price or prediction
+    if (positionWon === undefined) {
+        const posStrike = currentPosition.strike;
+        const settlePrice = gradeResult?.settlementPrice;
+        if (posStrike && settlePrice) {
+            const priceAboveStrike = settlePrice >= posStrike;
+            positionWon = (currentPosition.side === 'yes' && priceAboveStrike) ||
+                          (currentPosition.side === 'no' && !priceAboveStrike);
+            settlementSource = 'position-strike';
+        } else {
+            positionWon = !!predictionCorrect;
+            settlementSource = 'prediction-fallback';
+        }
+    }
+
+    console.log(`[trade-executor] Settlement determined via ${settlementSource}: ${positionWon ? 'WON' : 'LOST'} (side=${currentPosition.side}, predictionCorrect=${predictionCorrect})`);
     if (positionWon !== predictionCorrect) {
         console.warn(`[trade-executor] Position side (${currentPosition.side}) diverged from prediction! ` +
             `Prediction ${predictionCorrect ? 'correct' : 'wrong'} but position ${positionWon ? 'WON' : 'LOST'} ` +
-            `(actual direction: ${gradeResult?.actualDirection})`);
+            `(source: ${settlementSource}, actual direction: ${gradeResult?.actualDirection})`);
     }
 
     // Use totalContracts/totalCostCents to include dip buys, late locks, re-entries
@@ -1619,6 +1921,16 @@ function onPeriodEnd(gradeResult) {
         flipped: currentPosition.flipped || false,
         originalSide: currentPosition.originalSide || null,
         badFlip,
+        settlementSource,
+        kalshiSettlement: kalshiSettlementDebug,
+        gradeResultDebug: gradeResult ? {
+            periodKey: gradeResult.periodKey,
+            correct: gradeResult.correct,
+            actualDirection: gradeResult.actualDirection,
+            settlementPrice: gradeResult.settlementPrice,
+            strikePrice: gradeResult.strikePrice,
+        } : null,
+        positionStrike: currentPosition.strike || null,
     });
 
     setThought('settled', `${positionWon ? 'WON' : 'LOST'}: ${pnl > 0 ? '+' : ''}$${(pnl / 100).toFixed(2)}${badFlip ? ' (BAD FLIP)' : ''}`, { pnlCents: pnl, positionWon, badFlip });
@@ -1654,12 +1966,15 @@ function onPeriodEnd(gradeResult) {
     snapshotBalanceToDB('post_settle').catch(e => {});
 
     currentPosition = null;
+    clearedPosition = null;
     soldThisPeriod = null; // reset for new period
     flippedThisPeriod = false; // reset flip limit for new period
     syncZeroCount = 0;
     // Reset period exposure tracking for new period
     periodTotalCostCents = 0;
     periodCostKey = null;
+    predictionStability = { periodKey: null, lastDirection: null, consecutiveSame: 0, totalCycles: 0 };
+    originalPredictionDirection = { periodKey: null, direction: null };
     // Clean up old period entries (keep last 5 for safety)
     const periodKeys = Object.keys(enteredPeriods);
     if (periodKeys.length > 5) {
@@ -1852,6 +2167,14 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     const priceAboveStrike = currentPrice >= strike;
     const lockSide = priceAboveStrike ? 'yes' : 'no';
 
+    // GUARD: Never late-lock against the prediction direction
+    const predictionIsUp = updatedPrediction.predictedPrice >= strike;
+    const predictionSide = predictionIsUp ? 'yes' : 'no';
+    if (lockSide !== predictionSide) {
+        console.log(`[trade-executor] Late-lock BLOCKED: price suggests ${lockSide.toUpperCase()} but prediction says ${predictionSide.toUpperCase()} — trusting prediction`);
+        return;
+    }
+
     // Calculate the maximum entry price (high, since it's nearly guaranteed)
     // At 2.5σ, prob ≈ 0.994, so price ≈ 99¢ for winning side
     // We cap at 95¢ to ensure at least 5¢ profit per contract
@@ -1879,16 +2202,25 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     // If we already have a position on this side, add to it up to max
     if (currentPosition && currentPosition.periodKey === periodKey) {
         if (currentPosition.side === lockSide) {
+            // SAFETY: Never late_lock_add after a flip — flipped positions have higher
+            // uncertainty and adding to max (150 contracts) amplifies a potentially wrong call.
+            // Data shows flip + late_lock_add is the #1 cause of catastrophic losses.
+            if (currentPosition.flipped || flippedThisPeriod) {
+                console.log(`[trade-executor] Late-lock ADD blocked: position was FLIPPED this period — not adding to flipped position`);
+                return;
+            }
             // Already on the right side — add up to max
             const currentContracts = currentPosition.totalContracts || currentPosition.contracts;
-            const dynamicMax = getMaxContractsForRisk(limitPrice, 0.15); // max 15% of bankroll
-            const cappedMax = Math.min(dynamicMax, config.convictionMaxContracts);
-            const addContracts = cappedMax - currentContracts; // late-lock = high conviction
+            // Cap late-lock adds at maxPositionContracts (50) rather than convictionMaxContracts (150)
+            // to limit exposure when the late-lock thesis could still be wrong; also bound by 15% bankroll risk
+            const dynamicMax = getMaxContractsForRisk(limitPrice, 0.15);
+            const lateLockCap = Math.min(config.maxPositionContracts, dynamicMax);
+            const addContracts = lateLockCap - currentContracts;
             if (addContracts <= 0) return; // already maxed out
             // Respect fill failure cooldowns
             const addCheck = await canTrade(periodKey);
             if (!addCheck.ok) return;
-            return await executeLockEntry(lockSide, addContracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock_add');
+            return await executeLockEntry(lockSide, addContracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock_add', strike);
         } else {
             // On the wrong side?! This shouldn't happen if sell signals work, but don't fight it
             return;
@@ -1901,12 +2233,15 @@ async function onLateLock(updatedPrediction, strike, currentPrice, minutesRemain
     const check = await canTrade(periodKey);
     if (!check.ok) return;
 
-    const dynamicMaxFresh = getMaxContractsForRisk(limitPrice, 0.15); // max 15% of bankroll
-    const contracts = Math.min(dynamicMaxFresh, config.convictionMaxContracts); // late-lock = high conviction, go big
-    await executeLockEntry(lockSide, contracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock');
+    // Cap fresh late-lock at maxPositionContracts (50) instead of conviction max (150).
+    // Data shows huge late-lock entries lead to outsized losses when sigma estimate is wrong.
+    // Also bounded by 15% bankroll risk per entry.
+    const dynamicMaxFresh = getMaxContractsForRisk(limitPrice, 0.15);
+    const contracts = Math.min(dynamicMaxFresh, config.maxPositionContracts);
+    await executeLockEntry(lockSide, contracts, limitPrice, kalshiTicker, periodKey, sigmaDistance, profitPerContract, 'late_lock', strike);
 }
 
-async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, sigmaDistance, profitPerContract, strategy) {
+async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, sigmaDistance, profitPerContract, strategy, strike) {
     const direction = side === 'yes' ? 'UP' : 'DOWN';
     const tradeInfo = {
         ticker,
@@ -1945,6 +2280,7 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
                 entryTime: Date.now(),
                 totalCostCents: costCents,
                 totalContracts: cappedContracts,
+                strike,
             };
             enteredPeriods[periodKey] = { side, ticker, entryTime: Date.now() };
         }
@@ -2010,6 +2346,7 @@ async function executeLockEntry(side, contracts, limitPrice, ticker, periodKey, 
                 periodKey,
                 entryTime: Date.now(),
                 totalCostCents: filledContracts * limitPrice,
+                strike,
                 totalContracts: filledContracts,
             };
             enteredPeriods[periodKey] = { side, ticker, entryTime: Date.now() };
@@ -2110,6 +2447,7 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
             entryTime: Date.now(),
             totalCostCents: costCents,
             totalContracts: cappedContracts,
+            strike,
         };
         tradeInfo.contracts = cappedContracts;
         logTrade('re_entry', tradeInfo);
@@ -2165,6 +2503,7 @@ async function onReentryCheck(updatedPrediction, strike, currentPrice, minutesRe
             entryTime: Date.now(),
             totalCostCents: filledContracts * limitPrice,
             totalContracts: filledContracts,
+            strike,
         };
         logTrade('re_entry', { ...tradeInfo, orderId: order.order_id, filledContracts });
         dailyStats.tradeCount++;
@@ -2233,6 +2572,7 @@ function getPaperBalances() {
 
 function resetState() {
     currentPosition = null;
+    cachedBalance = null;  // Clear cached balance so it's re-fetched for the new environment
     dailyStats.date = new Date().toISOString().slice(0, 10);
     dailyStats.pnlCents = 0;
     dailyStats.tradeCount = 0;
@@ -2247,7 +2587,27 @@ function resetState() {
 
 function clearTradeLog() {
     tradeLog.length = 0;
-    console.log('[trade-executor] Trade log cleared');
+    // Reset all in-memory state so old data doesn't leak back
+    currentPosition = null;
+    clearedPosition = null;
+    soldThisPeriod = null;
+    flippedThisPeriod = false;
+    syncZeroCount = 0;
+    orderInFlight = false;
+    Object.keys(fillFailedPeriods).forEach(k => delete fillFailedPeriods[k]);
+    Object.keys(enteredPeriods).forEach(k => delete enteredPeriods[k]);
+    predictionStability.periodKey = null;
+    predictionStability.lastDirection = null;
+    predictionStability.consecutiveSame = 0;
+    predictionStability.totalCycles = 0;
+    originalPredictionDirection.periodKey = null;
+    originalPredictionDirection.direction = null;
+    dailyStats.pnlCents = 0;
+    dailyStats.tradeCount = 0;
+    dailyStats.wins = 0;
+    dailyStats.losses = 0;
+    dailyStats.date = new Date().toISOString().slice(0, 10);
+    console.log('[trade-executor] Trade log and all in-memory state cleared');
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2279,7 +2639,7 @@ async function refreshBalance() {
         const resp = await trading.getBalance();
         cachedBalance = { balanceCents: resp.balance, portfolioValueCents: resp.portfolio_value, lastFetched: Date.now() };
     } catch (e) {
-        // Silently fail — will retry next cycle
+        console.error(`[trade-executor] refreshBalance failed (${getEnvironment()}): ${e.message}`);
     }
 }
 
@@ -2357,8 +2717,9 @@ async function syncPositionWithKalshi() {
             syncZeroCount++;
             console.log(`[trade-executor] Position sync: Kalshi reports 0 for ${currentPosition.ticker} (zero count: ${syncZeroCount}/3)`);
             if (syncZeroCount >= 3 && positionAge > 120000) {
-                console.log(`[trade-executor] Position sync: confirmed 0 contracts after ${syncZeroCount} checks — clearing position`);
+                console.log(`[trade-executor] Position sync: confirmed 0 contracts after ${syncZeroCount} checks — preserving for settlement, clearing position`);
                 const clearedPeriodKey = currentPosition.periodKey;
+                clearedPosition = { ...currentPosition };
                 currentPosition = null;
                 syncZeroCount = 0;
                 if (clearedPeriodKey) delete enteredPeriods[clearedPeriodKey]; // Allow re-entry
@@ -2370,8 +2731,9 @@ async function syncPositionWithKalshi() {
         if (e.status === 404 && positionAge > 180000) {
             syncZeroCount++;
             if (syncZeroCount >= 3) {
-                console.log(`[trade-executor] Position sync: 404 for ${currentPosition?.ticker} after ${syncZeroCount} checks — clearing position`);
+                console.log(`[trade-executor] Position sync: 404 for ${currentPosition?.ticker} after ${syncZeroCount} checks — preserving for settlement, clearing position`);
                 const clearedPeriodKey = currentPosition?.periodKey;
+                clearedPosition = currentPosition ? { ...currentPosition } : null;
                 currentPosition = null;
                 syncZeroCount = 0;
                 if (clearedPeriodKey) delete enteredPeriods[clearedPeriodKey]; // Allow re-entry
@@ -2385,7 +2747,7 @@ async function syncPositionWithKalshi() {
 function getStatus() {
     checkDayRollover().catch(e => console.error('[db] Day rollover error:', e.message));
     // Validate position is still for current period (prevents phantom positions)
-    validateCurrentPosition();
+    validateCurrentPosition().catch(e => console.error('[trade-executor] Position validation error:', e.message));
     // Trigger async balance refresh + position sync + balance snapshot (non-blocking)
     if (!config.paperMode) {
         refreshBalance();
@@ -2618,7 +2980,7 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
             currentPosition = {
                 ticker: kalshiTicker, side, contracts: cappedContracts, entryPrice: limitPrice,
                 orderId: 'force-paper-' + Date.now(), periodKey, entryTime: Date.now(),
-                totalCostCents: costCents, totalContracts: cappedContracts,
+                totalCostCents: costCents, totalContracts: cappedContracts, strike,
             };
         }
         enteredPeriods[periodKey] = enteredPeriods[periodKey] || { side, ticker: kalshiTicker, entryTime: Date.now() };
@@ -2707,7 +3069,7 @@ async function forceBet(prediction, kalshiTicker, strike, periodKey, overrideCon
                 currentPosition = {
                     ticker: kalshiTicker, side, contracts: filledContracts, entryPrice: limitPrice,
                     orderId: order.order_id, periodKey, entryTime: Date.now(),
-                    totalCostCents: filledContracts * limitPrice, totalContracts: filledContracts,
+                    totalCostCents: filledContracts * limitPrice, totalContracts: filledContracts, strike,
                 };
             }
             enteredPeriods[periodKey] = enteredPeriods[periodKey] || { side, ticker: kalshiTicker, entryTime: Date.now() };

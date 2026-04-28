@@ -40,6 +40,17 @@ const stabilityState = {
     flipCount: 0,
 };
 
+// ── Flip persistence tracking for sell signals ──
+// Track how long the model has been in a "flipped" state relative to the original bet.
+// A temporary price spike shouldn't trigger a flip — require sustained reversal.
+const flipPersistence = {
+    periodKey: null,
+    consecutiveFlippedCycles: 0,  // how many cycles the model has been flipped
+    consecutiveWrongSideCycles: 0, // how many cycles price has been on wrong side
+    lastModelFlipped: false,
+    lastOnWrongSide: false,
+};
+
 // ── Online ML feature cache (for attaching to graded records) ──
 let _lastMLFeatures = null;
 let _lastSignalPredictions = null;
@@ -2120,9 +2131,9 @@ function predictPrice(marketData, minutesAhead, strike) {
     const sigRaw = 1 / (1 + Math.exp(-sigK * (timeProgress - sigMid)));
     const sigMin = 1 / (1 + Math.exp(sigK * sigMid));
     const sigMax = 1 / (1 + Math.exp(-sigK * sigMid));
-    // Reduced positional weight so signals have more influence on final probability
-    // Was 0.75-0.98 — now 0.55-0.80. This lets momentum/flow signals create tradeable edges.
-    const positionalWeight = 0.55 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.25;
+    // Reduced positional weight so signals drive the prediction, not just price vs strike.
+    // Was 0.55-0.80 — now 0.40-0.60. Signals get 40-60% influence on final probability.
+    const positionalWeight = 0.40 + ((sigRaw - sigMin) / (sigMax - sigMin)) * 0.20;
 
     const vwapResult = computeAnchoredVWAP(history);
     const vwapSignal = Math.max(-0.5, Math.min(0.5, vwapResult.deviation * 1000));
@@ -2230,13 +2241,12 @@ function predictPrice(marketData, minutesAhead, strike) {
         contrarianComposite   * 0.05     // contrarian/positioning
     );
 
-    // Shrinkage + cap: max 0.4 total z-shift (was 1.2 — a 1.2 z-shift moves
-    // probability by ~35 points, which no combination of noisy 15-min signals justifies)
-    const shrinkageFactor = 0.55 * (choppiness.choppy ? 0.80 : 1.0);
-    const totalZShift = Math.max(-0.4, Math.min(0.4, rawTotalZShift * shrinkageFactor));
+    // Shrinkage + cap: max 0.7 total z-shift — let strong signal agreement move the prediction
+    const shrinkageFactor = 0.80 * (choppiness.choppy ? 0.85 : 1.0);
+    const totalZShift = Math.max(-0.7, Math.min(0.7, rawTotalZShift * shrinkageFactor));
 
     // Final probability
-    const driftAdjustedProb = fatTailCDF(zScore + totalZShift * (1 - positionalWeight) * 0.8, prices);
+    const driftAdjustedProb = fatTailCDF(zScore + totalZShift, prices);
     function toLogOdds(p) { return Math.log(Math.max(p, 0.001) / Math.max(1 - p, 0.001)); }
     function fromLogOdds(lo) { return 1 / (1 + Math.exp(-lo)); }
     const posLO = toLogOdds(positionalProb) * positionalWeight;
@@ -2250,14 +2260,8 @@ function predictPrice(marketData, minutesAhead, strike) {
     const bayesResult = bayesianAdjust(clampedProb, volRegime.regime, getBayesTrendLabel(trendRegime));
     let finalProb = bayesResult.adjustedProb;
 
-    // Gamma-aware confidence dampening near strike — reduced impact
-    const isNearStrike = Math.abs(zScore) < 0.5; // was 0.8 — only dampen very close to strike
-    if (isNearStrike && minutesAhead < 5) { // was 8 — only in late period
-        const proximityFactor = 1 - Math.abs(zScore) / 0.5;
-        const timeFactor = (5 - minutesAhead) / 5;
-        const gammaRisk = 1 + proximityFactor * timeFactor * 0.12; // was 0.25
-        finalProb = 0.5 + (finalProb - 0.5) / gammaRisk;
-    }
+    // Gamma dampening removed — it was pulling predictions toward 50/50 near strike
+    // exactly when the model should be most decisive about direction.
 
     // Apply self-learned corrections from error analysis
     const learned = getLearnedCorrections();
@@ -2270,11 +2274,12 @@ function predictPrice(marketData, minutesAhead, strike) {
         finalProb += learned.directionBias;
         finalProb = Math.max(0.05, Math.min(0.95, finalProb));
     }
-    // Vol regime correction from learned patterns
+    // Vol regime correction — attenuated so it doesn't crush edges
     if (learned.volRegimeMultiplier[volRegime.regime] && learned.volRegimeMultiplier[volRegime.regime] !== 1.0) {
-        // Widen/narrow probability based on learned vol correction
         const volCorr = learned.volRegimeMultiplier[volRegime.regime];
-        finalProb = 0.5 + (finalProb - 0.5) / volCorr;
+        // Apply only 50% of the correction to preserve signal strength
+        const attenuatedCorr = 1 + (volCorr - 1) * 0.5;
+        finalProb = 0.5 + (finalProb - 0.5) / attenuatedCorr;
     }
 
     // ── Online ML Enhancement ──
@@ -2311,30 +2316,52 @@ function predictPrice(marketData, minutesAhead, strike) {
         }
     }
 
-    // ── Temperature scaling for overconfidence correction ──
-    // Research: BTC 15-min predictions are systematically overconfident.
-    // Temperature T > 1 softens probabilities toward 0.5.
-    // T = 1.3 is the recommended default for unverified models.
-    // The self-learned overconfidenceRatio above partially handles this,
-    // but temperature scaling in logit space is more principled.
-    const TEMPERATURE = 1.12; // model is provably overconfident (was 1.02 — cosmetically mild)
-    if (finalProb > 0.01 && finalProb < 0.99) {
-        const logit = Math.log(finalProb / (1 - finalProb));
-        const scaledLogit = logit / TEMPERATURE;
-        finalProb = 1 / (1 + Math.exp(-scaledLogit));
-    }
+    // Temperature scaling removed — the self-learned overconfidenceRatio already handles
+    // calibration, and stacking another dampener on top crushed real edges.
 
-    // ── Hard probability bounds — widened to allow stronger convictions ──
-    finalProb = Math.max(0.08, Math.min(0.92, finalProb));
+    // Hard probability bounds — allow strong convictions when signals agree
+    finalProb = Math.max(0.05, Math.min(0.95, finalProb));
 
     // Construct output
     const predictUp = finalProb > 0.5;
     const confidenceDistance = Math.abs(finalProb - 0.5) * 2;
-    // Anchor to current price (martingale property) with small drift
+
+    // ── End-of-period price forecast ──
+    // Goal: predict where BTC will actually be at settlement, not just current + tiny drift.
+    // Uses momentum extrapolation scaled by remaining time and conviction.
     const priceScale = learned.priceErrorScale || 1.0;
-    const maxDrift = adjustedRemainingVol * settlementVolAdj * current * 0.15 * priceScale;
-    const drift = maxDrift * confidenceDistance;
-    const predictedPrice = predictUp ? current + Math.max(drift, 0.01) : current - Math.max(drift, 0.01);
+
+    // Component 1: Momentum extrapolation — project recent price trend forward
+    // rawDrift is a blended momentum (% move), scale by minutes remaining
+    const momentumProjection = adjustedDrift * minutesAhead * current * priceScale;
+
+    // Component 2: Volatility-based expected move in predicted direction
+    // When model is highly confident, expect price to move proportionally to vol
+    const expectedVolMove = adjustedRemainingVol * settlementVolAdj * current;
+    const directionSign = predictUp ? 1 : -1;
+    const volProjection = directionSign * expectedVolMove * confidenceDistance;
+
+    // Blend: momentum dominates early (trend extrapolation), vol-based dominates late
+    // (when near settlement, vol compression means less expected movement)
+    const momentumWeight = Math.min(0.7, minutesAhead / 15);
+    const volWeight = 1 - momentumWeight;
+    const totalDrift = momentumProjection * momentumWeight + volProjection * volWeight;
+
+    // Apply a floor so there's always a visible difference from current price
+    const minDrift = current * 0.0001; // at least $6-7 on BTC ~$69k
+    const finalDrift = Math.sign(totalDrift || directionSign) * Math.max(Math.abs(totalDrift), minDrift);
+
+    // ── Mathematical high/low bounds (2σ confidence interval) ──
+    // Represents the range of mathematically possible prices by settlement.
+    // Uses adjusted remaining vol × settlement compression.
+    // Wide early in the period, converges to current price as time runs out.
+    const boundsVol = adjustedRemainingVol * settlementVolAdj;
+    const boundsSigma = 2.0; // 95% confidence interval
+    const predictedHigh = current * Math.exp(boundsSigma * boundsVol);
+    const predictedLow = current * Math.exp(-boundsSigma * boundsVol);
+
+    // Clamp predicted price within mathematical bounds — prediction cannot exceed 2σ range
+    const predictedPrice = Math.max(predictedLow, Math.min(predictedHigh, current + finalDrift));
     const changePercent = ((predictedPrice - current) / current) * 100;
     const sigmoidInput = (confidenceDistance - 0.35) * 8;
     const sigmoidVal = 1 / (1 + Math.exp(-sigmoidInput));
@@ -2346,7 +2373,7 @@ function predictPrice(marketData, minutesAhead, strike) {
     const volLabel = volRegime.regime === 'volatile' ? 'High' : volRegime.regime === 'quiet' ? 'Low' : 'Medium';
 
     return {
-        predictedPrice, changePercent, confidence, probability: finalProb,
+        predictedPrice, predictedHigh, predictedLow, changePercent, confidence, probability: finalProb,
         _remainingVol: remainingVol, ensembleConfidence: ensConf,
         signals: { momentum: momentumLabel, volatility: volLabel, trend: trendLabel, rsi: rsiLabel },
         _regimeInfo: { volRegime: volRegime.regime, trendRegime: getBayesTrendLabel(trendRegime) },
@@ -2482,31 +2509,57 @@ function assessSellSignal(origPred, updPred, strike, currentPrice, minutesRemain
     const noTimeLeft = minutesRemaining < 1.0;
     const almostNoTime = minutesRemaining < 2.0;
 
+    // ── FLIP PERSISTENCE TRACKING ──
+    // Track how long the model has been in a flipped state and price on wrong side.
+    // A temporary spike crossing the strike shouldn't trigger a flip — require SUSTAINED reversal.
+    if (flipPersistence.periodKey !== periodKey) {
+        flipPersistence.periodKey = periodKey;
+        flipPersistence.consecutiveFlippedCycles = 0;
+        flipPersistence.consecutiveWrongSideCycles = 0;
+        flipPersistence.lastModelFlipped = false;
+        flipPersistence.lastOnWrongSide = false;
+    }
+    if (modelFlipped) {
+        flipPersistence.consecutiveFlippedCycles++;
+    } else {
+        flipPersistence.consecutiveFlippedCycles = 0;
+    }
+    if (onWrongSide) {
+        flipPersistence.consecutiveWrongSideCycles++;
+    } else {
+        flipPersistence.consecutiveWrongSideCycles = 0;
+    }
+    flipPersistence.lastModelFlipped = modelFlipped;
+    flipPersistence.lastOnWrongSide = onWrongSide;
+
     // ── CASE 0: CONFIDENT FLIP — model strongly disagrees with position ──
-    // When the updated prediction has HIGH confidence the other way AND price confirms it,
-    // sell and flip to the winning side. This is different from normal "wrong side" holds
-    // because the model is highly confident (not just briefly on wrong side).
-    // Requirements (all must be true):
-    //   1. On wrong side of strike (price confirms the model)
-    //   2. Model flipped direction OR updated probability strongly favors the other side
-    //   3. High confidence (>=80%) — not just a marginal signal
-    //   4. Enough time to profit from the flip (>=4 min remaining)
-    //   5. Sigma distance >= 0.8 — not just a tiny blip across strike
+    // TIGHTENED FURTHER: Data shows flips are wrong ~50% of the time, and when wrong
+    // they cause the biggest losses (-$136 in worst case).
+    // Key insight: temporary price spikes across strike look like flips but aren't.
+    // The prediction often recovers to the original direction within 2-3 cycles.
+    // NEW: Require model to be flipped for 3+ consecutive cycles (~30s sustained reversal).
+    // This filters out temporary spikes while still catching real reversals.
     const updProbForOtherSide = betIsUp ? (1 - updPred.probability) : updPred.probability;
     const confidenceForFlip = updPred.confidence || 0;
+    const flipSustained = flipPersistence.consecutiveFlippedCycles >= 3
+        && flipPersistence.consecutiveWrongSideCycles >= 3;
     const shouldFlip = onWrongSide
-        && (modelFlipped || updProbForOtherSide >= 0.70)
-        && confidenceForFlip >= 0.80
-        && minutesRemaining >= 4
-        && sigmaDistance >= 0.8;
+        && modelFlipped                           // model must actually flip (not just probability drift)
+        && flipSustained                           // NEW: flip must be sustained for 3+ cycles
+        && updProbForOtherSide >= 0.75             // raised from 0.70
+        && confidenceForFlip >= 0.90               // raised from 0.80 — most bad flips were 80-87%
+        && minutesRemaining >= 5                   // raised from 4 — need more time to recover sell loss
+        && sigmaDistance >= 1.5                    // raised from 1.2 — require very clear separation
+        && opposing >= 2;                          // signals must agree with flip
 
     if (shouldFlip) {
         level = 'confident_flip'; shortLabel = 'FLIP';
         urgency = 85;
         advice = 'Model strongly predicts ' + updDirection + ' (' + (confidenceForFlip * 100).toFixed(0) +
             '% confidence) while holding ' + origDirection + '. Price is ' + sigmaDistance.toFixed(1) +
-            'σ on wrong side with ' + minutesRemaining.toFixed(1) + ' min left — selling to flip.';
-        reasons.push('High confidence flip: ' + (confidenceForFlip * 100).toFixed(0) + '% conf ' + updDirection);
+            'σ on wrong side for ' + flipPersistence.consecutiveWrongSideCycles + ' consecutive cycles with ' +
+            minutesRemaining.toFixed(1) + ' min left — sustained reversal confirmed, selling to flip.';
+        reasons.push('Sustained flip: ' + (confidenceForFlip * 100).toFixed(0) + '% conf ' + updDirection + ' for ' + flipPersistence.consecutiveFlippedCycles + ' cycles');
         reasons.push(sigmaDistance.toFixed(1) + 'σ on wrong side');
     }
 
@@ -2730,12 +2783,11 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
         return raw;
     }
 
-    // Adaptive EMA alpha — more responsive so edges can develop
-    // Was 0.15-0.40; increased to allow faster probability movement
-    const alpha = minutesAhead <= 1 ? 0.60
-                : minutesAhead <= 2 ? 0.50
-                : minutesAhead <= 5 ? 0.40
-                : 0.30;
+    // Adaptive EMA alpha — responsive to new data at all time horizons
+    const alpha = minutesAhead <= 1 ? 0.80
+                : minutesAhead <= 2 ? 0.70
+                : minutesAhead <= 5 ? 0.60
+                : 0.50;
     stabilityState.smoothedProbability = alpha * raw.probability + (1 - alpha) * stabilityState.smoothedProbability;
     const smoothedP = stabilityState.smoothedProbability;
 
@@ -2764,21 +2816,17 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
     const distanceInVols = Math.abs(priceVsStrike) / remainingVol;
 
     // Flip criteria: price is on the wrong side AND the distance is significant
-    // relative to remaining volatility. Harder to flip early, easier near settlement.
-    // - With 10+ min left: need ~3 vols of distance (very unlikely to revert)
-    // - With 5 min left: need ~2 vols
-    // - With 2 min left: need ~1.5 vols
-    // - With <1 min left: need ~0.8 vols (price is almost certainly settling here)
-    const flipThreshold = minutesAhead <= 1 ? 0.8
-                        : minutesAhead <= 2 ? 1.5
-                        : minutesAhead <= 5 ? 2.0
-                        : 3.0;
+    // relative to remaining volatility. Lowered thresholds to be more responsive.
+    const flipThreshold = minutesAhead <= 1 ? 0.5
+                        : minutesAhead <= 2 ? 0.8
+                        : minutesAhead <= 5 ? 1.2
+                        : 1.8;
 
     // Also require the raw prediction model to agree (not just price position)
     const rawModelAgrees = rawIsUp === currentIsUp;
 
-    // Limit total flips per period to prevent flip-flopping
-    const maxFlips = 2;
+    // Allow up to 3 flips per period — market can genuinely reverse multiple times
+    const maxFlips = 3;
     const canFlip = (stabilityState.flipCount || 0) < maxFlips;
 
     let didFlip = false;
@@ -2792,17 +2840,42 @@ function handleSamePeriod(marketData, minutesAhead, strike, periodKey) {
         // Reset smoothed probability toward the new direction
         stabilityState.smoothedProbability = raw.probability;
         didFlip = true;
+
+        // Track the flipped direction separately — do NOT overwrite predictedDirection.
+        // predictedDirection must stay as the ORIGINAL prediction for accurate grading.
+        // The flipped direction is used by the trading engine via lockedDirection.
+        store.updatePredictionLog(log => {
+            for (let i = log.length - 1; i >= 0; i--) {
+                if (log[i].periodKey === periodKey) {
+                    log[i].currentDirection = rawDir;       // current (flipped) direction
+                    log[i]._directionUpdated = true;
+                    log[i]._flipCount = (log[i]._flipCount || 0) + 1;
+                    break;
+                }
+            }
+        });
+        store.updateBayesianState(bs => {
+            for (let i = bs.records.length - 1; i >= 0; i--) {
+                if (bs.records[i].periodKey === periodKey) {
+                    bs.records[i].currentDirection = rawDir; // current (flipped) direction
+                    break;
+                }
+            }
+        });
     }
 
     // If direction still conflicts with raw (no flip happened), adjust predicted price
     const finalLockedIsUp = stabilityState.lockedDirection === 'up';
     if (finalLockedIsUp !== rawIsUp && !didFlip) {
         const confDist = Math.abs(smoothedP - 0.5) * 2;
-        const offset = remainingVol * strike * confDist * 0.5;
-        raw.predictedPrice = finalLockedIsUp
-            ? strike + Math.max(offset, 0.01)
-            : strike - Math.max(offset, 0.01);
-        raw.changePercent = ((raw.predictedPrice - strike) / strike) * 100;
+        // Use remaining vol to project a meaningful end-of-period price on the locked side of strike
+        const expectedMove = remainingVol * strike * confDist;
+        const minOffset = strike * 0.0001; // visible minimum offset
+        const offset = Math.max(expectedMove, minOffset);
+        const unclamped = finalLockedIsUp ? strike + offset : strike - offset;
+        // Clamp within mathematical bounds
+        raw.predictedPrice = Math.max(raw.predictedLow, Math.min(raw.predictedHigh, unclamped));
+        raw.changePercent = ((raw.predictedPrice - current) / current) * 100;
     }
 
     // Save true raw probability before overwriting with smoothed

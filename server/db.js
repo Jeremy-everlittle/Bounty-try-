@@ -730,7 +730,7 @@ async function savePredictionSnapshot(snap) {
             // Signals & regime
             snap.signals ? JSON.stringify(snap.signals) : null,
             snap.regimeInfo ? JSON.stringify(snap.regimeInfo) : null,
-            typeof snap.ensembleConfidence === 'object' ? snap.ensembleConfidence?.stddev || null : snap.ensembleConfidence || null,
+            typeof snap.ensembleConfidence === 'object' ? (snap.ensembleConfidence?.stddev ?? null) : (snap.ensembleConfidence || null),
             snap.exhaustionScore || null,
             snap.exhaustionType || null,
             snap.choppinessAdx || null,
@@ -1252,6 +1252,7 @@ async function savePredictionLogEntry(entry) {
                 predicted_direction, actual_price, actual_direction, correct, confidence, probability, data)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT(period_key) DO UPDATE SET
+                predicted_direction = COALESCE($6, prediction_log.predicted_direction),
                 actual_price = COALESCE($7, prediction_log.actual_price),
                 actual_direction = COALESCE($8, prediction_log.actual_direction),
                 correct = COALESCE($9, prediction_log.correct),
@@ -1314,6 +1315,27 @@ async function clearPredictionLog() {
         await pool.query('DELETE FROM prediction_log');
     } catch (e) {
         console.error('[db] Failed to clear prediction log:', e.message);
+    }
+}
+
+async function purgeAllData() {
+    if (!ready) return;
+    try {
+        await pool.query('DELETE FROM trades');
+        await pool.query('DELETE FROM daily_stats');
+        await pool.query('DELETE FROM positions');
+        await pool.query('DELETE FROM prediction_snapshots');
+        await pool.query('DELETE FROM decision_log');
+        await pool.query('DELETE FROM price_snapshots');
+        await pool.query('DELETE FROM orderbook_snapshots');
+        await pool.query('DELETE FROM market_data_snapshots');
+        await pool.query('DELETE FROM account_balances');
+        await pool.query('DELETE FROM prediction_log');
+        await pool.query('DELETE FROM store_state');
+        await pool.query('DELETE FROM cycle_data');
+        console.log('[db] All data purged');
+    } catch (e) {
+        console.error('[db] purgeAllData error:', e.message);
     }
 }
 
@@ -1486,6 +1508,7 @@ module.exports = {
     savePredictionLogEntry,
     loadPredictionLog,
     clearPredictionLog,
+    purgeAllData,
     // Store state persistence
     saveStoreState,
     loadStoreState,
