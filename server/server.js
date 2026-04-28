@@ -12,7 +12,6 @@ const decisionLog = require('./decision-logger');
 const tradeExecutor = require('./trade-executor');
 const kalshiAuth = require('./kalshi-auth');
 const db = require('./db');
-const crumbSniper = require('./crumb-sniper');
 
 // Build version — updated each commit (Railway has no .git dir)
 const BUILD_VERSION = {
@@ -1297,7 +1296,6 @@ async function fetchAllData() {
             kalshiEnvironment: kalshiAuth.getEnvironment(),
             kalshiOrderBook: state.kalshiOrderBook || null,
             kalshiOrderBookError: state.kalshiOrderBookError || null,
-            crumbSniperStatus: crumbSniper.getStatus(),
         });
 
         console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | Env=${kalshiAuth.getEnvironment()} | ${wss.clients.size} clients`);
@@ -1933,11 +1931,6 @@ app.use(express.json());
 app.post('/api/trading/kill-switch', (req, res) => {
     const active = req.body?.active !== false; // default to activating
     tradeExecutor.setKillSwitch(active);
-    // Stop crumb sniper when auto-bettor is killed
-    if (active && crumbSniper.getStatus().isRunning) {
-        crumbSniper.stop();
-        console.log('[crumb-sniper] Auto-stopped: auto-bettor kill switch activated');
-    }
     res.json({ killSwitch: active, message: active ? 'Kill switch ACTIVATED — all trading halted' : 'Kill switch deactivated' });
 });
 
@@ -2118,32 +2111,6 @@ app.post('/api/trading/paper-balance', (req, res) => {
         newBalance = tradeExecutor.addPaperBalance(env, cents);
     }
     res.json({ environment: env, balanceCents: newBalance, balanceDollars: (newBalance / 100).toFixed(2) });
-});
-
-// ── Crumb Sniper endpoints ──
-app.get('/api/crumb-sniper/status', (req, res) => {
-    res.json(crumbSniper.getStatus());
-});
-
-app.post('/api/crumb-sniper/start', (req, res) => {
-    // Crumb sniper inherits paperMode from the auto-bettor (trade executor)
-    // and can only start when the auto-bettor is running (kill switch off)
-    const ts = tradeExecutor.getStatus();
-    if (ts.killSwitch) {
-        return res.json({ ok: false, error: 'Auto-bettor is off. Start the auto-bettor first.' });
-    }
-    crumbSniper.start({ paperMode: ts.paperMode });
-    res.json({ ok: true, status: 'started', paperMode: ts.paperMode });
-});
-
-app.post('/api/crumb-sniper/stop', (req, res) => {
-    crumbSniper.stop();
-    res.json({ ok: true, status: 'stopped' });
-});
-
-app.post('/api/crumb-sniper/config', (req, res) => {
-    if (req.body) crumbSniper.updateConfig(req.body);
-    res.json({ ok: true, config: crumbSniper.CONFIG });
 });
 
 // ═══════════════════════════════════════════════════════════════
