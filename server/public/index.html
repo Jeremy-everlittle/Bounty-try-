@@ -877,7 +877,7 @@
             </div>
             <div class="trading-stats">
                 <div class="trading-stat">
-                    <div class="trading-stat-label">Balance</div>
+                    <div class="trading-stat-label" id="trading-balance-label">Balance</div>
                     <div class="trading-stat-value" id="trading-balance">--</div>
                 </div>
                 <div class="trading-stat">
@@ -2382,6 +2382,23 @@
                     body: JSON.stringify({ paperMode: newPaperMode })
                 });
             } catch (e) { console.error('Toggle mode failed:', e); }
+        }
+
+        async function adjustPaperBalance(action) {
+            const input = document.getElementById('paper-balance-input');
+            const amount = parseFloat(input && input.value);
+            if (!amount || amount <= 0) { showToast('Enter a valid amount', 'error'); return; }
+            try {
+                const resp = await fetch('/api/trading/paper-balance', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action, amount })
+                });
+                const result = await resp.json();
+                if (!resp.ok) { showToast(friendlyError(result.error), 'error'); return; }
+                input.value = '';
+                showToast(`Paper balance ${action === 'set' ? 'set to' : 'increased by'} $${amount.toFixed(2)} → $${result.balanceDollars}`, 'success');
+            } catch (e) { console.error('Paper balance update failed:', e); }
         }
 
         async function switchEnvironment(env) {
