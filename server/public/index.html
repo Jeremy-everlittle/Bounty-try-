@@ -2037,6 +2037,12 @@
                 badge.className = 'trading-mode-badge trading-mode-off';
             }
 
+            // Paper-balance Add/Set controls — only visible in paper mode
+            const paperControls = document.getElementById('paper-balance-controls');
+            if (paperControls) {
+                paperControls.style.display = ts.paperMode ? '' : 'none';
+            }
+
             // Balance
             const balEl = document.getElementById('trading-balance');
             if (ts.balanceCents !== null && ts.balanceCents !== undefined) {
