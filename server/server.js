@@ -1482,12 +1482,96 @@ app.get('/api/history/combined', (req, res) => {
     res.json({ periods });
 });
 
+// ── Model Health: consolidated model diagnostics ──
+app.get('/api/model-health', (req, res) => {
+    const engineModule = require('./prediction-engine');
+    const errorSummary = engineModule.getErrorSummary();
+    const sessionRiskData = engineModule.sessionRisk;
+    const riskMult = engineModule.getSessionRiskMultiplier();
+
+    res.json({
+        accuracy: errorSummary.directionAccuracy,
+        totalPredictions: errorSummary.totalAnalyzed,
+        overconfidenceRate: errorSummary.overconfidenceRate,
+        sessionRisk: {
+            consecutiveLosses: sessionRiskData.consecutiveLosses,
+            consecutiveWins: sessionRiskData.consecutiveWins,
+            coolingOff: sessionRiskData.coolingOff,
+            drawdown: sessionRiskData.currentDrawdown,
+            riskMultiplier: riskMult,
+            edgeDecay: sessionRiskData.edgeDecayAlert,
+        },
+        corrections: errorSummary.corrections,
+        patterns: errorSummary.patterns,
+    });
+});
+
 app.get('/api/error-analysis', (req, res) => {
     res.json(engine.getErrorSummary());
 });
 
 app.get('/api/learned-corrections', (req, res) => {
     res.json(engine.getLearnedCorrections());
+});
+
+// ── Hourly Performance: DB win rates + live hour filter status ──
+app.get('/api/hourly-performance', async (req, res) => {
+    try {
+        // DB-based historical win rates by hour
+        const dbHourly = await db.getWinRateByHour();
+
+        // Live hour filter from trade executor
+        const tradingStatus = tradeExecutor.getStatus();
+        const hourFilter = tradingStatus.hourFilter || {};
+
+        // In-memory hourly tracking from prediction log
+        const predictionLog = store.getPredictionLog();
+        const inMemoryByHour = {};
+        for (const entry of predictionLog) {
+            if (entry.correct === undefined || entry.correct === null) continue;
+            const ts = entry.timestamp ? new Date(entry.timestamp) : null;
+            if (!ts) continue;
+            const hour = ts.getHours();
+            if (!inMemoryByHour[hour]) inMemoryByHour[hour] = { total: 0, wins: 0 };
+            inMemoryByHour[hour].total++;
+            if (entry.correct) inMemoryByHour[hour].wins++;
+        }
+
+        // Merge all sources into a unified 0-23 hour map
+        const hours = {};
+        for (let h = 0; h < 24; h++) {
+            const dbRow = dbHourly.find(r => parseInt(r.hour) === h);
+            const memRow = inMemoryByHour[h];
+            const filterInfo = hourFilter.allHours ? hourFilter.allHours[h] : null;
+
+            const dbTotal = dbRow ? parseInt(dbRow.total) : 0;
+            const dbWins = dbRow ? parseInt(dbRow.wins) : 0;
+            const memTotal = memRow ? memRow.total : 0;
+            const memWins = memRow ? memRow.wins : 0;
+
+            hours[h] = {
+                dbTotal,
+                dbWins,
+                dbWinRate: dbTotal > 0 ? (dbWins / dbTotal * 100).toFixed(1) + '%' : 'N/A',
+                sessionTotal: memTotal,
+                sessionWins: memWins,
+                sessionWinRate: memTotal > 0 ? (memWins / memTotal * 100).toFixed(1) + '%' : 'N/A',
+                filterAllowed: filterInfo ? filterInfo.allowed : true,
+                filterBoost: filterInfo ? filterInfo.boost : false,
+                filterMinConviction: filterInfo ? filterInfo.minConviction : null,
+            };
+        }
+
+        res.json({
+            currentHour: hourFilter.currentHour,
+            currentHourAllowed: hourFilter.allowed,
+            currentHourBoost: hourFilter.boost,
+            hours,
+        });
+    } catch (e) {
+        console.error('[api] Hourly performance error:', e.message);
+        res.status(500).json({ error: 'Failed to load hourly performance' });
+    }
 });
 
 // ── Debug: raw Kalshi market data (dumps EVERYTHING) ──
