@@ -34,9 +34,19 @@ let currentPosition = null;     // { ticker, side, action, contracts, entryPrice
 let soldThisPeriod = false;
 let lastPeriodKey = null;
 let recentTrades = [];          // most-recent first, capped at 200
-let dailyStats = { date: null, trades: 0, wins: 0, losses: 0, pnlCents: 0 };
-let thought = '';               // human-readable status string
+let dailyStats = { date: null, tradeCount: 0, wins: 0, losses: 0, pnlCents: 0 };
+let thought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
 const tradeListeners = [];
+
+// Live-balance cache: avoid hammering Kalshi on every getStatus() call
+const liveBalanceCache = { demo: null, production: null };
+const liveBalanceFetchedAt = { demo: 0, production: 0 };
+const LIVE_BALANCE_TTL_MS = 15_000;
+let liveBalanceInflight = { demo: null, production: null };
+
+function setThought(status, message, detail) {
+    thought = { status, message, timestamp: Date.now(), detail: detail || null };
+}
 
 // Paper balances in CENTS — demo + production tracked separately
 const paperBalances = { demo: 250000, production: 250000 };
@@ -51,14 +61,14 @@ function todayKey() { return new Date().toISOString().slice(0, 10); }
 function ensureDailyStats() {
     const today = todayKey();
     if (dailyStats.date !== today) {
-        dailyStats = { date: today, trades: 0, wins: 0, losses: 0, pnlCents: 0 };
+        dailyStats = { date: today, tradeCount: 0, wins: 0, losses: 0, pnlCents: 0 };
     }
 }
 
 function dailyStopHit() {
     ensureDailyStats();
     if (config.maxDailyLossCents && dailyStats.pnlCents <= -Math.abs(config.maxDailyLossCents)) return 'daily loss limit';
-    if (config.maxDailyTrades && dailyStats.trades >= config.maxDailyTrades) return 'daily trade cap';
+    if (config.maxDailyTrades && dailyStats.tradeCount >= config.maxDailyTrades) return 'daily trade cap';
     return null;
 }
 
@@ -77,7 +87,7 @@ function onTradeNotify(cb) { tradeListeners.push(cb); }
 
 function clearTradeLog() {
     recentTrades = [];
-    dailyStats = { date: todayKey(), trades: 0, wins: 0, losses: 0, pnlCents: 0 };
+    dailyStats = { date: todayKey(), tradeCount: 0, wins: 0, losses: 0, pnlCents: 0 };
 }
 
 // ── Order helpers ─────────────────────────────────────────────────
@@ -87,7 +97,7 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
 
     if (config.paperMode) {
         if (paperBal() < costCents) {
-            thought = `Paper balance ${paperBal()}c < cost ${costCents}c — abort`;
+            setThought('error', `Paper balance ${paperBal()}c < cost ${costCents}c — abort`);
             return { ok: false, reason: 'insufficient paper balance' };
         }
         setPaperBal(paperBal() - costCents);
@@ -96,9 +106,9 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
             ticker, side, action: 'buy', contracts, entryPrice: limitPrice, orderId, periodKey, strike,
             totalCostCents: costCents, totalContracts: contracts, entryTime: Date.now(),
         };
-        thought = `PAPER BUY ${contracts}x ${side} @ ${limitPrice}c on ${ticker}`;
+        setThought('entry', `PAPER BUY ${contracts}x ${side} @ ${limitPrice}c on ${ticker}`, { side, contracts, edge: betQuality?.edge, quality: betQuality?.quality, probability: betQuality?.factors?.probability });
         ensureDailyStats();
-        dailyStats.trades += 1;
+        dailyStats.tradeCount += 1;
         pushTrade({
             type: 'entry', action: 'buy', side, direction: side, contracts, limitPrice,
             ticker, periodKey, strike, edge: edge != null ? (edge * 100).toFixed(1) + '%' : null,
@@ -118,9 +128,9 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
             ticker, side, action: 'buy', contracts, entryPrice: limitPrice, orderId, periodKey, strike,
             totalCostCents: costCents, totalContracts: contracts, entryTime: Date.now(),
         };
-        thought = `LIVE BUY ${contracts}x ${side} @ ${limitPrice}c on ${ticker} → order ${orderId}`;
+        setThought('entry', `LIVE BUY ${contracts}x ${side} @ ${limitPrice}c on ${ticker} → order ${orderId}`, { side, contracts, edge: betQuality?.edge, quality: betQuality?.quality, probability: betQuality?.factors?.probability });
         ensureDailyStats();
-        dailyStats.trades += 1;
+        dailyStats.tradeCount += 1;
         pushTrade({
             type: 'entry', action: 'buy', side, direction: side, contracts, limitPrice,
             ticker, periodKey, strike, orderId,
@@ -130,7 +140,7 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
         });
         return { ok: true, orderId, position: currentPosition };
     } catch (e) {
-        thought = `LIVE BUY FAILED: ${e.message}`;
+        setThought('error', `LIVE BUY FAILED: ${e.message}`);
         return { ok: false, reason: e.message };
     }
 }
@@ -149,7 +159,7 @@ async function placeSell(reasonText) {
         ensureDailyStats();
         dailyStats.pnlCents += pnl;
         if (pnl >= 0) dailyStats.wins += 1; else dailyStats.losses += 1;
-        thought = `PAPER SELL ${contracts}x ${side} @ ${sellPrice}c (${reasonText})`;
+        setThought('exit', `PAPER SELL ${contracts}x ${side} @ ${sellPrice}c (${reasonText})`, { side, contracts });
         pushTrade({
             type: 'exit', action: 'sell', side, direction: side, contracts, limitPrice: sellPrice,
             ticker, periodKey, reason: reasonText, pnlCents: pnl, paperMode: true,
@@ -163,7 +173,7 @@ async function placeSell(reasonText) {
         const yesPrice = side === 'yes' ? sellPrice : undefined;
         const noPrice  = side === 'no'  ? sellPrice : undefined;
         const resp = await kalshi.placeOrder({ ticker, side, action: 'sell', count: contracts, yesPrice, noPrice });
-        thought = `LIVE SELL ${contracts}x ${side} @ ${sellPrice}c (${reasonText})`;
+        setThought('exit', `LIVE SELL ${contracts}x ${side} @ ${sellPrice}c (${reasonText})`, { side, contracts });
         pushTrade({
             type: 'exit', action: 'sell', side, direction: side, contracts, limitPrice: sellPrice,
             ticker, periodKey, reason: reasonText, paperMode: false,
@@ -173,15 +183,15 @@ async function placeSell(reasonText) {
         currentPosition = null;
         return { ok: true };
     } catch (e) {
-        thought = `LIVE SELL FAILED: ${e.message}`;
+        setThought('error', `LIVE SELL FAILED: ${e.message}`);
         return { ok: false, reason: e.message };
     }
 }
 
 // ── Public API: prediction → order ────────────────────────────────
 async function onNewPrediction(prediction, ticker, strike, periodKey) {
-    if (killSwitch) { thought = 'kill-switch active'; return; }
-    if (!ticker || !strike) { thought = 'awaiting ticker/strike'; return; }
+    if (killSwitch) { setThought('killed', 'kill-switch active'); return; }
+    if (!ticker || !strike) { setThought('idle', 'awaiting ticker/strike'); return; }
 
     if (lastPeriodKey !== periodKey) {
         lastPeriodKey = periodKey;
@@ -189,13 +199,18 @@ async function onNewPrediction(prediction, ticker, strike, periodKey) {
     }
 
     const stop = dailyStopHit();
-    if (stop) { thought = `STOPPED: ${stop}`; return; }
-    if (currentPosition) { thought = `holding ${currentPosition.contracts}x ${currentPosition.side}`; return; }
-    if (soldThisPeriod) { thought = 'already sold this period — no re-entry'; return; }
+    if (stop) { setThought('stopped', `STOPPED: ${stop}`); return; }
+    if (currentPosition) { setThought('holding', `holding ${currentPosition.contracts}x ${currentPosition.side}`, { side: currentPosition.side, contracts: currentPosition.contracts }); return; }
+    if (soldThisPeriod) { setThought('idle', 'already sold this period — no re-entry'); return; }
 
     const bq = prediction?._betQuality;
     if (!bq || !bq.shouldBet) {
-        thought = bq ? `SKIP: ${bq.skipReason}` : 'no bet quality';
+        setThought('skip', bq ? `SKIP: ${bq.skipReason}` : 'no bet quality', bq ? {
+            edge: bq.edge,
+            quality: bq.quality,
+            probability: bq.factors?.probability,
+            kellyHasEdge: (bq.kellyFraction || 0) > 0,
+        } : null);
         decisionLog.logSkip({ periodKey, strike, reason: bq?.skipReason || 'no quality', prediction });
         return;
     }
@@ -203,7 +218,7 @@ async function onNewPrediction(prediction, ticker, strike, periodKey) {
     const goingUp = prediction.predictedPrice >= strike;
     const side = goingUp ? 'yes' : 'no';
     const askCents = bq.factors?.ask;
-    if (askCents == null) { thought = 'SKIP: no ask quote'; return; }
+    if (askCents == null) { setThought('skip', 'SKIP: no ask quote'); return; }
 
     const cap = bq.convictionTier === 'high' ? config.convictionMaxContracts : config.maxPositionContracts;
     const contracts = Math.min(cap, Math.max(1, bq.betSize || config.baseContracts));
@@ -223,7 +238,7 @@ async function onSellSignal(sellSignal, minutesRemaining, prediction, strike, cu
         });
         await placeSell(sellSignal.advice || sellSignal.level);
     } else {
-        thought = `holding through ${sellSignal.shortLabel || sellSignal.level}`;
+        setThought('holding', `holding through ${sellSignal.shortLabel || sellSignal.level}`);
     }
 }
 
@@ -284,7 +299,7 @@ async function onDipOpportunity(prediction, sellSignal, strike, currentPrice, mi
             const noPrice  = currentPosition.side === 'no'  ? askCents : undefined;
             await kalshi.placeOrder({ ticker, side: currentPosition.side, action: 'buy', count: addContracts, yesPrice, noPrice });
         } catch (e) {
-            thought = `dip add failed: ${e.message}`;
+            setThought('error', `dip add failed: ${e.message}`);
             return;
         }
     }
@@ -328,7 +343,7 @@ async function onLateLock(prediction, strike, currentPrice, minutesRemaining, ti
             const noPrice  = side === 'no'  ? askCents : undefined;
             await kalshi.placeOrder({ ticker, side, action: 'buy', count: contracts, yesPrice, noPrice });
         } catch (e) {
-            thought = `late lock failed: ${e.message}`;
+            setThought('error', `late lock failed: ${e.message}`);
             return;
         }
     }
@@ -407,7 +422,7 @@ async function forceSell() {
 // ── Status / config knobs ─────────────────────────────────────────
 function setKillSwitch(active) {
     killSwitch = !!active;
-    thought = killSwitch ? 'KILL SWITCH ON' : 'kill-switch off';
+    setThought(killSwitch ? 'killed' : 'idle', killSwitch ? 'KILL SWITCH ON' : 'kill-switch off');
 }
 
 function setPaperMode(paperMode) {
@@ -430,8 +445,43 @@ function getPaperBalances() {
     return { ...paperBalances };
 }
 
+// Fetch + cache the live Kalshi balance for the active environment.
+// Non-blocking: returns cached value immediately, refreshes async on staleness.
+function refreshLiveBalanceIfStale() {
+    const env = activeEnv();
+    if (Date.now() - liveBalanceFetchedAt[env] < LIVE_BALANCE_TTL_MS) return;
+    if (liveBalanceInflight[env]) return;
+    if (!(kalshiAuth.isConfigured && kalshiAuth.isConfigured())) return;
+
+    liveBalanceInflight[env] = (async () => {
+        try {
+            const resp = await kalshi.getBalance();
+            // Kalshi returns { balance: <int cents> } per their API; defensive parse.
+            const cents = typeof resp?.balance === 'number'
+                ? resp.balance
+                : typeof resp?.balance_cents === 'number'
+                    ? resp.balance_cents
+                    : null;
+            if (cents != null && isFinite(cents)) {
+                liveBalanceCache[env] = Math.round(cents);
+                liveBalanceFetchedAt[env] = Date.now();
+            }
+        } catch (e) {
+            // Don't spam logs if we just don't have credentials yet
+            if (!/not configured|401|403/i.test(e.message || '')) {
+                console.error('[trade-executor] live balance fetch failed:', e.message);
+            }
+            liveBalanceFetchedAt[env] = Date.now(); // back off retries
+        } finally {
+            liveBalanceInflight[env] = null;
+        }
+    })();
+}
+
 function getStatus() {
     ensureDailyStats();
+    if (!config.paperMode) refreshLiveBalanceIfStale();
+
     let posOut = null;
     if (currentPosition) {
         posOut = {
@@ -439,11 +489,12 @@ function getStatus() {
             holdingSeconds: Math.round((Date.now() - currentPosition.entryTime) / 1000),
         };
     }
+    const balanceCents = config.paperMode ? paperBal() : liveBalanceCache[activeEnv()];
     return {
         paperMode: config.paperMode,
         killSwitch,
         configured: kalshiAuth.isConfigured ? kalshiAuth.isConfigured() : false,
-        balanceCents: config.paperMode ? paperBal() : null,
+        balanceCents: balanceCents != null ? balanceCents : null,
         currentPosition: posOut,
         soldThisPeriod,
         daily: { ...dailyStats },
@@ -492,9 +543,9 @@ function resetState() {
     currentPosition = null;
     soldThisPeriod = false;
     lastPeriodKey = null;
-    dailyStats = { date: todayKey(), trades: 0, wins: 0, losses: 0, pnlCents: 0 };
+    dailyStats = { date: todayKey(), tradeCount: 0, wins: 0, losses: 0, pnlCents: 0 };
     recentTrades = [];
-    thought = 'state reset';
+    setThought('idle', 'state reset');
 }
 
 module.exports = {
