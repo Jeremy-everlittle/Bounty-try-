@@ -455,7 +455,27 @@ function gradePreviousPrediction(actualPrice, currentPeriodKey) {
 }
 
 function computeNextPeriodPreview(marketData) {
-    return predictPrice(marketData, 15, marketData?.currentPrice || 0);
+    const current = marketData?.currentPrice || 0;
+    if (!current) return null;
+    // Strike-equals-current is the right reference for an unknown future strike;
+    // it keeps probability centered around drift.
+    const pred = predictPrice(marketData, 15, current);
+    const direction = pred.predictedPrice >= current ? 'UP' : 'DOWN';
+    const probForDirection = direction === 'UP' ? pred.probability : 1 - pred.probability;
+    const move = pred.predictedPrice - current;
+    const movePct = (move / current) * 100;
+    const sigma = pred._rawSignals?.sigma || 0;
+    return {
+        ...pred,
+        direction,
+        probForDirection,
+        move,
+        movePct,
+        signals: {
+            ...pred.signals,
+            volatility: sigma > 0.003 ? 'High' : sigma > 0.0015 ? 'Medium' : 'Low',
+        },
+    };
 }
 
 function analyzeAndLearn() { /* no-op: API compatibility */ }
