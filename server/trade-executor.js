@@ -1470,7 +1470,10 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         const env = getEnvironment();
         paperBalances[env] = (paperBalances[env] || 0) + sellProceeds;
         console.log(`[trade-executor] PAPER SELL: ${sellContracts}x ${currentPosition.side.toUpperCase()} on ${currentPosition.ticker} @ ${sellPrice}c — reason: ${sellSignal.level} | Proceeds=$${(sellProceeds/100).toFixed(2)} | Loss=$${(sellLossCents/100).toFixed(2)} | Paper balance=$${(paperBalances[env]/100).toFixed(2)}`);
-        logTrade('sell', { ...tradeInfo, limitPrice: sellPrice, sellProceeds, originalCost: originalCostCents });
+        // Realized P&L from the sell leg goes straight into dailyStats so the
+        // dashboard's Daily P&L reflects every cash flow, not just settlements.
+        dailyStats.pnlCents += (sellProceeds - originalCostCents);
+        logTrade('sell', { ...tradeInfo, limitPrice: sellPrice, sellProceeds, originalCost: originalCostCents, pnlCents: sellProceeds - originalCostCents, dailyPnlCents: dailyStats.pnlCents });
         decisionLog.logSellDecision({ sellSignal, minutesRemaining, acted: true, reason: sellSignal.level, currentPrice, strike });
         dailyStats.tradeCount++;
         // Record for potential re-entry
@@ -1621,7 +1624,18 @@ async function onSellSignal(sellSignal, minutesRemaining, updatedPrediction, str
         const liveSellProceeds = filledContracts * (fills.avgPrice || currentPosition.entryPrice);
         const liveOriginalCost = currentPosition.totalCostCents || (currentPosition.contracts * currentPosition.entryPrice);
         const liveSellLossCents = Math.max(0, liveOriginalCost - liveSellProceeds);
-        logTrade('sell', { ...tradeInfo, limitPrice: fills.avgPrice || currentPosition.entryPrice, orderId: order.order_id, fillStatus: order.status, filledContracts, lossCents: liveSellLossCents });
+        // Roll the realized P&L from this sell into dailyStats so the Daily
+        // P&L on the dashboard reflects every leg, not just settlements.
+        dailyStats.pnlCents += (liveSellProceeds - liveOriginalCost);
+        logTrade('sell', {
+            ...tradeInfo,
+            limitPrice: fills.avgPrice || currentPosition.entryPrice,
+            orderId: order.order_id, fillStatus: order.status, filledContracts,
+            sellProceeds: liveSellProceeds, originalCost: liveOriginalCost,
+            pnlCents: liveSellProceeds - liveOriginalCost,
+            dailyPnlCents: dailyStats.pnlCents,
+            lossCents: liveSellLossCents,
+        });
         dailyStats.tradeCount++;
         const soldTicker = currentPosition.ticker;
         const soldPeriodKey = currentPosition.periodKey;
@@ -2651,18 +2665,20 @@ function getPaperBalances() {
 }
 
 function resetState() {
+    // Triggered when the Kalshi environment is switched. Only blow away
+    // position/queue state — keep the daily P&L counters and trade log so
+    // the dashboard's "Daily P&L" doesn't zero out every time the user
+    // toggles DEMO ↔ PROD or LIVE ↔ PAPER.
     currentPosition = null;
+    clearedPosition = null;
     cachedBalance = null;  // Clear cached balance so it's re-fetched for the new environment
-    dailyStats.date = new Date().toISOString().slice(0, 10);
-    dailyStats.pnlCents = 0;
-    dailyStats.tradeCount = 0;
-    dailyStats.wins = 0;
-    dailyStats.losses = 0;
-    tradeLog.length = 0;
     enteredPeriods = {};
     syncZeroCount = 0;
+    soldThisPeriod = null;
+    flippedThisPeriod = false;
+    orderInFlight = false;
     killSwitch = true;
-    console.log('[trade-executor] State reset — kill switch activated');
+    console.log('[trade-executor] State reset — kill switch activated (daily stats preserved)');
 }
 
 function clearTradeLog() {

@@ -1,0 +1,9 @@
+{
+    "name": "BTC Predictor",
+    "short_name": "BTC Predictor",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#0d1117",
+    "theme_color": "#0d1117",
+    "description": "BTC 15-minute Up/Down predictor for Kalshi"
+}

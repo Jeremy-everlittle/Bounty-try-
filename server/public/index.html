@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="theme-color" content="#0d1117">
@@ -1166,6 +1167,11 @@
                             mergePredictionLogs(msg.predictionLog);
                             renderPredictionHistory();
                         }
+                        // Push the new server data through the render pipeline. Without this,
+                        // updateUI() is only called by the polling fallback (when wsConnected
+                        // is false), so a healthy WebSocket leaves the dashboard frozen on
+                        // dashes. fetchPriceData() reads from serverData, so this is cheap.
+                        try { fetchAndPredict(); } catch (e) { console.error('render after WS data failed:', e); }
                     } else if (msg.type === 'trade') {
                         handleTradeNotification(msg.trade);
                     }
@@ -1538,6 +1544,28 @@
                 const errors = periodTrades.filter(t => t.type && (t.type.includes('error') || t.type.includes('failed') || t.type.includes('unfilled') || t.type.includes('phantom')));
                 const hasTrades = buys.length > 0 || sells.length > 0 || settlement;
 
+                // Period-level realized P&L: sum of all cash flows on every leg of the
+                // period (buys + sells + settle payout). settlement.pnlCents only
+                // covers the FINAL position, so a sell-for-loss followed by a force
+                // bet wins would show only the force-bet's tiny profit and hide the
+                // earlier loss. Compute the full realized P&L instead.
+                function periodRealizedPnlCents() {
+                    let pnl = 0;
+                    for (const t of buys) {
+                        const price = t.limitPrice || t.entryPrice || 0;
+                        pnl -= (t.contracts || 0) * price;
+                    }
+                    for (const t of sells) {
+                        const price = t.limitPrice || t.entryPrice || 0;
+                        pnl += (t.contracts || 0) * price;
+                    }
+                    if (settlement && settlement.correct) {
+                        pnl += (settlement.contracts || 0) * 100; // winning contracts pay out 100¢
+                    }
+                    return pnl;
+                }
+                const periodPnlCents = periodRealizedPnlCents();
+
                 // Determine outcome
                 let outcomeLabel, outcomeCls, periodCls;
                 if (settlement) {
@@ -1548,7 +1576,7 @@
                         outcomeLabel = 'LOSS'; outcomeCls = 'period-outcome-loss'; periodCls = 'period-loss';
                         totalLosses++;
                     }
-                    totalPnlCents += settlement.pnlCents || 0;
+                    totalPnlCents += periodPnlCents;
                 } else if (!hasTrades) {
                     outcomeLabel = 'NO BET'; outcomeCls = 'period-outcome-nobet'; periodCls = 'period-no-bet';
                 } else {
@@ -1651,11 +1679,19 @@
                             html += '<span class="period-trade-info" style="color:#8b949e">Edge: ' + t.edge + '</span>';
                         }
 
-                        // P&L for settlements
+                        // P&L tag — settlements log pnlCents directly; sells need it derived
+                        // from server-logged sellProceeds + originalCost so the loss/gain
+                        // shows up next to the SELL row instead of being silent.
+                        let legPnlCents;
                         if (t.pnlCents !== undefined) {
-                            const pnlPos = t.pnlCents >= 0;
+                            legPnlCents = t.pnlCents;
+                        } else if (t.type === 'sell' && t.sellProceeds !== undefined && t.originalCost !== undefined) {
+                            legPnlCents = t.sellProceeds - t.originalCost;
+                        }
+                        if (legPnlCents !== undefined) {
+                            const pnlPos = legPnlCents >= 0;
                             html += '<span class="period-trade-pnl" style="color:' + (pnlPos ? '#3fb950' : '#f85149') + '">' +
-                                (pnlPos ? '+' : '') + '$' + (t.pnlCents / 100).toFixed(2) + '</span>';
+                                (pnlPos ? '+' : '') + '$' + (legPnlCents / 100).toFixed(2) + '</span>';
                         }
 
                         // Error detail
@@ -1666,11 +1702,10 @@
                         html += '</div>';
                     }
 
-                    // P&L summary for the period
+                    // P&L summary for the period (sum across every leg, not just the final settle)
                     if (settlement) {
-                        const pnl = settlement.pnlCents || 0;
+                        const pnl = periodPnlCents;
                         const pnlPos = pnl > 0;
-                        const totalCost = buys.reduce((sum, b) => sum + (b.contracts || 0) * (b.limitPrice || b.entryPrice || 0), 0);
                         html += '<div class="period-pnl-summary">' +
                             '<div>' +
                                 '<span class="period-pnl-label">Period P&L</span>' +
@@ -2029,6 +2064,12 @@
             } else {
                 badge.textContent = 'NOT CONFIGURED';
                 badge.className = 'trading-mode-badge trading-mode-off';
+            }
+
+            // Paper-balance Add/Set controls — only visible in paper mode
+            const paperControls = document.getElementById('paper-balance-controls');
+            if (paperControls) {
+                paperControls.style.display = ts.paperMode ? '' : 'none';
             }
 
             // Balance
@@ -3081,6 +3122,7 @@
                 };
                 for (const [key, val] of Object.entries(activePred.signals)) {
                     const el = document.getElementById('sig-' + key);
+                    if (!el) continue; // only momentum/volatility/trend/rsi have DOM elements
                     el.textContent = val;
                     el.className = 'signal-value ' + (sigClasses[val] || 'neutral');
                 }
