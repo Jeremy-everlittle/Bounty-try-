@@ -74,7 +74,14 @@ function dailyStopHit() {
 
 // ── Trade log ─────────────────────────────────────────────────────
 function pushTrade(trade) {
-    const enriched = { ...trade, timestamp: trade.timestamp || new Date().toISOString() };
+    const nowIso = new Date().toISOString();
+    // Frontend reads both `time` (period-history) and `timestamp` (notifications);
+    // keep them in sync so a trade lands in its period and triggers a push.
+    const enriched = {
+        ...trade,
+        time: trade.time || nowIso,
+        timestamp: trade.timestamp || nowIso,
+    };
     recentTrades.unshift(enriched);
     if (recentTrades.length > 200) recentTrades.length = 200;
     for (const cb of tradeListeners) {
@@ -110,7 +117,7 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
         ensureDailyStats();
         dailyStats.tradeCount += 1;
         pushTrade({
-            type: 'entry', action: 'buy', side, direction: side, contracts, limitPrice,
+            type: 'buy', action: 'buy', side, direction: side, contracts, limitPrice,
             ticker, periodKey, strike, edge: edge != null ? (edge * 100).toFixed(1) + '%' : null,
             reason: betQuality?.reason || 'auto entry',
             paperMode: true,
@@ -132,7 +139,7 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
         ensureDailyStats();
         dailyStats.tradeCount += 1;
         pushTrade({
-            type: 'entry', action: 'buy', side, direction: side, contracts, limitPrice,
+            type: 'buy', action: 'buy', side, direction: side, contracts, limitPrice,
             ticker, periodKey, strike, orderId,
             edge: edge != null ? (edge * 100).toFixed(1) + '%' : null,
             reason: betQuality?.reason || 'auto entry',
@@ -161,7 +168,7 @@ async function placeSell(reasonText) {
         if (pnl >= 0) dailyStats.wins += 1; else dailyStats.losses += 1;
         setThought('exit', `PAPER SELL ${contracts}x ${side} @ ${sellPrice}c (${reasonText})`, { side, contracts });
         pushTrade({
-            type: 'exit', action: 'sell', side, direction: side, contracts, limitPrice: sellPrice,
+            type: 'sell', action: 'sell', side, direction: side, contracts, limitPrice: sellPrice,
             ticker, periodKey, reason: reasonText, pnlCents: pnl, paperMode: true,
         });
         soldThisPeriod = true;
@@ -175,7 +182,7 @@ async function placeSell(reasonText) {
         const resp = await kalshi.placeOrder({ ticker, side, action: 'sell', count: contracts, yesPrice, noPrice });
         setThought('exit', `LIVE SELL ${contracts}x ${side} @ ${sellPrice}c (${reasonText})`, { side, contracts });
         pushTrade({
-            type: 'exit', action: 'sell', side, direction: side, contracts, limitPrice: sellPrice,
+            type: 'sell', action: 'sell', side, direction: side, contracts, limitPrice: sellPrice,
             ticker, periodKey, reason: reasonText, paperMode: false,
             orderId: resp?.order?.order_id || null,
         });
@@ -264,9 +271,9 @@ async function onPeriodEnd({ correct, periodKey, actualDirection, strikePrice, s
     if (won) dailyStats.wins += 1; else dailyStats.losses += 1;
 
     pushTrade({
-        type: 'settlement', action: 'settle', side, direction: side, contracts,
+        type: 'settle', action: 'settle', side, direction: side, contracts,
         limitPrice: settleCents, ticker, periodKey, pnlCents: pnl,
-        won, actualDirection, strikePrice, settlementPrice,
+        won, correct: won, actualDirection, strikePrice, settlementPrice,
         paperMode: config.paperMode,
     });
     decisionLog.logSettlement({ periodKey, won, pnlCents: pnl, contracts, side, actualDirection, settlementPrice });
