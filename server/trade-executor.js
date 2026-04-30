@@ -17,6 +17,7 @@ const kalshi = require('./kalshi-trading');
 const kalshiAuth = require('./kalshi-auth');
 const db = require('./db');
 const decisionLog = require('./decision-logger');
+const engine = require('./prediction-engine');
 
 // ── Config ────────────────────────────────────────────────────────
 const config = {
@@ -58,6 +59,11 @@ let currentPosition = null;     // { ticker, side, action, contracts, entryPrice
 let soldThisPeriod = false;
 let lastPeriodKey = null;
 let thought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
+// Latest market data snapshot (orderbook + price) for this asset.
+// Updated once per fetch cycle by the server so placeSell can crystallize
+// paper sells at the live bid instead of the stale entry price.
+let latestMarketData = null;
+function setMarketData(md) { latestMarketData = md || null; }
 
 function setThought(status, message, detail) {
     thought = { status, message, timestamp: Date.now(), detail: detail || null };
@@ -160,21 +166,27 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
 async function placeSell(reasonText) {
     if (!currentPosition) return { ok: false, reason: 'no position' };
     const { ticker, side, contracts, periodKey, entryPrice } = currentPosition;
-    // Sell at market-ish: bid-floor at 1c
-    const sellPrice = Math.max(1, Math.min(99, entryPrice));
+
+    // Crystallize at the LIVE bid for our side (what a market sell would
+    // actually fill at), not the stale entry price. Falls back to entry only
+    // if the orderbook is missing — old behavior — so we never crash a sell.
+    const liveBid = latestMarketData ? engine.getKalshiBid(latestMarketData, side) : null;
+    const rawSellPrice = (liveBid != null) ? liveBid : entryPrice;
+    const sellPrice = Math.max(1, Math.min(99, rawSellPrice));
+    const sellPriceSource = (liveBid != null) ? 'live_bid' : 'entry_fallback';
 
     if (config.paperMode) {
-        // Crystallize at sell price (no fill model — preserves capital)
         const proceeds = sellPrice * contracts;
         setPaperBal(paperBal() + proceeds);
         const pnl = proceeds - currentPosition.totalCostCents;
         ensureDailyStats();
         dailyStats.pnlCents += pnl;
         if (pnl >= 0) dailyStats.wins += 1; else dailyStats.losses += 1;
-        setThought('exit', `PAPER SELL ${contracts}x ${side} @ ${sellPrice}c (${reasonText})`, { side, contracts });
+        setThought('exit', `PAPER SELL ${contracts}x ${side} @ ${sellPrice}c (${reasonText})`, { side, contracts, sellPriceSource });
         pushTrade({
             type: 'sell', action: 'sell', side, direction: side, contracts, limitPrice: sellPrice,
             ticker, periodKey, reason: reasonText, pnlCents: pnl, paperMode: true,
+            sellPriceSource,
         });
         soldThisPeriod = true;
         currentPosition = null;
@@ -636,6 +648,7 @@ function resetState() {
 return {
     assetKey,
     initFromDB,
+    setMarketData,
     onNewPrediction,
     onSellSignal,
     onPeriodEnd,

@@ -1035,6 +1035,13 @@ async function fetchAllData() {
             state.kalshiOrderBookError = 'No active Kalshi ticker';
         }
 
+        // Push the latest BTC market snapshot into the executor so paper-mode
+        // sells crystallize at the live bid instead of the entry price.
+        tradeExecutor.setMarketData({
+            kalshiOrderBook: state.kalshiOrderBook,
+            currentPrice: state.brtiPrice,
+        });
+
         // ═══════════════════════════════════════════════════════
         // SERVER-SIDE PREDICTION ENGINE
         // ═══════════════════════════════════════════════════════
@@ -1462,6 +1469,13 @@ async function fetchAllData() {
         } else {
             ethState.kalshiOrderBookError = 'No active ETH Kalshi ticker';
         }
+
+        // Same as BTC: keep the ETH executor's market snapshot fresh so
+        // paper-mode sells use the live ETH bid.
+        ethExecutor.setMarketData({
+            kalshiOrderBook: ethState.kalshiOrderBook,
+            currentPrice: ethState.currentPrice,
+        });
 
         try {
             const ethPeriod = store.getCurrentPeriod('eth');

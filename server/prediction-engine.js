@@ -145,6 +145,23 @@ function getKalshiAsk(marketData, side) {
     return null;
 }
 
+// Best bid for the given side — what the position would crystallize at on a
+// market sell. We cross our own quotes: a YES holder sells into the YES bid,
+// a NO holder sells into the NO bid.
+function getKalshiBid(marketData, side) {
+    const ob = marketData?.kalshiOrderBook?.orderbook_fp || marketData?.kalshiOrderBook?.orderbook || marketData?.kalshiOrderBook;
+    if (!ob) return null;
+    const isDollar = !!(ob.yes_dollars || ob.no_dollars);
+    const yesBids = ob.yes_dollars || ob.yes || [];
+    const noBids  = ob.no_dollars || ob.no || [];
+    const parse = (lvls) => lvls.map(e => (isDollar ? Math.round(parseFloat(e[0]) * 100) : Math.round(parseFloat(e[0]))));
+    const bestYesBid = yesBids.length ? Math.max(...parse(yesBids)) : null;
+    const bestNoBid  = noBids.length  ? Math.max(...parse(noBids))  : null;
+    if (side === 'yes') return bestYesBid;
+    if (side === 'no')  return bestNoBid;
+    return null;
+}
+
 // ── Factory ──────────────────────────────────────────────────────
 function createEngine(assetKey = 'btc') {
     const sessionRisk = {
@@ -484,6 +501,7 @@ const _defaultEngine = createEngine('btc');
 module.exports = createEngine;
 module.exports.createEngine = createEngine;
 module.exports.getKalshiAsk = getKalshiAsk;
+module.exports.getKalshiBid = getKalshiBid;
 for (const key of Object.keys(_defaultEngine)) {
     if (module.exports[key] === undefined) {
         module.exports[key] = _defaultEngine[key];
