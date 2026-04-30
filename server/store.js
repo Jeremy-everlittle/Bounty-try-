@@ -2,8 +2,15 @@
 
 // ═══════════════════════════════════════════════════════════════
 // PERSISTENT STORE — JSON file + PostgreSQL backed storage
-// JSON file is primary (fast), DB is backup (survives deploys)
-// On startup: loads from JSON file first, then fills gaps from DB
+// ───────────────────────────────────────────────────────────────
+// Per-asset state: each public function takes an optional
+// assetKey ('btc' / 'eth' / etc.) and reads/writes the matching
+// slice of state.assets[assetKey]. assetKey defaults to 'btc' so
+// legacy single-asset call sites keep working unchanged.
+// ───────────────────────────────────────────────────────────────
+// On load, any pre-multi-asset top-level keys (predictionLog,
+// bayesianState, currentPeriod, errorAnalysis, onlineML) are
+// migrated into state.assets.btc.
 // ═══════════════════════════════════════════════════════════════
 
 const fs = require('fs');
@@ -12,7 +19,6 @@ const path = require('path');
 const DATA_DIR = path.join(__dirname, 'data');
 const STORE_FILE = path.join(DATA_DIR, 'prediction-state.json');
 
-// Lazy-loaded db reference (avoid circular dependency)
 let _db = null;
 function getDb() {
     if (!_db) {
@@ -21,13 +27,11 @@ function getDb() {
     return _db;
 }
 
-// Default state
-function createDefaultState() {
+// Fields owned by each asset slice. Top-level state still holds
+// server-wide stuff like serverStartTime + totalPredictionsMade.
+function createDefaultAssetState() {
     return {
-        // Prediction log (all graded predictions)
         predictionLog: [],
-
-        // Bayesian learning state
         bayesianState: {
             records: [],
             directionBeta: { up: { a: 1, b: 1 }, down: { a: 1, b: 1 } },
@@ -39,17 +43,11 @@ function createDefaultState() {
                 trending: { a: 1, b: 1 }, meanReverting: { a: 1, b: 1 }, neutral: { a: 1, b: 1 }
             },
             timeBeta: { 0: { a: 1, b: 1 }, 1: { a: 1, b: 1 }, 2: { a: 1, b: 1 }, 3: { a: 1, b: 1 } },
-            calibrationBins: {
-                0: { a: 1, b: 1 }, 1: { a: 1, b: 1 }, 2: { a: 1, b: 1 },
-                3: { a: 1, b: 1 }, 4: { a: 1, b: 1 }, 5: { a: 1, b: 1 },
-                6: { a: 1, b: 1 }, 7: { a: 1, b: 1 }, 8: { a: 1, b: 1 }
-            }
+            calibrationBins: {}
         },
-
-        // Current period state
         currentPeriod: {
             periodKey: null,
-            periodStartPrice: null,     // = Kalshi strike
+            periodStartPrice: null,
             originalPrediction: null,
             updatedPrediction: null,
             kalshiTicker: null,
@@ -60,45 +58,58 @@ function createDefaultState() {
             isTransitioning: false,
             lastKalshiTicker: null
         },
-
-        // Next period preview
         nextPeriodPreview: null,
-
-        // Sell signal
         sellSignal: null,
-
-        // Self-learning error analysis log
         errorAnalysis: {
-            // Rolling window of detailed error records
             records: [],
-            // Aggregated error patterns by category
             patterns: {
-                byVolRegime: {},     // avg error by vol regime
-                byTrendRegime: {},   // avg error by trend regime
-                byTimeOfDay: {},     // avg error by hour bucket
-                byDistanceBucket: {},// avg error by distance-from-strike bucket
+                byVolRegime: {}, byTrendRegime: {}, byTimeOfDay: {}, byDistanceBucket: {},
                 byDirection: { up: { totalError: 0, count: 0, correctCount: 0 },
                               down: { totalError: 0, count: 0, correctCount: 0 } }
             },
-            // Adaptive corrections learned from errors
             corrections: {
-                volRegimeMultiplier: {},   // per-regime vol scaling
-                directionBias: 0,          // systematic direction bias
-                overconfidenceRatio: 1.0,  // how much to dampen confidence
-                priceErrorScale: 1.0       // predicted price error scaling
+                volRegimeMultiplier: {}, directionBias: 0,
+                overconfidenceRatio: 1.0, priceErrorScale: 1.0
             },
             lastAnalysis: null,
             totalAnalyzed: 0
         },
-
-        // Online ML state (logistic regression, ensemble, calibrator, HMM)
         onlineML: null,
+    };
+}
 
-        // Server uptime tracking
+function createDefaultState() {
+    return {
+        assets: {
+            btc: createDefaultAssetState(),
+            eth: createDefaultAssetState(),
+        },
         serverStartTime: Date.now(),
         lastPredictionTime: null,
-        totalPredictionsMade: 0
+        totalPredictionsMade: 0,
     };
+}
+
+// One-shot migration from the pre-multi-asset shape.
+function migrateLegacyShape(saved) {
+    if (saved && saved.assets) return saved; // already new shape
+    const migrated = createDefaultState();
+    migrated.serverStartTime = saved.serverStartTime || Date.now();
+    migrated.lastPredictionTime = saved.lastPredictionTime || null;
+    migrated.totalPredictionsMade = saved.totalPredictionsMade || 0;
+    const btc = migrated.assets.btc;
+    if (saved.predictionLog) btc.predictionLog = saved.predictionLog;
+    if (saved.bayesianState) btc.bayesianState = { ...btc.bayesianState, ...saved.bayesianState };
+    if (saved.currentPeriod) btc.currentPeriod = { ...btc.currentPeriod, ...saved.currentPeriod };
+    if (saved.errorAnalysis) {
+        btc.errorAnalysis = { ...btc.errorAnalysis, ...saved.errorAnalysis };
+        if (saved.errorAnalysis.patterns) btc.errorAnalysis.patterns = { ...btc.errorAnalysis.patterns, ...saved.errorAnalysis.patterns };
+        if (saved.errorAnalysis.corrections) btc.errorAnalysis.corrections = { ...btc.errorAnalysis.corrections, ...saved.errorAnalysis.corrections };
+    }
+    if (saved.nextPeriodPreview !== undefined) btc.nextPeriodPreview = saved.nextPeriodPreview;
+    if (saved.sellSignal !== undefined) btc.sellSignal = saved.sellSignal;
+    if (saved.onlineML !== undefined) btc.onlineML = saved.onlineML;
+    return migrated;
 }
 
 let state = createDefaultState();
@@ -117,23 +128,15 @@ function load() {
         if (fs.existsSync(STORE_FILE)) {
             const raw = fs.readFileSync(STORE_FILE, 'utf8');
             const saved = JSON.parse(raw);
-            // Merge with defaults to handle new fields
-            state = { ...createDefaultState(), ...saved };
-            // Deep merge bayesianState
-            if (saved.bayesianState) {
-                state.bayesianState = { ...createDefaultState().bayesianState, ...saved.bayesianState };
+            state = migrateLegacyShape(saved);
+            // Ensure every asset slice has all default fields (handles new fields after upgrade).
+            for (const key of Object.keys(state.assets)) {
+                state.assets[key] = { ...createDefaultAssetState(), ...state.assets[key] };
             }
-            if (saved.currentPeriod) {
-                state.currentPeriod = { ...createDefaultState().currentPeriod, ...saved.currentPeriod };
-            }
-            // Deep merge errorAnalysis to handle new sub-fields
-            if (saved.errorAnalysis) {
-                const defaults = createDefaultState().errorAnalysis;
-                state.errorAnalysis = { ...defaults, ...saved.errorAnalysis };
-                state.errorAnalysis.patterns = { ...defaults.patterns, ...saved.errorAnalysis.patterns };
-                state.errorAnalysis.corrections = { ...defaults.corrections, ...saved.errorAnalysis.corrections };
-            }
-            console.log(`[store] File loaded: ${state.predictionLog.length} predictions, ${state.bayesianState.records.length} Bayesian records`);
+            const totals = Object.entries(state.assets)
+                .map(([k, s]) => `${k}=${(s.predictionLog || []).length}`)
+                .join(' ');
+            console.log(`[store] File loaded: ${totals}`);
         } else {
             console.log('[store] No existing store file found, will load from DB');
         }
@@ -144,64 +147,52 @@ function load() {
     state.serverStartTime = Date.now();
 }
 
-// Load from DB — called after db.init() completes
 async function loadFromDB() {
     const db = getDb();
     if (!db) return;
-
     try {
-        // Load prediction log from DB
+        // BTC prediction log lives in the legacy single-table for now (no asset column).
+        // ETH starts empty; load from DB key/value if present.
         const dbLog = await db.loadPredictionLog(500);
         if (dbLog && dbLog.length > 0) {
-            if (state.predictionLog.length === 0) {
-                // JSON file was empty/missing, use DB data
-                state.predictionLog = dbLog;
-                console.log(`[store] Loaded ${dbLog.length} predictions from DB`);
-            } else if (dbLog.length > state.predictionLog.length) {
-                // DB has more entries (file was stale), merge
-                const existingKeys = new Set(state.predictionLog.map(e => e.periodKey));
+            const btc = state.assets.btc;
+            if (btc.predictionLog.length === 0) {
+                btc.predictionLog = dbLog;
+                console.log(`[store] BTC: loaded ${dbLog.length} predictions from DB`);
+            } else if (dbLog.length > btc.predictionLog.length) {
+                const existing = new Set(btc.predictionLog.map(e => e.periodKey));
                 let added = 0;
-                for (const entry of dbLog) {
-                    if (!existingKeys.has(entry.periodKey)) {
-                        state.predictionLog.push(entry);
-                        added++;
-                    }
+                for (const e of dbLog) {
+                    if (!existing.has(e.periodKey)) { btc.predictionLog.push(e); added++; }
                 }
                 if (added > 0) {
-                    // Sort by timestamp
-                    state.predictionLog.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-                    console.log(`[store] Merged ${added} additional predictions from DB`);
+                    btc.predictionLog.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+                    console.log(`[store] BTC: merged ${added} additional predictions from DB`);
                 }
             }
         }
 
-        // Load learning state from DB
-        const dbBayesian = await db.loadStoreState('bayesianState');
-        if (dbBayesian && (!state.bayesianState.records || state.bayesianState.records.length === 0)) {
-            const defaults = createDefaultState().bayesianState;
-            state.bayesianState = { ...defaults, ...dbBayesian };
-            console.log(`[store] Loaded bayesian state from DB (${state.bayesianState.records?.length || 0} records)`);
-        }
-
-        const dbErrorAnalysis = await db.loadStoreState('errorAnalysis');
-        if (dbErrorAnalysis && (!state.errorAnalysis.records || state.errorAnalysis.records.length === 0)) {
-            const defaults = createDefaultState().errorAnalysis;
-            state.errorAnalysis = { ...defaults, ...dbErrorAnalysis };
-            state.errorAnalysis.patterns = { ...defaults.patterns, ...(dbErrorAnalysis.patterns || {}) };
-            state.errorAnalysis.corrections = { ...defaults.corrections, ...(dbErrorAnalysis.corrections || {}) };
-            console.log(`[store] Loaded error analysis from DB (${state.errorAnalysis.records?.length || 0} records)`);
-        }
-
-        const dbCurrentPeriod = await db.loadStoreState('currentPeriod');
-        if (dbCurrentPeriod && !state.currentPeriod.periodKey) {
-            state.currentPeriod = { ...createDefaultState().currentPeriod, ...dbCurrentPeriod };
-            console.log(`[store] Loaded current period from DB: ${state.currentPeriod.periodKey}`);
-        }
-
-        const dbOnlineML = await db.loadStoreState('onlineML');
-        if (dbOnlineML && !state.onlineML) {
-            state.onlineML = dbOnlineML;
-            console.log(`[store] Loaded online ML state from DB`);
+        for (const assetKey of Object.keys(state.assets)) {
+            const slice = state.assets[assetKey];
+            const dbBay = await db.loadStoreState(`bayesianState-${assetKey}`)
+                       || (assetKey === 'btc' ? await db.loadStoreState('bayesianState') : null);
+            if (dbBay && (!slice.bayesianState.records || slice.bayesianState.records.length === 0)) {
+                const defaults = createDefaultAssetState().bayesianState;
+                slice.bayesianState = { ...defaults, ...dbBay };
+            }
+            const dbErr = await db.loadStoreState(`errorAnalysis-${assetKey}`)
+                       || (assetKey === 'btc' ? await db.loadStoreState('errorAnalysis') : null);
+            if (dbErr && (!slice.errorAnalysis.records || slice.errorAnalysis.records.length === 0)) {
+                const defaults = createDefaultAssetState().errorAnalysis;
+                slice.errorAnalysis = { ...defaults, ...dbErr };
+                slice.errorAnalysis.patterns = { ...defaults.patterns, ...(dbErr.patterns || {}) };
+                slice.errorAnalysis.corrections = { ...defaults.corrections, ...(dbErr.corrections || {}) };
+            }
+            const dbCurr = await db.loadStoreState(`currentPeriod-${assetKey}`)
+                        || (assetKey === 'btc' ? await db.loadStoreState('currentPeriod') : null);
+            if (dbCurr && !slice.currentPeriod.periodKey) {
+                slice.currentPeriod = { ...createDefaultAssetState().currentPeriod, ...dbCurr };
+            }
         }
 
         const dbMeta = await db.loadStoreState('meta');
@@ -213,34 +204,26 @@ async function loadFromDB() {
                 state.lastPredictionTime = dbMeta.lastPredictionTime;
             }
         }
-
-        console.log(`[store] DB load complete: ${state.predictionLog.length} total predictions`);
+        console.log(`[store] DB load complete`);
     } catch (e) {
         console.error('[store] Failed to load from DB (continuing with file data):', e.message);
     }
 }
 
 function save() {
-    // Debounce saves to avoid excessive disk I/O
     if (saveTimer) return;
-    saveTimer = setTimeout(() => {
-        saveTimer = null;
-        _doSave();
-    }, 2000);
-
-    // Also debounce DB saves (slightly longer interval)
+    saveTimer = setTimeout(() => { saveTimer = null; _doSave(); }, 2000);
     if (!dbSaveTimer) {
-        dbSaveTimer = setTimeout(() => {
-            dbSaveTimer = null;
-            _doSaveDB();
-        }, 5000);
+        dbSaveTimer = setTimeout(() => { dbSaveTimer = null; _doSaveDB(); }, 5000);
     }
 }
 
 function _doSave() {
     ensureDataDir();
     try {
-        state.bayesianState.records = state.bayesianState.records.slice(-200);
+        for (const slice of Object.values(state.assets)) {
+            slice.bayesianState.records = (slice.bayesianState.records || []).slice(-200);
+        }
         fs.writeFileSync(STORE_FILE, JSON.stringify(state, null, 2));
     } catch (e) {
         console.error('[store] Failed to save store file:', e.message);
@@ -250,72 +233,74 @@ function _doSave() {
 async function _doSaveDB() {
     const db = getDb();
     if (!db) return;
-
     try {
-        // Save learning state to DB
-        await Promise.all([
-            db.saveStoreState('bayesianState', state.bayesianState),
-            db.saveStoreState('errorAnalysis', state.errorAnalysis),
-            db.saveStoreState('currentPeriod', state.currentPeriod),
-            state.onlineML ? db.saveStoreState('onlineML', state.onlineML) : Promise.resolve(),
-            db.saveStoreState('meta', {
-                totalPredictionsMade: state.totalPredictionsMade,
-                lastPredictionTime: state.lastPredictionTime,
-            }),
-        ]);
+        const ops = [];
+        for (const [key, slice] of Object.entries(state.assets)) {
+            ops.push(db.saveStoreState(`bayesianState-${key}`, slice.bayesianState));
+            ops.push(db.saveStoreState(`errorAnalysis-${key}`, slice.errorAnalysis));
+            ops.push(db.saveStoreState(`currentPeriod-${key}`, slice.currentPeriod));
+            if (slice.onlineML) ops.push(db.saveStoreState(`onlineML-${key}`, slice.onlineML));
+        }
+        ops.push(db.saveStoreState('meta', {
+            totalPredictionsMade: state.totalPredictionsMade,
+            lastPredictionTime: state.lastPredictionTime,
+        }));
+        await Promise.all(ops);
     } catch (e) {
         console.error('[store] Failed to save to DB:', e.message);
     }
 }
 
 function forceSave() {
-    if (saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-    }
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     _doSave();
-    // Also force DB save
-    if (dbSaveTimer) {
-        clearTimeout(dbSaveTimer);
-        dbSaveTimer = null;
-    }
+    if (dbSaveTimer) { clearTimeout(dbSaveTimer); dbSaveTimer = null; }
     _doSaveDB();
 }
 
+// ── Slice accessor ───────────────────────────────────────────────
+function slice(assetKey = 'btc') {
+    if (!state.assets) state.assets = {};
+    if (!state.assets[assetKey]) state.assets[assetKey] = createDefaultAssetState();
+    return state.assets[assetKey];
+}
+
+// ── Public API (assetKey-aware, defaults to 'btc') ───────────────
 function getState() { return state; }
+function getPredictionLog(assetKey)   { return slice(assetKey).predictionLog; }
+function getBayesianState(assetKey)   { return slice(assetKey).bayesianState; }
+function getCurrentPeriod(assetKey)   { return slice(assetKey).currentPeriod; }
+function getErrorAnalysis(assetKey)   { return slice(assetKey).errorAnalysis; }
 
-function getPredictionLog() { return state.predictionLog; }
-function getBayesianState() { return state.bayesianState; }
-function getCurrentPeriod() { return state.currentPeriod; }
-
-function updateCurrentPeriod(updates) {
-    Object.assign(state.currentPeriod, updates);
+function updateCurrentPeriod(updates, assetKey) {
+    Object.assign(slice(assetKey).currentPeriod, updates);
     save();
 }
 
-function recordPrediction(entry) {
-    // Don't duplicate
-    if (state.predictionLog.length &&
-        state.predictionLog[state.predictionLog.length - 1].periodKey === entry.periodKey) return;
-    state.predictionLog.push(entry);
+function recordPrediction(entry, assetKey) {
+    const log = slice(assetKey).predictionLog;
+    if (log.length && log[log.length - 1].periodKey === entry.periodKey) return;
+    log.push(entry);
     save();
-
-    // Also save to DB immediately
     const db = getDb();
     if (db) {
-        db.savePredictionLogEntry(entry).catch(e =>
-            console.error('[store] Failed to save prediction to DB:', e.message));
+        // Keep BTC entries flowing into the legacy single-asset table for
+        // backward compatibility with existing analysis tools; ETH entries
+        // live only in JSON + the per-asset key/value DB rows for now.
+        if ((assetKey || 'btc') === 'btc') {
+            db.savePredictionLogEntry(entry).catch(e =>
+                console.error('[store] Failed to save prediction to DB:', e.message));
+        }
     }
 }
 
-function updatePredictionLog(updater) {
-    updater(state.predictionLog);
+function updatePredictionLog(updater, assetKey) {
+    const log = slice(assetKey).predictionLog;
+    updater(log);
     save();
-
-    // Sync updated entries to DB (graded entries + direction flip updates)
     const db = getDb();
-    if (db) {
-        for (const entry of state.predictionLog) {
+    if (db && (assetKey || 'btc') === 'btc') {
+        for (const entry of log) {
             if (entry.actualPrice != null || entry._directionUpdated) {
                 db.savePredictionLogEntry(entry).catch(e =>
                     console.error('[store] Failed to update prediction in DB:', e.message));
@@ -325,18 +310,17 @@ function updatePredictionLog(updater) {
     }
 }
 
-function updateBayesianState(updater) {
-    updater(state.bayesianState);
+function updateBayesianState(updater, assetKey) {
+    updater(slice(assetKey).bayesianState);
     save();
 }
 
-function setNextPeriodPreview(preview) {
-    state.nextPeriodPreview = preview;
-    // No save needed for transient data
+function setNextPeriodPreview(preview, assetKey) {
+    slice(assetKey).nextPeriodPreview = preview;
 }
 
-function setSellSignal(signal) {
-    state.sellSignal = signal;
+function setSellSignal(signal, assetKey) {
+    slice(assetKey).sellSignal = signal;
 }
 
 function incrementPredictionCount() {
@@ -344,47 +328,37 @@ function incrementPredictionCount() {
     state.lastPredictionTime = Date.now();
 }
 
-function getErrorAnalysis() { return state.errorAnalysis; }
-
-function updateErrorAnalysis(updater) {
-    if (!state.errorAnalysis) {
-        state.errorAnalysis = createDefaultState().errorAnalysis;
-    }
-    updater(state.errorAnalysis);
-    // Keep records bounded
-    if (state.errorAnalysis.records.length > 500) {
-        state.errorAnalysis.records = state.errorAnalysis.records.slice(-500);
+function updateErrorAnalysis(updater, assetKey) {
+    const s = slice(assetKey);
+    if (!s.errorAnalysis) s.errorAnalysis = createDefaultAssetState().errorAnalysis;
+    updater(s.errorAnalysis);
+    if (s.errorAnalysis.records.length > 500) {
+        s.errorAnalysis.records = s.errorAnalysis.records.slice(-500);
     }
     save();
 }
 
-// Clear prediction log from both memory and DB
-function clearPredictionLog() {
-    // Full reset: replace entire state with defaults (not just predictionLog)
-    const defaults = createDefaultState();
-    state.predictionLog = [];
-    state.bayesianState = defaults.bayesianState;
-    state.currentPeriod = defaults.currentPeriod;
-    state.errorAnalysis = defaults.errorAnalysis;
-    state.onlineML = null;
-    state.totalPredictionsMade = 0;
-    state.lastPredictionTime = null;
-    state.nextPeriodPreview = null;
-    state.sellSignal = null;
-
-    // Delete JSON file so stale data doesn't reload on restart
+function clearPredictionLog(assetKey) {
+    if (assetKey) {
+        // Reset just the requested asset.
+        state.assets[assetKey] = createDefaultAssetState();
+    } else {
+        // Full reset — every asset slice plus server counters.
+        for (const key of Object.keys(state.assets)) {
+            state.assets[key] = createDefaultAssetState();
+        }
+        state.totalPredictionsMade = 0;
+        state.lastPredictionTime = null;
+    }
     try {
         if (fs.existsSync(STORE_FILE)) fs.unlinkSync(STORE_FILE);
         console.log('[store] Deleted prediction-state.json');
     } catch (e) {
         console.error('[store] Failed to delete store file:', e.message);
     }
-
-    // Save fresh state to both file and DB
     _doSave();
-
     const db = getDb();
-    if (db) {
+    if (db && (!assetKey || assetKey === 'btc')) {
         db.clearPredictionLog().catch(e =>
             console.error('[store] Failed to clear prediction log from DB:', e.message));
     }
@@ -397,5 +371,5 @@ module.exports = {
     updateBayesianState, setNextPeriodPreview, setSellSignal,
     incrementPredictionCount,
     getErrorAnalysis, updateErrorAnalysis,
-    clearPredictionLog
+    clearPredictionLog,
 };
