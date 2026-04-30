@@ -53,16 +53,23 @@ app.use(express.static(path.join(__dirname, 'public')));
 // DATA FETCHING — Server-side (no CORS issues!)
 // ═══════════════════════════════════════════════════════════════
 
-async function fetchJSON(url, timeout = 3000) {
+async function fetchJSON(url, timeout = 3000, debugLabel = null) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
         const res = await fetch(url, { signal: controller.signal });
         clearTimeout(timer);
-        if (!res.ok) return null;
+        if (!res.ok) {
+            if (debugLabel) console.warn(`[fetchJSON:${debugLabel}] HTTP ${res.status} ${res.statusText} ← ${url}`);
+            return null;
+        }
         return await res.json();
     } catch (e) {
         clearTimeout(timer);
+        if (debugLabel) {
+            const reason = e.name === 'AbortError' ? `timeout after ${timeout}ms` : e.message;
+            console.warn(`[fetchJSON:${debugLabel}] ${reason} ← ${url}`);
+        }
         return null;
     }
 }
@@ -141,7 +148,9 @@ const KALSHI_MARKET_API = 'https://api.elections.kalshi.com/trade-api/v2';
 async function fetchKalshiData() {
     try {
         let data = await fetchJSON(
-            KALSHI_MARKET_API + '/markets?series_ticker=KXBTC15M&status=open&limit=100'
+            KALSHI_MARKET_API + '/markets?series_ticker=KXBTC15M&status=open&limit=100',
+            8000,
+            'kalshi-public-open'
         );
         let markets = data ? (data.markets || []) : [];
 
@@ -152,13 +161,37 @@ async function fetchKalshiData() {
         // Fallback to unfiltered if needed
         if (markets.length === 0 || !hasFuture) {
             const allData = await fetchJSON(
-                KALSHI_MARKET_API + '/markets?series_ticker=KXBTC15M&limit=100'
+                KALSHI_MARKET_API + '/markets?series_ticker=KXBTC15M&limit=100',
+                8000,
+                'kalshi-public-all'
             );
             if (allData && allData.markets) {
                 const existingTickers = new Set(markets.map(m => m.ticker));
                 for (const m of allData.markets) {
                     if (!existingTickers.has(m.ticker)) markets.push(m);
                 }
+            }
+        }
+
+        // Authenticated fallback: when public API fails (rate limit / region block /
+        // intermittent outage), use the authenticated trade API with the same query.
+        // Only attempts this if we have credentials configured.
+        if (markets.length === 0) {
+            try {
+                const kalshiTrading = require('./kalshi-trading');
+                if (kalshiTrading.isConfigured && kalshiTrading.isConfigured()) {
+                    const authResp = await kalshiTrading.listMarkets({ series_ticker: 'KXBTC15M', status: 'open', limit: 100 });
+                    if (authResp && Array.isArray(authResp.markets) && authResp.markets.length > 0) {
+                        markets = authResp.markets;
+                        console.log(`[kalshi] Authenticated fallback returned ${markets.length} markets`);
+                    } else {
+                        console.warn('[kalshi] Authenticated listMarkets returned 0 markets');
+                    }
+                } else {
+                    console.warn('[kalshi] Public API empty and no auth credentials for fallback');
+                }
+            } catch (authErr) {
+                console.warn(`[kalshi] Authenticated fallback failed: ${authErr.message}`);
             }
         }
 
@@ -826,9 +859,17 @@ async function fetchAllData() {
                 }
             } else if (!state.kalshiStrike) {
                 state._strikeSource = 'failed';
-                // Log only occasionally to reduce spam
-                if (isNewPeriod) {
-                    console.log(`[strike] API failed to provide strike for ${currentPeriodKey}`);
+                // Surface enough context to diagnose: do we have a market at all?
+                // is it a parsing miss vs a network failure vs no listed market?
+                if (isNewPeriod || !state._lastStrikeFailLog || (Date.now() - state._lastStrikeFailLog) > 60000) {
+                    state._lastStrikeFailLog = Date.now();
+                    if (k.market) {
+                        console.warn(`[strike] FAILED to extract from market ${k.ticker} | yes_sub_title="${k.market.yes_sub_title || ''}" | title="${k.market.title || ''}" | subtitle="${k.market.subtitle || ''}"`);
+                    } else if (k.ticker) {
+                        console.warn(`[strike] Market metadata missing for ${k.ticker}`);
+                    } else {
+                        console.warn(`[strike] No future BTC15M market returned from Kalshi API for ${currentPeriodKey}`);
+                    }
                 }
             }
         }
