@@ -562,6 +562,7 @@ const ethState = {
 };
 
 const ethEngine = engine.createEngine('eth');
+const ethExecutor = tradeExecutor.createExecutor('eth');
 
 function getPeriodKey() {
     const now = new Date();
@@ -1431,8 +1432,17 @@ async function fetchAllData() {
 
             if (periodKey !== ethPeriod.periodKey) {
                 if (ethPeriod.periodKey !== null && ethState.currentPrice) {
-                    ethEngine.gradeBayesianPrediction(ethState.currentPrice, periodKey);
+                    const ethGraded = ethEngine.gradeBayesianPrediction(ethState.currentPrice, periodKey);
                     ethEngine.gradePreviousPrediction(ethState.currentPrice, periodKey);
+                    if (ethGraded && ethPeriod.periodKey) {
+                        await ethExecutor.onPeriodEnd({
+                            correct: ethGraded.correct,
+                            periodKey: ethPeriod.periodKey,
+                            actualDirection: ethGraded.actualDirection,
+                            strikePrice: ethPeriod.kalshiStrike,
+                            settlementPrice: ethState.currentPrice,
+                        }).catch(e => console.error('[eth-executor] onPeriodEnd:', e.message));
+                    }
                 }
                 if (ethState.kalshiStrike) {
                     const prediction = ethEngine.handleNewPeriod(periodKey, ethMarketData, minutesAhead, ethState.kalshiStrike, periodEnd);
@@ -1449,6 +1459,7 @@ async function fetchAllData() {
                     const bq = prediction._betQuality;
                     const qualStr = bq ? (bq.shouldBet ? 'BET' : 'SKIP') + ` (Q=${(bq.quality*100).toFixed(0)}% E=${(bq.edge*100).toFixed(1)}%)` : '';
                     console.log(`[eth] Prediction: ${prediction.predictedPrice >= ethState.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(prediction.probability*100).toFixed(1)}% | Conf=${(prediction.confidence*100).toFixed(0)}% | ${qualStr}`);
+                    ethExecutor.onNewPrediction(prediction, ethState.kalshiTicker, ethState.kalshiStrike, periodKey).catch(e => console.error('[eth-executor] entry:', e.message));
                 } else {
                     store.updateCurrentPeriod({
                         periodKey,
@@ -1482,6 +1493,20 @@ async function fetchAllData() {
                 if (minutesAhead <= 3) {
                     store.setNextPeriodPreview(ethEngine.computeNextPeriodPreview(ethMarketData), 'eth');
                 }
+                const ethStatus = ethExecutor.getStatus();
+                if (!ethStatus.currentPosition) {
+                    await ethExecutor.onNewPrediction(updated, ethState.kalshiTicker, ethState.kalshiStrike, periodKey)
+                        .catch(e => console.error('[eth-executor] same-period entry:', e.message));
+                } else {
+                    await ethExecutor.onSellSignal(sellSignal, minutesAhead, updated, ethState.kalshiStrike, ethState.currentPrice)
+                        .catch(e => console.error('[eth-executor] sell:', e.message));
+                    await ethExecutor.onDipOpportunity(updated, sellSignal, ethState.kalshiStrike, ethState.currentPrice, minutesAhead, ethState.kalshiTicker, periodKey)
+                        .catch(e => console.error('[eth-executor] dip:', e.message));
+                }
+                await ethExecutor.onLateLock(updated, ethState.kalshiStrike, ethState.currentPrice, minutesAhead, ethState.kalshiTicker, periodKey)
+                    .catch(e => console.error('[eth-executor] late-lock:', e.message));
+                await ethExecutor.onReentryCheck(updated, ethState.kalshiStrike, ethState.currentPrice, minutesAhead, ethState.kalshiTicker, periodKey)
+                    .catch(e => console.error('[eth-executor] reentry:', e.message));
             }
             ethState.lastUpdate = new Date().toISOString();
             ethState.error = null;
@@ -1546,6 +1571,7 @@ async function fetchAllData() {
                          || store.getCurrentPeriod('eth')?.originalPrediction?._betQuality
                          || null,
                 errorAnalysis: ethEngine.getErrorSummary(),
+                tradingStatus: ethExecutor.getStatus(),
                 lastUpdate: ethState.lastUpdate,
                 error: ethState.error,
             },
@@ -1648,6 +1674,7 @@ wss.on('connection', (ws, req) => {
                      || store.getCurrentPeriod('eth')?.originalPrediction?._betQuality
                      || null,
             errorAnalysis: ethEngine.getErrorSummary(),
+            tradingStatus: ethExecutor.getStatus(),
             lastUpdate: ethState.lastUpdate,
             error: ethState.error,
         },
