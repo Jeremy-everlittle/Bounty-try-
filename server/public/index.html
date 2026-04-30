@@ -748,12 +748,26 @@
         .env-header-badge { display: inline-block; font-size: 9px; font-weight: 800; letter-spacing: 1.2px; padding: 1px 6px; border-radius: 3px; margin-left: 8px; vertical-align: middle; }
         .env-header-demo { background: rgba(63,185,80,0.25); color: #3fb950; }
         .env-header-prod { background: rgba(248,81,73,0.25); color: #f85149; }
+        .asset-tabs { display:flex; gap:6px; margin:0 16px 12px; }
+        .asset-tab {
+            flex:1; padding:10px 12px; text-align:center; cursor:pointer;
+            background:#161b22; border:1px solid #30363d; border-radius:8px;
+            color:#8b949e; font-weight:600; font-size:14px; letter-spacing:0.5px;
+            transition: all 0.15s ease;
+        }
+        .asset-tab:hover { color:#c9d1d9; border-color:#484f58; }
+        .asset-tab.active { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+        .asset-tab .tab-price { display:block; font-size:11px; font-weight:400; opacity:0.85; margin-top:2px; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>BTC Predictor <span class="env-header-badge env-header-demo" id="env-header-badge">DEMO</span></h1>
-        <p><span class="live-dot"></span>Kalshi BTC Up or Down &middot; 15 min</p>
+        <h1 id="page-title">BTC Predictor <span class="env-header-badge env-header-demo" id="env-header-badge">DEMO</span></h1>
+        <p id="page-subtitle"><span class="live-dot"></span>Kalshi BTC Up or Down &middot; 15 min</p>
+    </div>
+    <div class="asset-tabs" role="tablist">
+        <div class="asset-tab active" id="tab-btc" data-asset="btc" role="tab" aria-selected="true">BTC<span class="tab-price" id="tab-btc-price">--</span></div>
+        <div class="asset-tab" id="tab-eth" data-asset="eth" role="tab" aria-selected="false">ETH<span class="tab-price" id="tab-eth-price">--</span></div>
     </div>
 
     <div class="card" id="current-card">
@@ -1109,9 +1123,78 @@
         // WEBSOCKET CONNECTION — Receives data from always-on server
         // ═══════════════════════════════════════════════════════════════
         let ws = null;
-        let serverData = null; // Latest data from server
+        let serverData = null; // Latest data from server (with tab view applied)
+        let latestRawData = null; // Raw message; re-apply when tab toggles
+        let currentTab = 'btc'; // 'btc' | 'eth'
         let wsConnected = false;
         let wsReconnectTimer = null;
+
+        // Remap root fields from msg.eth.* so the existing render code can run
+        // unchanged for either asset. BTC tab leaves msg as-is.
+        function applyTabView(msg) {
+            if (!msg) return msg;
+            if (currentTab !== 'eth' || !msg.eth) return msg;
+            const e = msg.eth;
+            return Object.assign({}, msg, {
+                brtiPrice: e.currentPrice,
+                brtiSources: null,
+                kalshiTicker: e.kalshiTicker,
+                kalshiStrike: e.kalshiStrike,
+                kalshiCloseTime: e.kalshiCloseTime,
+                kalshiOrderBook: null,
+                history: e.history,
+                prediction: e.prediction,
+                predictionLog: e.predictionLog,
+                sellSignal: e.sellSignal,
+                nextPeriodPreview: e.nextPeriodPreview,
+                betQuality: e.betQuality,
+                errorAnalysis: e.errorAnalysis,
+                tradingStatus: e.tradingStatus,
+            });
+        }
+
+        function updateTabPrices(msg) {
+            if (!msg) return;
+            const btcEl = document.getElementById('tab-btc-price');
+            const ethEl = document.getElementById('tab-eth-price');
+            // BTC price comes from raw root regardless of which tab is active
+            const rawBtc = (latestRawData && currentTab === 'eth') ? latestRawData.brtiPrice : msg.brtiPrice;
+            const ethPrice = (msg.eth && msg.eth.currentPrice) || (latestRawData && latestRawData.eth && latestRawData.eth.currentPrice);
+            if (btcEl) btcEl.textContent = rawBtc != null ? '$' + Number(rawBtc).toLocaleString(undefined, {maximumFractionDigits: 0}) : '--';
+            if (ethEl) ethEl.textContent = ethPrice != null ? '$' + Number(ethPrice).toLocaleString(undefined, {maximumFractionDigits: 0}) : '--';
+        }
+
+        function switchTab(asset) {
+            if (asset !== 'btc' && asset !== 'eth') return;
+            if (asset === currentTab) return;
+            currentTab = asset;
+            document.querySelectorAll('.asset-tab').forEach(el => {
+                const isActive = el.dataset.asset === asset;
+                el.classList.toggle('active', isActive);
+                el.setAttribute('aria-selected', isActive ? 'true' : 'false');
+            });
+            const title = document.getElementById('page-title');
+            const subtitle = document.getElementById('page-subtitle');
+            const badge = document.getElementById('env-header-badge');
+            if (title && badge) {
+                title.firstChild.nodeValue = asset === 'eth' ? 'ETH Predictor ' : 'BTC Predictor ';
+            }
+            if (subtitle) {
+                subtitle.innerHTML = '<span class="live-dot"></span>Kalshi ' + (asset === 'eth' ? 'ETH' : 'BTC') + ' Up or Down &middot; 15 min';
+            }
+            // Re-apply view from cached raw data so the UI updates immediately
+            if (latestRawData) {
+                serverData = applyTabView(latestRawData);
+                if (typeof fetchAndPredict === 'function') {
+                    try { fetchAndPredict(); } catch (e) { console.error('render on tab switch:', e); }
+                }
+            }
+        }
+        document.addEventListener('DOMContentLoaded', () => {
+            document.querySelectorAll('.asset-tab').forEach(el => {
+                el.addEventListener('click', () => switchTab(el.dataset.asset));
+            });
+        });
 
         // Heartbeat to detect stale connections
         let wsHeartbeatInterval;
@@ -1145,7 +1228,9 @@
                 try {
                     const msg = JSON.parse(event.data);
                     if (msg.type === 'data') {
-                        serverData = msg;
+                        latestRawData = msg;
+                        updateTabPrices(msg);
+                        serverData = applyTabView(msg);
                         // Inject server data into caches
                         if (msg.orderBook) {
                             orderBookCache = { timestamp: Date.now(), data: msg.orderBook };
