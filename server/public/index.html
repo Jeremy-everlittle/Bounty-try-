@@ -749,12 +749,8 @@
         .env-header-demo { background: rgba(63,185,80,0.25); color: #3fb950; }
         .env-header-prod { background: rgba(248,81,73,0.25); color: #f85149; }
         .asset-tabs {
-            display:flex; gap:6px; margin:0 16px 12px;
-            position: sticky; top: 0; z-index: 50;
-            padding: 8px 0;
-            background: rgba(13,17,23,0.92);
-            backdrop-filter: blur(8px);
-            -webkit-backdrop-filter: blur(8px);
+            display:flex; gap:6px;
+            margin: -4px -4px 12px;
         }
         .asset-tab {
             flex:1; padding:10px 12px; text-align:center; cursor:pointer;
@@ -772,12 +768,11 @@
         <h1 id="page-title">BTC Predictor <span class="env-header-badge env-header-demo" id="env-header-badge">DEMO</span></h1>
         <p id="page-subtitle"><span class="live-dot"></span>Kalshi BTC Up or Down &middot; 15 min</p>
     </div>
-    <div class="asset-tabs" role="tablist">
-        <div class="asset-tab active" id="tab-btc" data-asset="btc" role="tab" aria-selected="true">BTC<span class="tab-price" id="tab-btc-price">--</span></div>
-        <div class="asset-tab" id="tab-eth" data-asset="eth" role="tab" aria-selected="false">ETH<span class="tab-price" id="tab-eth-price">--</span></div>
-    </div>
-
     <div class="card" id="current-card">
+        <div class="asset-tabs" role="tablist">
+            <div class="asset-tab active" id="tab-btc" data-asset="btc" role="tab" aria-selected="true">BTC<span class="tab-price" id="tab-btc-price">--</span></div>
+            <div class="asset-tab" id="tab-eth" data-asset="eth" role="tab" aria-selected="false">ETH<span class="tab-price" id="tab-eth-price">--</span></div>
+        </div>
         <div style="display:flex;justify-content:space-between;align-items:flex-start;">
             <div>
                 <div class="card-label"><span class="live-dot"></span> Current Price</div>
