@@ -2364,43 +2364,80 @@ app.post('/api/trading/kill-switch', (req, res) => {
     res.json({ killSwitch: active, message: active ? 'Kill switch ACTIVATED — all trading halted' : 'Kill switch deactivated' });
 });
 
-app.post('/api/trading/force-bet', async (req, res) => {
-    const contracts = req.body?.contracts; // optional override
-    const currentPeriod = store.getCurrentPeriod();
-    const prediction = currentPeriod?.updatedPrediction || currentPeriod?.originalPrediction;
-    const ticker = state.kalshiTicker;
-    const strike = state.kalshiStrike;
-    const periodKey = state.periodKey;
+// Resolve the executor + market context for an asset key.
+function executorContext(asset) {
+    if (asset === 'eth') {
+        const period = store.getCurrentPeriod('eth');
+        return {
+            executor: ethExecutor,
+            prediction: period?.updatedPrediction || period?.originalPrediction,
+            ticker: ethState.kalshiTicker,
+            strike: ethState.kalshiStrike,
+            periodKey: period?.periodKey,
+        };
+    }
+    const period = store.getCurrentPeriod();
+    return {
+        executor: tradeExecutor,
+        prediction: period?.updatedPrediction || period?.originalPrediction,
+        ticker: state.kalshiTicker,
+        strike: state.kalshiStrike,
+        periodKey: state.periodKey,
+    };
+}
 
-    if (!prediction) return res.status(400).json({ error: 'No prediction available for current period' });
-    if (!ticker) return res.status(400).json({ error: 'No Kalshi ticker available' });
-    if (!strike) return res.status(400).json({ error: 'No strike price available' });
+app.post('/api/trading/force-bet', async (req, res) => {
+    const asset = req.body?.asset === 'eth' ? 'eth' : 'btc';
+    const contracts = req.body?.contracts; // optional override
+    const ctx = executorContext(asset);
+
+    if (!ctx.prediction) return res.status(400).json({ error: `No ${asset.toUpperCase()} prediction available for current period` });
+    if (!ctx.ticker) return res.status(400).json({ error: `No Kalshi ticker available for ${asset.toUpperCase()}` });
+    if (!ctx.strike) return res.status(400).json({ error: `No strike price available for ${asset.toUpperCase()}` });
 
     try {
-        const result = await tradeExecutor.forceBet(prediction, ticker, strike, periodKey, contracts || null);
-        res.json(result);
+        const result = await ctx.executor.forceBet(ctx.prediction, ctx.ticker, ctx.strike, ctx.periodKey, contracts || null);
+        res.json({ asset, ...result });
     } catch (err) {
         res.status(500).json({ ok: false, reason: err.message });
     }
 });
 
 app.post('/api/trading/press-bet', async (req, res) => {
+    const asset = req.body?.asset === 'eth' ? 'eth' : 'btc';
     const contracts = req.body?.contracts || null;
+    const ctx = executorContext(asset);
     try {
-        const result = await tradeExecutor.pressBet(contracts);
-        res.json(result);
+        const result = await ctx.executor.pressBet(contracts);
+        res.json({ asset, ...result });
     } catch (err) {
         res.status(500).json({ ok: false, reason: err.message });
     }
 });
 
 app.post('/api/trading/force-sell', async (req, res) => {
+    const asset = req.body?.asset === 'eth' ? 'eth' : 'btc';
+    const ctx = executorContext(asset);
     try {
-        const result = await tradeExecutor.forceSell();
-        res.json(result);
+        const result = await ctx.executor.forceSell();
+        res.json({ asset, ...result });
     } catch (err) {
         res.status(500).json({ ok: false, reason: err.message });
     }
+});
+
+// Force-sell every open position across all assets.
+app.post('/api/trading/force-sell-all', async (req, res) => {
+    const results = {};
+    for (const asset of ['btc', 'eth']) {
+        const { executor } = executorContext(asset);
+        try {
+            results[asset] = await executor.forceSell();
+        } catch (err) {
+            results[asset] = { ok: false, reason: err.message };
+        }
+    }
+    res.json({ ok: true, results });
 });
 
 app.post('/api/trading/config', (req, res) => {
@@ -2449,54 +2486,7 @@ app.post('/api/trading/environment', (req, res) => {
     }
 });
 
-// ── Force Bet / Press Bet / Force Sell ──
-app.post('/api/trading/force-bet', express.json(), async (req, res) => {
-    const contracts = req.body?.contracts;
-    const currentPeriod = store.getCurrentPeriod();
-    const prediction = currentPeriod?.updatedPrediction || currentPeriod?.originalPrediction;
-    const ticker = state.kalshiTicker;
-    const strike = state.kalshiStrike;
-    const periodKey = state.periodKey;
-
-    if (!prediction) return res.status(400).json({ error: 'No prediction available for current period' });
-    if (!ticker) return res.status(400).json({ error: 'No Kalshi ticker available' });
-    if (!strike) return res.status(400).json({ error: 'No strike price available' });
-
-    try {
-        const result = await tradeExecutor.forceBet(prediction, ticker, strike, periodKey, contracts || null);
-        res.json(result);
-    } catch (err) {
-        res.status(500).json({ ok: false, reason: err.message });
-    }
-});
-
-app.post('/api/trading/press-bet', express.json(), async (req, res) => {
-    const contracts = req.body?.contracts;
-    const currentPeriod = store.getCurrentPeriod();
-    const prediction = currentPeriod?.updatedPrediction || currentPeriod?.originalPrediction;
-    const ticker = state.kalshiTicker;
-    const strike = state.kalshiStrike;
-    const periodKey = state.periodKey;
-
-    if (!prediction) return res.status(400).json({ error: 'No prediction available' });
-    if (!ticker) return res.status(400).json({ error: 'No Kalshi ticker available' });
-
-    try {
-        const result = await tradeExecutor.pressBet(prediction, ticker, strike, periodKey, contracts || null);
-        res.json(result);
-    } catch (err) {
-        res.status(500).json({ ok: false, reason: err.message });
-    }
-});
-
-app.post('/api/trading/force-sell', express.json(), async (req, res) => {
-    try {
-        const result = await tradeExecutor.forceSell();
-        res.json(result);
-    } catch (err) {
-        res.status(500).json({ ok: false, reason: err.message });
-    }
-});
+// ── Force Bet / Press Bet / Force Sell — see tab-aware handlers above ──
 
 app.get('/api/trading/config', (req, res) => {
     res.json(tradeExecutor.config);

@@ -938,6 +938,7 @@
             <div style="border-top: 1px solid #30363d; margin: 8px 0;"></div>
             <div style="display:flex;gap:6px;">
                 <button class="trading-btn trading-btn-danger" id="force-sell-btn" onclick="forceSellPosition()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(248,81,73,0.15);border-color:rgba(248,81,73,0.4);color:#f85149;display:none;">FORCE SELL</button>
+                <button class="trading-btn trading-btn-danger" id="force-sell-all-btn" onclick="forceSellAll()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(248,81,73,0.25);border-color:rgba(248,81,73,0.6);color:#ff7b72;">SELL ALL</button>
             </div>
             <!-- Settings gear toggle -->
             <div style="margin-top:8px;">
@@ -2670,7 +2671,7 @@
                 const resp = await fetch('/api/trading/force-bet', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({})
+                    body: JSON.stringify({ asset: currentTab })
                 });
                 const result = await resp.json();
                 if (result.ok) {
@@ -2713,7 +2714,7 @@
                 const resp = await fetch('/api/trading/press-bet', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({})
+                    body: JSON.stringify({ asset: currentTab })
                 });
                 const result = await resp.json();
                 if (result.ok) {
@@ -2762,7 +2763,7 @@
                 const resp = await fetch('/api/trading/force-sell', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({})
+                    body: JSON.stringify({ asset: currentTab })
                 });
                 const result = await resp.json();
                 if (result.ok) {
@@ -2787,6 +2788,34 @@
             } catch (e) {
                 showToast(friendlyError(e.message), 'error');
                 btn.textContent = 'FORCE SELL';
+                btn.disabled = false;
+            }
+        }
+
+        async function forceSellAll() {
+            if (!confirm('FORCE SELL every open position across BTC and ETH?')) return;
+            const btn = document.getElementById('force-sell-all-btn');
+            const original = btn.textContent;
+            btn.textContent = 'SELLING ALL...';
+            btn.disabled = true;
+            try {
+                const resp = await fetch('/api/trading/force-sell-all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const result = await resp.json();
+                const summary = Object.entries(result.results || {}).map(([asset, r]) => {
+                    if (r.ok) return asset.toUpperCase() + ': sold';
+                    if ((r.reason || '').includes('no position')) return asset.toUpperCase() + ': no position';
+                    return asset.toUpperCase() + ': ' + (r.reason || 'failed');
+                }).join(' · ');
+                showToast(summary || 'Sell-all complete', 'success');
+                btn.textContent = 'DONE';
+                setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 3000);
+            } catch (e) {
+                showToast(friendlyError(e.message), 'error');
+                btn.textContent = original;
                 btn.disabled = false;
             }
         }
