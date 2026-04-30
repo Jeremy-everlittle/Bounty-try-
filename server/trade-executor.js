@@ -439,12 +439,14 @@ function setPaperMode(paperMode) {
 function setPaperBalance(env, cents) {
     if (env !== 'demo' && env !== 'production') env = activeEnv();
     paperBalances[env] = Math.max(0, Math.round(cents));
+    savePaperBalancesToDB();
     return paperBalances[env];
 }
 
 function addPaperBalance(env, cents) {
     if (env !== 'demo' && env !== 'production') env = activeEnv();
     paperBalances[env] = Math.max(0, Math.round((paperBalances[env] || 0) + cents));
+    savePaperBalancesToDB();
     return paperBalances[env];
 }
 
@@ -544,6 +546,61 @@ async function initFromDB() {
         const trades = await db.getRecentTrades(50);
         if (Array.isArray(trades) && trades.length) recentTrades = trades;
     } catch (e) { /* non-fatal */ }
+    // Restore user-tuned config + paper balances across restarts so settings
+    // edits survive Railway redeploys instead of reverting to in-code defaults.
+    try {
+        const saved = await db.loadStoreState('trading-config');
+        if (saved && typeof saved === 'object') {
+            for (const k of ['baseContracts', 'maxPositionContracts', 'convictionMaxContracts', 'maxDailyLossCents', 'maxDailyTrades']) {
+                if (typeof saved[k] === 'number' && saved[k] > 0) config[k] = saved[k];
+            }
+        }
+    } catch (e) { /* non-fatal */ }
+    try {
+        const savedBalances = await db.loadStoreState('paper-balances');
+        if (savedBalances && typeof savedBalances === 'object') {
+            for (const env of ['demo', 'production']) {
+                if (typeof savedBalances[env] === 'number' && savedBalances[env] >= 0) {
+                    paperBalances[env] = Math.round(savedBalances[env]);
+                }
+            }
+        }
+    } catch (e) { /* non-fatal */ }
+}
+
+// Persist user config to DB so /api/trading/config edits survive restarts.
+async function saveConfigToDB() {
+    try {
+        await db.saveStoreState('trading-config', {
+            baseContracts: config.baseContracts,
+            maxPositionContracts: config.maxPositionContracts,
+            convictionMaxContracts: config.convictionMaxContracts,
+            maxDailyLossCents: config.maxDailyLossCents,
+            maxDailyTrades: config.maxDailyTrades,
+        });
+    } catch (e) { /* non-fatal */ }
+}
+
+async function savePaperBalancesToDB() {
+    try { await db.saveStoreState('paper-balances', { ...paperBalances }); }
+    catch (e) { /* non-fatal */ }
+}
+
+// Public setter the server.js config endpoint should call so changes
+// are persisted, not just mutated in-memory.
+function applyConfig(updates) {
+    const allowed = ['baseContracts', 'maxPositionContracts', 'convictionMaxContracts', 'maxDailyLossCents', 'maxDailyTrades'];
+    const bounds = { baseContracts: 500, maxPositionContracts: 500, convictionMaxContracts: 500, maxDailyLossCents: 1000000, maxDailyTrades: 1000 };
+    const applied = {};
+    for (const key of allowed) {
+        if (updates[key] === undefined) continue;
+        const val = parseInt(updates[key], 10);
+        if (!Number.isFinite(val) || val <= 0 || val > (bounds[key] || 1000)) continue;
+        config[key] = val;
+        applied[key] = val;
+    }
+    saveConfigToDB();
+    return applied;
 }
 
 function resetState() {
@@ -576,5 +633,6 @@ module.exports = {
     pressBet,
     forceSell,
     snapshotBalanceToDB,
+    applyConfig,
     config,
 };

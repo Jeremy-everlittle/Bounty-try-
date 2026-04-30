@@ -2028,21 +2028,10 @@ app.post('/api/trading/config', (req, res) => {
     if (!updates || typeof updates !== 'object') {
         return res.status(400).json({ error: 'Invalid config' });
     }
+    const applied = tradeExecutor.applyConfig(updates);
     const cfg = tradeExecutor.config;
-    const allowed = ['baseContracts', 'maxPositionContracts', 'convictionMaxContracts', 'maxDailyLossCents', 'maxDailyTrades'];
-    const bounds = { baseContracts: 500, maxPositionContracts: 500, convictionMaxContracts: 500, maxDailyLossCents: 1000000, maxDailyTrades: 1000 };
-    const applied = {};
-    for (const key of allowed) {
-        if (updates[key] !== undefined) {
-            const val = parseInt(updates[key], 10);
-            if (!isNaN(val) && val > 0 && val <= (bounds[key] || 1000)) {
-                cfg[key] = val;
-                applied[key] = val;
-            }
-        }
-    }
     console.log('[server] Config updated:', applied);
-    res.json({ ok: true, config: { baseContracts: cfg.baseContracts, maxPositionContracts: cfg.maxPositionContracts, convictionMaxContracts: cfg.convictionMaxContracts, maxDailyLossCents: cfg.maxDailyLossCents, maxDailyTrades: cfg.maxDailyTrades } });
+    res.json({ ok: true, applied, config: { baseContracts: cfg.baseContracts, maxPositionContracts: cfg.maxPositionContracts, convictionMaxContracts: cfg.convictionMaxContracts, maxDailyLossCents: cfg.maxDailyLossCents, maxDailyTrades: cfg.maxDailyTrades } });
 });
 
 app.post('/api/trading/mode', (req, res) => {
@@ -2133,15 +2122,7 @@ app.get('/api/trading/config', (req, res) => {
     res.json(tradeExecutor.config);
 });
 
-app.post('/api/trading/config', express.json(), (req, res) => {
-    try {
-        const updates = req.body;
-        Object.assign(tradeExecutor.config, updates);
-        res.json({ ok: true, config: tradeExecutor.config });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
+// (Duplicate config POST handler removed — see /api/trading/config above)
 
 // ── Paper balance management ──
 app.get('/api/trading/paper-balance', (req, res) => {
