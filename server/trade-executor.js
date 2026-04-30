@@ -28,28 +28,30 @@ const config = {
     maxDailyTrades: 100,
 };
 
-// ── Runtime state ─────────────────────────────────────────────────
+// ── Shared state (one wallet / one switch across BTC/ETH/etc) ─────
 let killSwitch = false;
-let currentPosition = null;     // { ticker, side, action, contracts, entryPrice, orderId, periodKey, totalCostCents, totalContracts, entryTime, strike }
-let soldThisPeriod = false;
-let lastPeriodKey = null;
-let recentTrades = [];          // most-recent first, capped at 200
-let dailyStats = { date: null, tradeCount: 0, wins: 0, losses: 0, pnlCents: 0 };
-let thought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
 const tradeListeners = [];
-
+// Paper balances in CENTS — demo + production tracked separately
+const paperBalances = { demo: 250000, production: 250000 };
 // Live-balance cache: avoid hammering Kalshi on every getStatus() call
 const liveBalanceCache = { demo: null, production: null };
 const liveBalanceFetchedAt = { demo: 0, production: 0 };
 const LIVE_BALANCE_TTL_MS = 15_000;
 let liveBalanceInflight = { demo: null, production: null };
 
+// ── Per-asset executor factory ────────────────────────────────────
+function createExecutor(assetKey = 'btc') {
+const isBtc = assetKey === 'btc';
+let currentPosition = null;     // { ticker, side, action, contracts, entryPrice, orderId, periodKey, totalCostCents, totalContracts, entryTime, strike }
+let soldThisPeriod = false;
+let lastPeriodKey = null;
+let recentTrades = [];          // most-recent first, capped at 200
+let dailyStats = { date: null, tradeCount: 0, wins: 0, losses: 0, pnlCents: 0 };
+let thought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
+
 function setThought(status, message, detail) {
     thought = { status, message, timestamp: Date.now(), detail: detail || null };
 }
-
-// Paper balances in CENTS — demo + production tracked separately
-const paperBalances = { demo: 250000, production: 250000 };
 
 function activeEnv() { return kalshiAuth.getEnvironment ? kalshiAuth.getEnvironment() : 'demo'; }
 function paperBal() { return paperBalances[activeEnv()] ?? 250000; }
@@ -79,6 +81,7 @@ function pushTrade(trade) {
     // keep them in sync so a trade lands in its period and triggers a push.
     const enriched = {
         ...trade,
+        asset: assetKey,
         time: trade.time || nowIso,
         timestamp: trade.timestamp || nowIso,
     };
@@ -516,6 +519,7 @@ function getStatus() {
 
 // ── Persistence ───────────────────────────────────────────────────
 async function persistDailyStats() {
+    if (!isBtc) return; // schema currently BTC-only; multi-asset migration TODO
     try { await db.saveDailyStats(dailyStats); } catch (e) { /* non-fatal */ }
     try { await db.savePosition(currentPosition); } catch (e) { /* non-fatal */ }
 }
@@ -534,6 +538,7 @@ async function snapshotBalanceToDB() {
 }
 
 async function initFromDB() {
+    if (!isBtc) return; // schema currently BTC-only; ETH starts fresh
     try {
         const stats = await db.loadDailyStats(todayKey());
         if (stats) dailyStats = { ...dailyStats, ...stats, date: todayKey() };
@@ -612,7 +617,8 @@ function resetState() {
     setThought('idle', 'state reset');
 }
 
-module.exports = {
+return {
+    assetKey,
     initFromDB,
     onNewPrediction,
     onSellSignal,
@@ -636,3 +642,9 @@ module.exports = {
     applyConfig,
     config,
 };
+} // end createExecutor
+
+// Default export = BTC executor (preserves existing single-asset call sites)
+const _btc = createExecutor('btc');
+module.exports = _btc;
+module.exports.createExecutor = createExecutor;
