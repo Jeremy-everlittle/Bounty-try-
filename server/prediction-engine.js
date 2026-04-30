@@ -342,6 +342,7 @@ function createEngine(assetKey = 'btc') {
         store.recordPrediction({
             periodKey,
             time: new Date().toISOString(),
+            timestamp: Date.now(),
             startPrice: kalshiStrike,
             predictedPrice: prediction.predictedPrice,
             predictedHigh: prediction.predictedHigh,

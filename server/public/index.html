@@ -1596,9 +1596,14 @@
                 const p = period.prediction;
                 const periodTrades = period.trades;
 
-                // Determine period time display
+                // Determine period time display.
+                // `timestamp` is preferred (epoch ms); fall back to parsing
+                // the ISO `time` string for older entries that were recorded
+                // before the server started stamping `timestamp`.
                 let displayTime = '';
-                const ts = period.timestamp;
+                let ts = period.timestamp;
+                if (!ts && p && p.time) ts = Date.parse(p.time) || null;
+                if (!ts && periodTrades.length) ts = new Date(periodTrades[0].time).getTime();
                 if (ts) {
                     const d = new Date(ts);
                     const mins = d.getMinutes();
