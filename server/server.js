@@ -145,12 +145,12 @@ async function fetchBRTIApprox() {
 // Demo API (demo-api.kalshi.co) is ONLY used by kalshi-trading.js for bets & funds.
 const KALSHI_MARKET_API = 'https://api.elections.kalshi.com/trade-api/v2';
 
-async function fetchKalshiData() {
+async function fetchKalshiData(seriesTicker = 'KXBTC15M') {
     try {
         let data = await fetchJSON(
-            KALSHI_MARKET_API + '/markets?series_ticker=KXBTC15M&status=open&limit=100',
+            KALSHI_MARKET_API + `/markets?series_ticker=${seriesTicker}&status=open&limit=100`,
             8000,
-            'kalshi-public-open'
+            `kalshi-public-open-${seriesTicker}`
         );
         let markets = data ? (data.markets || []) : [];
 
@@ -161,9 +161,9 @@ async function fetchKalshiData() {
         // Fallback to unfiltered if needed
         if (markets.length === 0 || !hasFuture) {
             const allData = await fetchJSON(
-                KALSHI_MARKET_API + '/markets?series_ticker=KXBTC15M&limit=100',
+                KALSHI_MARKET_API + `/markets?series_ticker=${seriesTicker}&limit=100`,
                 8000,
-                'kalshi-public-all'
+                `kalshi-public-all-${seriesTicker}`
             );
             if (allData && allData.markets) {
                 const existingTickers = new Set(markets.map(m => m.ticker));
@@ -180,7 +180,7 @@ async function fetchKalshiData() {
             try {
                 const kalshiTrading = require('./kalshi-trading');
                 if (kalshiTrading.isConfigured && kalshiTrading.isConfigured()) {
-                    const authResp = await kalshiTrading.listMarkets({ series_ticker: 'KXBTC15M', status: 'open', limit: 100 });
+                    const authResp = await kalshiTrading.listMarkets({ series_ticker: seriesTicker, status: 'open', limit: 100 });
                     if (authResp && Array.isArray(authResp.markets) && authResp.markets.length > 0) {
                         markets = authResp.markets;
                         console.log(`[kalshi] Authenticated fallback returned ${markets.length} markets`);
@@ -280,7 +280,7 @@ function extractStrike(m) {
         const match = text.match(/(?:Target price|target|strike|cap|floor)\s*:?\s*\$?([\d,]+\.?\d*)/i);
         if (match) {
             const v = parseFloat(match[1].replace(/,/g, ''));
-            if (v > 10000 && v < 500000) {
+            if (v > 100 && v < 500000) {
                 console.log(`[strike] From ${field}: $${v}`);
                 return v;
             }
@@ -292,7 +292,7 @@ function extractStrike(m) {
         const match = m.title.match(/\$?([\d,]+\.?\d*)\s*target/i);
         if (match) {
             const v = parseFloat(match[1].replace(/,/g, ''));
-            if (v > 10000 && v < 500000) {
+            if (v > 100 && v < 500000) {
                 console.log(`[strike] From title: $${v}`);
                 return v;
             }
@@ -305,7 +305,7 @@ function extractStrike(m) {
         const match = m[field].match(/\$?([\d,]+\.?\d*)\s*(or above|or more|or higher)/i);
         if (match) {
             const v = parseFloat(match[1].replace(/,/g, ''));
-            if (v > 10000 && v < 500000) {
+            if (v > 100 && v < 500000) {
                 console.log(`[strike] From ${field} "or above": $${v}`);
                 return v;
             }
@@ -320,12 +320,12 @@ function extractStrike(m) {
             // Could be in cents (e.g. 6959612 = $69,596.12)
             if (raw > 5000000) {
                 const dollars = raw / 100;
-                if (dollars > 10000 && dollars < 500000) {
+                if (dollars > 100 && dollars < 500000) {
                     console.log(`[strike] From ${field} (cents): $${dollars}`);
                     return dollars;
                 }
             }
-            if (raw > 10000 && raw < 500000) {
+            if (raw > 100 && raw < 500000) {
                 console.log(`[strike] From ${field}: $${raw}`);
                 return raw;
             }
@@ -344,6 +344,20 @@ async function fetchEthPrice() {
         return (parseFloat(data.bidPrice) + parseFloat(data.askPrice)) / 2;
     }
     return null;
+}
+
+// ── ETH 1m Klines — used by the ETH prediction track ──
+async function fetchEthHistory() {
+    const data = await fetchJSON('https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=1m&limit=120');
+    if (!data) return [];
+    return data.map(k => ({
+        time: k[0],
+        open: parseFloat(k[1]),
+        high: parseFloat(k[2]),
+        low: parseFloat(k[3]),
+        price: parseFloat(k[4]),
+        volume: parseFloat(k[5])
+    }));
 }
 
 // ── BTC Futures Open Interest (volatility predictor) ──
@@ -527,6 +541,27 @@ const state = {
     periodKey: null,
     error: null
 };
+
+// ── ETH parallel market state ──
+// BTC state above is preserved for backwards-compat; ETH lives in a sibling
+// object so we don't disturb any existing references. The prediction engine
+// has its own per-asset slice via store.assets.eth.
+const ethState = {
+    currentPrice: null,
+    history: [],
+    kalshiTicker: null,
+    kalshiStrike: null,
+    _lastStrikePeriodKey: null,
+    _strikeSource: null,
+    kalshiCloseTime: null,
+    kalshiMarket: null,
+    kalshiOrderBook: null,
+    kalshiOrderBookError: null,
+    lastUpdate: null,
+    error: null,
+};
+
+const ethEngine = engine.createEngine('eth');
 
 function getPeriodKey() {
     const now = new Date();
@@ -813,10 +848,10 @@ async function capturePeriodicOrderbook(ticker, periodKey, minutesRemaining, btc
 async function fetchAllData() {
     console.log(`\n--- Fetch cycle @ ${new Date().toLocaleTimeString()} ---`);
     try {
-        // Parallel fetch all data sources
-        const [brti, kalshi, orderBook, trades, fundingRate, history, ethPrice, openInterest, liquidations, fearGreed, longShort] = await Promise.allSettled([
+        // Parallel fetch all data sources (BTC + ETH market data fetched together)
+        const [brti, kalshi, orderBook, trades, fundingRate, history, ethPrice, openInterest, liquidations, fearGreed, longShort, ethKalshi, ethHistory] = await Promise.allSettled([
             fetchBRTIApprox(),
-            fetchKalshiData(),
+            fetchKalshiData('KXBTC15M'),
             fetchOrderBook(),
             fetchRecentTrades(),
             fetchFundingRate(),
@@ -825,7 +860,9 @@ async function fetchAllData() {
             fetchOpenInterest(),
             fetchLiquidations(),
             fetchFearGreed(),
-            fetchLongShortRatio()
+            fetchLongShortRatio(),
+            fetchKalshiData('KXETH15M'),
+            fetchEthHistory(),
         ]);
         // Macro event context (no API call needed — calendar-based)
         state.macroEvent = getMacroEventContext();
@@ -1348,6 +1385,111 @@ async function fetchAllData() {
             console.error('Prediction engine error:', predErr.message);
         }
 
+        // ═══════════════════════════════════════════════════════
+        // ETH PREDICTION TRACK (parallel to BTC)
+        // ───────────────────────────────────────────────────────
+        // ETH runs predict-only for now: same engine math, separate
+        // store slice. Trade execution stays BTC-only until the
+        // trade-executor supports concurrent positions per asset.
+        // ═══════════════════════════════════════════════════════
+        if (ethPrice.status === 'fulfilled' && ethPrice.value) ethState.currentPrice = ethPrice.value;
+        if (ethHistory.status === 'fulfilled' && ethHistory.value) ethState.history = ethHistory.value;
+        if (ethKalshi.status === 'fulfilled' && ethKalshi.value) {
+            const k = ethKalshi.value;
+            ethState.kalshiCloseTime = k.closeTime;
+            ethState.kalshiTicker = k.ticker;
+            ethState.kalshiMarket = k.market;
+
+            const periodKey = getPeriodKey();
+            const isNewEthPeriod = periodKey !== ethState._lastStrikePeriodKey;
+            if (isNewEthPeriod) {
+                ethState.kalshiStrike = null;
+                ethState._strikeSource = null;
+                ethState._lastStrikePeriodKey = periodKey;
+            }
+            if (k.strike) {
+                ethState.kalshiStrike = k.strike;
+                ethState._strikeSource = 'api';
+            } else if (!ethState.kalshiStrike) {
+                ethState._strikeSource = isStrikePending(k.market) ? 'pending' : 'failed';
+            }
+        }
+        try {
+            const ethPeriod = store.getCurrentPeriod('eth');
+            const periodEnd = getPeriodEndTime();
+            const periodKey = getPeriodKey();
+            const minutesAhead = Math.max(1, getSecondsUntilTarget(periodEnd) / 60);
+
+            const ethMarketData = {
+                currentPrice: ethState.currentPrice,
+                history: ethState.history,
+                kalshiOrderBook: ethState.kalshiOrderBook,
+                fundingRate: state.fundingRate,
+                fearGreed: state.fearGreed,
+                macroEvent: state.macroEvent,
+            };
+
+            if (periodKey !== ethPeriod.periodKey) {
+                if (ethPeriod.periodKey !== null && ethState.currentPrice) {
+                    ethEngine.gradeBayesianPrediction(ethState.currentPrice, periodKey);
+                    ethEngine.gradePreviousPrediction(ethState.currentPrice, periodKey);
+                }
+                if (ethState.kalshiStrike) {
+                    const prediction = ethEngine.handleNewPeriod(periodKey, ethMarketData, minutesAhead, ethState.kalshiStrike, periodEnd);
+                    store.updateCurrentPeriod({
+                        periodKey,
+                        periodStartPrice: ethState.kalshiStrike,
+                        originalPrediction: prediction,
+                        updatedPrediction: null,
+                        kalshiTicker: ethState.kalshiTicker,
+                        kalshiCloseTime: ethState.kalshiCloseTime,
+                        kalshiStrike: ethState.kalshiStrike,
+                        isTransitioning: false,
+                    }, 'eth');
+                    const bq = prediction._betQuality;
+                    const qualStr = bq ? (bq.shouldBet ? 'BET' : 'SKIP') + ` (Q=${(bq.quality*100).toFixed(0)}% E=${(bq.edge*100).toFixed(1)}%)` : '';
+                    console.log(`[eth] Prediction: ${prediction.predictedPrice >= ethState.kalshiStrike ? 'UP' : 'DOWN'} | P(up)=${(prediction.probability*100).toFixed(1)}% | Conf=${(prediction.confidence*100).toFixed(0)}% | ${qualStr}`);
+                } else {
+                    store.updateCurrentPeriod({
+                        periodKey,
+                        isTransitioning: true,
+                        originalPrediction: null,
+                        updatedPrediction: null,
+                        periodStartPrice: null,
+                        kalshiStrike: null,
+                    }, 'eth');
+                }
+            } else if (!ethPeriod.originalPrediction && ethState.kalshiStrike && ethPeriod.isTransitioning) {
+                const prediction = ethEngine.handleNewPeriod(periodKey, ethMarketData, minutesAhead, ethState.kalshiStrike, periodEnd);
+                store.updateCurrentPeriod({
+                    periodStartPrice: ethState.kalshiStrike,
+                    originalPrediction: prediction,
+                    updatedPrediction: null,
+                    kalshiTicker: ethState.kalshiTicker,
+                    kalshiCloseTime: ethState.kalshiCloseTime,
+                    kalshiStrike: ethState.kalshiStrike,
+                    isTransitioning: false,
+                }, 'eth');
+            } else if (ethPeriod.originalPrediction && ethState.kalshiStrike) {
+                const updated = ethEngine.handleSamePeriod(ethMarketData, minutesAhead, ethState.kalshiStrike, periodKey);
+                updated._betQuality = ethEngine.assessBetQuality(updated, ethState.kalshiStrike, ethMarketData, minutesAhead);
+                store.updateCurrentPeriod({ updatedPrediction: updated }, 'eth');
+                const sellSignal = ethEngine.assessSellSignal(
+                    ethPeriod.originalPrediction, updated,
+                    ethState.kalshiStrike, ethState.currentPrice, minutesAhead
+                );
+                store.setSellSignal(sellSignal, 'eth');
+                if (minutesAhead <= 3) {
+                    store.setNextPeriodPreview(ethEngine.computeNextPeriodPreview(ethMarketData), 'eth');
+                }
+            }
+            ethState.lastUpdate = new Date().toISOString();
+            ethState.error = null;
+        } catch (ethErr) {
+            console.error('[eth] Prediction error:', ethErr.message);
+            ethState.error = ethErr.message;
+        }
+
         // Broadcast to all connected clients
         broadcast({
             type: 'data',
@@ -1388,9 +1530,28 @@ async function fetchAllData() {
             kalshiEnvironment: kalshiAuth.getEnvironment(),
             kalshiOrderBook: state.kalshiOrderBook || null,
             kalshiOrderBookError: state.kalshiOrderBookError || null,
+            // ── ETH parallel market (predict-only) ──
+            eth: {
+                currentPrice: ethState.currentPrice,
+                kalshiTicker: ethState.kalshiTicker,
+                kalshiStrike: ethState.kalshiStrike,
+                strikeSource: ethState._strikeSource,
+                kalshiCloseTime: ethState.kalshiCloseTime,
+                history: ethState.history,
+                prediction: store.getCurrentPeriod('eth'),
+                predictionLog: store.getPredictionLog('eth'),
+                sellSignal: (store.getState().assets?.eth?.sellSignal) || null,
+                nextPeriodPreview: (store.getState().assets?.eth?.nextPeriodPreview) || null,
+                betQuality: store.getCurrentPeriod('eth')?.updatedPrediction?._betQuality
+                         || store.getCurrentPeriod('eth')?.originalPrediction?._betQuality
+                         || null,
+                errorAnalysis: ethEngine.getErrorSummary(),
+                lastUpdate: ethState.lastUpdate,
+                error: ethState.error,
+            },
         });
 
-        console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | Env=${kalshiAuth.getEnvironment()} | ${wss.clients.size} clients`);
+        console.log(`Broadcast: BRTI=$${state.brtiPrice?.toFixed(2)} | Kalshi=${state.kalshiTicker || 'none'} | Strike=$${state.kalshiStrike || 'none'} | ETH=$${ethState.currentPrice?.toFixed(2) || '—'} | EthKalshi=${ethState.kalshiTicker || 'none'} | EthStrike=$${ethState.kalshiStrike || 'none'} | Env=${kalshiAuth.getEnvironment()} | ${wss.clients.size} clients`);
 
     } catch (e) {
         console.error('Fetch cycle error:', e);
@@ -1471,7 +1632,25 @@ wss.on('connection', (ws, req) => {
         errorAnalysis: engine.getErrorSummary(),
         learnedCorrections: engine.getLearnedCorrections(),
         tradingStatus: tradeExecutor.getStatus(),
-        kalshiEnvironment: kalshiAuth.getEnvironment()
+        kalshiEnvironment: kalshiAuth.getEnvironment(),
+        eth: {
+            currentPrice: ethState.currentPrice,
+            kalshiTicker: ethState.kalshiTicker,
+            kalshiStrike: ethState.kalshiStrike,
+            strikeSource: ethState._strikeSource,
+            kalshiCloseTime: ethState.kalshiCloseTime,
+            history: ethState.history,
+            prediction: store.getCurrentPeriod('eth'),
+            predictionLog: store.getPredictionLog('eth'),
+            sellSignal: (store.getState().assets?.eth?.sellSignal) || null,
+            nextPeriodPreview: (store.getState().assets?.eth?.nextPeriodPreview) || null,
+            betQuality: store.getCurrentPeriod('eth')?.updatedPrediction?._betQuality
+                     || store.getCurrentPeriod('eth')?.originalPrediction?._betQuality
+                     || null,
+            errorAnalysis: ethEngine.getErrorSummary(),
+            lastUpdate: ethState.lastUpdate,
+            error: ethState.error,
+        },
     }));
 
     ws.on('message', (raw) => {
@@ -1578,6 +1757,25 @@ app.get('/api/state', (req, res) => {
         totalPredictions: store.getState().totalPredictionsMade,
         errorAnalysis: engine.getErrorSummary(),
         learnedCorrections: engine.getLearnedCorrections()
+    });
+});
+
+app.get('/api/state/eth', (req, res) => {
+    res.json({
+        currentPrice: ethState.currentPrice,
+        kalshiTicker: ethState.kalshiTicker,
+        kalshiStrike: ethState.kalshiStrike,
+        strikeSource: ethState._strikeSource,
+        kalshiCloseTime: ethState.kalshiCloseTime,
+        kalshiMarket: ethState.kalshiMarket,
+        history: ethState.history,
+        prediction: store.getCurrentPeriod('eth'),
+        predictionLog: store.getPredictionLog('eth'),
+        sellSignal: (store.getState().assets?.eth?.sellSignal) || null,
+        nextPeriodPreview: (store.getState().assets?.eth?.nextPeriodPreview) || null,
+        errorAnalysis: ethEngine.getErrorSummary(),
+        lastUpdate: ethState.lastUpdate,
+        error: ethState.error,
     });
 });
 
