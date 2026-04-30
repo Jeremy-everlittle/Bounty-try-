@@ -1415,6 +1415,46 @@ async function fetchAllData() {
                 ethState._strikeSource = isStrikePending(k.market) ? 'pending' : 'failed';
             }
         }
+
+        // ── Fetch Kalshi orderbook for ETH (mirrors BTC: auth → public fallback) ──
+        ethState.kalshiOrderBook = null;
+        ethState.kalshiOrderBookError = null;
+        if (ethState.kalshiTicker) {
+            try {
+                const kalshiTrading = require('./kalshi-trading');
+                ethState.kalshiOrderBook = await kalshiTrading.getOrderbook(ethState.kalshiTicker);
+            } catch (e) {
+                const errMsg = `${e.message}${e.status ? ' (HTTP ' + e.status + ')' : ''}`;
+                console.log(`[kalshi-ob-eth] Auth API failed (${kalshiAuth.getEnvironment()}): ${errMsg}`);
+                ethState.kalshiOrderBookError = errMsg;
+            }
+            if (!ethState.kalshiOrderBook) {
+                try {
+                    const publicUrl = `${KALSHI_MARKET_API}/markets/${ethState.kalshiTicker}/orderbook`;
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), 5000);
+                    const res = await fetch(publicUrl, { signal: controller.signal });
+                    clearTimeout(timer);
+                    if (res.ok) {
+                        ethState.kalshiOrderBook = await res.json();
+                        ethState.kalshiOrderBookError = null;
+                        console.log(`[kalshi-ob-eth] Public API fallback OK for ${ethState.kalshiTicker}`);
+                    }
+                } catch (e2) {
+                    console.log(`[kalshi-ob-eth] Public API fallback also failed: ${e2.message}`);
+                    ethState.kalshiOrderBookError = (ethState.kalshiOrderBookError || '') + '; public API also failed: ' + e2.message;
+                }
+            }
+            if (ethState.kalshiOrderBook) {
+                const ob = ethState.kalshiOrderBook?.orderbook_fp || ethState.kalshiOrderBook?.orderbook || ethState.kalshiOrderBook;
+                const yesBids = ob?.yes_dollars || ob?.yes || [];
+                const noBids = ob?.no_dollars || ob?.no || [];
+                console.log(`[kalshi-ob-eth] ${ethState.kalshiTicker}: yes=${yesBids.length} no=${noBids.length}`);
+            }
+        } else {
+            ethState.kalshiOrderBookError = 'No active ETH Kalshi ticker';
+        }
+
         try {
             const ethPeriod = store.getCurrentPeriod('eth');
             const periodEnd = getPeriodEndTime();
@@ -1563,6 +1603,8 @@ async function fetchAllData() {
                 strikeSource: ethState._strikeSource,
                 kalshiCloseTime: ethState.kalshiCloseTime,
                 history: ethState.history,
+                kalshiOrderBook: ethState.kalshiOrderBook,
+                kalshiOrderBookError: ethState.kalshiOrderBookError,
                 prediction: store.getCurrentPeriod('eth'),
                 predictionLog: store.getPredictionLog('eth'),
                 sellSignal: (store.getState().assets?.eth?.sellSignal) || null,
