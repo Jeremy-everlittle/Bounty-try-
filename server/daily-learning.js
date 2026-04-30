@@ -50,7 +50,6 @@ class DailyLearning {
         hours: Object.keys(results.hourlyStats || {}).length,
         signals: (results.signalRanking || []).length,
         regimes: Object.keys(results.regimePerformance || {}).length,
-        corrections: Object.keys(results.corrections?.hourFilter || {}).length + ' hour filters',
         confidenceMultiplier: results.corrections?.confidenceMultiplier,
       }));
     } catch (e) {
@@ -409,8 +408,6 @@ class DailyLearning {
   // ── 7. Generate corrections from analysis results ──────────
   generateCorrections(results) {
     const corrections = {
-      // Hour filter updates (replace hardcoded HOUR_PERFORMANCE)
-      hourFilter: {},
       // Signal weight adjustments
       signalWeights: {},
       // Regime-specific adjustments
@@ -422,17 +419,6 @@ class DailyLearning {
       // Direction bias
       directionBias: 0,
     };
-
-    // ── Hour filter from actual data ──
-    if (results.hourlyStats) {
-      for (const [hour, stats] of Object.entries(results.hourlyStats)) {
-        if (stats.total >= 5) {
-          if (stats.winRate < 0.35) corrections.hourFilter[hour] = 'blocked';
-          else if (stats.winRate > 0.60) corrections.hourFilter[hour] = 'boosted';
-          else corrections.hourFilter[hour] = 'allowed';
-        }
-      }
-    }
 
     // ── Signal weight adjustments ──
     if (results.signalRanking && results.signalRanking.length > 0) {
@@ -519,11 +505,6 @@ class DailyLearning {
     return this.analysisResults?.corrections || null;
   }
 
-  /** Get hour filter for use by trade executor */
-  getHourFilter() {
-    return this.analysisResults?.corrections?.hourFilter || null;
-  }
-
   /** Get signal weight adjustments */
   getSignalWeights() {
     return this.analysisResults?.corrections?.signalWeights || null;
@@ -576,7 +557,6 @@ class DailyLearning {
     const r = this.analysisResults;
     return {
       lastRun: this.lastRunDate,
-      hourFilter: r.corrections.hourFilter,
       topSignals: (r.signalRanking || []).slice(0, 5),
       worstHours: Object.entries(r.hourlyStats || {})
         .filter(([_, s]) => s.winRate < 0.4 && s.total >= 5)

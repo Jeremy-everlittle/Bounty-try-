@@ -520,7 +520,6 @@ function getStatus() {
         config: { ...config },
         recentTrades: recentTrades.slice(0, 50),
         thought,
-        hourFilter: { allowed: true },
     };
 }
 

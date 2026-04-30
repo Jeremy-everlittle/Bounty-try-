@@ -700,14 +700,6 @@
         .trading-not-configured { font-size: 11px; color: #8b949e; text-align: center; padding: 10px; }
 
         /* ── Trading Hours Filter ── */
-        .hours-filter { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
-        .hours-filter-row { display: flex; align-items: center; justify-content: space-between; }
-        .hours-filter-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: #8b949e; font-weight: 600; }
-        .hours-filter-status { font-size: 11px; font-weight: 800; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 4px; }
-        .hours-status-blocked { background: rgba(248,81,73,0.2); color: #f85149; border: 1px solid rgba(248,81,73,0.35); }
-        .hours-status-allowed { background: rgba(139,148,158,0.15); color: #b0b8c1; border: 1px solid rgba(139,148,158,0.25); }
-        .hours-status-boosted { background: rgba(63,185,80,0.2); color: #3fb950; border: 1px solid rgba(63,185,80,0.35); }
-        .hours-filter-next { font-size: 10px; color: #8b949e; margin-top: 4px; }
 
         /* ── Edge Quality Bar ── */
         .edge-quality-bar { margin-top: 10px; padding: 10px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); }
@@ -910,14 +902,8 @@
                     <div class="trading-stat-value" id="trading-wl">0/0</div>
                 </div>
             </div>
-            <!-- Trading Hours Filter -->
-            <div class="hours-filter" id="hours-filter">
-                <div class="hours-filter-row">
-                    <span class="hours-filter-label">Hour Filter</span>
-                    <span class="hours-filter-status" id="hours-filter-status">--</span>
-                </div>
-                <div class="hours-filter-next" id="hours-filter-next"></div>
-            </div>
+            <!-- Trading Hours Filter removed: was a hardcoded cosmetic table that never gated entries -->
+
             <!-- Paper balance controls (shown only in paper mode) -->
             <div id="paper-balance-controls" style="display:none;margin:6px 0;padding:8px;background:rgba(210,153,34,0.08);border:1px solid rgba(210,153,34,0.25);border-radius:8px;">
                 <div style="display:flex;gap:6px;align-items:center;">
@@ -2333,76 +2319,6 @@
             }
         }
 
-        // ── Trading Hours Filter Rendering ──
-        const HOUR_PERFORMANCE_CLIENT = {
-            13: { allowed: true, boost: true },
-            14: { allowed: false, minConviction: 'LOCK' },
-            15: { allowed: true },
-            16: { allowed: true },
-            17: { allowed: false, minConviction: 'LOCK' },
-            18: { allowed: true },
-            19: { allowed: true, boost: true },
-            20: { allowed: true, boost: true },
-            21: { allowed: true, boost: true },
-        };
-
-        function renderHoursFilter() {
-            const el = document.getElementById('hours-filter-status');
-            const nextEl = document.getElementById('hours-filter-next');
-            if (!el) return;
-
-            const currentHour = new Date().getHours();
-            const perf = HOUR_PERFORMANCE_CLIENT[currentHour];
-
-            let statusText, statusClass;
-            if (!perf) {
-                // Hours not in the map are allowed by default (no special filter)
-                statusText = 'ALLOWED';
-                statusClass = 'hours-status-allowed';
-            } else if (!perf.allowed) {
-                statusText = 'BLOCKED';
-                statusClass = 'hours-status-blocked';
-            } else if (perf.boost) {
-                statusText = 'BOOSTED';
-                statusClass = 'hours-status-boosted';
-            } else {
-                statusText = 'ALLOWED';
-                statusClass = 'hours-status-allowed';
-            }
-            el.textContent = currentHour + ':00 — ' + statusText;
-            el.className = 'hours-filter-status ' + statusClass;
-
-            // Find next allowed/boosted hour
-            if (perf && !perf.allowed) {
-                let nextHour = currentHour + 1;
-                let found = false;
-                for (let i = 0; i < 24; i++) {
-                    const h = (currentHour + 1 + i) % 24;
-                    const hp = HOUR_PERFORMANCE_CLIENT[h];
-                    if (!hp || hp.allowed) {
-                        nextHour = h;
-                        found = true;
-                        break;
-                    }
-                }
-                nextEl.textContent = found ? 'Next allowed: ' + nextHour + ':00' + (HOUR_PERFORMANCE_CLIENT[nextHour] && HOUR_PERFORMANCE_CLIENT[nextHour].boost ? ' (boosted)' : '') : '';
-                nextEl.style.display = '';
-            } else {
-                // Find next boosted hour
-                let nextBoosted = null;
-                for (let i = 1; i <= 24; i++) {
-                    const h = (currentHour + i) % 24;
-                    const hp = HOUR_PERFORMANCE_CLIENT[h];
-                    if (hp && hp.boost) {
-                        nextBoosted = h;
-                        break;
-                    }
-                }
-                nextEl.textContent = nextBoosted !== null ? 'Next boosted: ' + nextBoosted + ':00' : '';
-                nextEl.style.display = nextBoosted !== null ? '' : 'none';
-            }
-        }
-
         // ── Edge Quality Bar Rendering ──
         function renderEdgeQualityBar() {
             const bar = document.getElementById('edge-quality-bar');
@@ -3306,7 +3222,6 @@
 
             // Auto-trading panel
             renderTradingPanel();
-            renderHoursFilter();
             renderEdgeQualityBar();
             renderModelHealth();
             renderKalshiOrderbook();
