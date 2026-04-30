@@ -2244,28 +2244,43 @@
                     '</div>';
             }
 
-            // Current position
+            // Current position(s) \u2014 render both BTC and ETH so the user
+            // doesn't have to switch tabs to see what's open elsewhere.
             const posArea = document.getElementById('trading-position-area');
-            if (ts.currentPosition) {
-                const p = ts.currentPosition;
+            const btcPos = latestRawData?.tradingStatus?.currentPosition || null;
+            const ethPos = latestRawData?.eth?.tradingStatus?.currentPosition || null;
+            const renderPositionCard = (asset, p) => {
+                if (!p) return '';
                 const costCents = p.totalCostCents || (p.contracts * p.entryPrice);
                 const maxPayoutCents = (p.totalContracts || p.contracts) * 100;
                 const maxProfitCents = maxPayoutCents - costCents;
-                const holdMin = Math.floor(p.holdingSeconds / 60);
-                const holdSec = p.holdingSeconds % 60;
+                const holdMin = Math.floor((p.holdingSeconds || 0) / 60);
+                const holdSec = (p.holdingSeconds || 0) % 60;
                 const holdStr = holdMin > 0 ? holdMin + 'm ' + holdSec + 's' : holdSec + 's';
-                posArea.innerHTML = '<div class="trading-position">' +
-                    '<div class="trading-position-label">OPEN POSITION</div>' +
+                const isEth = asset === 'eth';
+                const badgeStyle = isEth
+                    ? 'background:rgba(99,102,241,0.18);color:#a5b4fc;border:1px solid rgba(99,102,241,0.3);'
+                    : 'background:rgba(247,147,26,0.18);color:#f7931a;border:1px solid rgba(247,147,26,0.3);';
+                const isActive = currentTab === asset;
+                return '<div class="trading-position" style="' + (isActive ? '' : 'opacity:0.85;') + 'margin-bottom:6px">' +
+                    '<div class="trading-position-label" style="display:flex;align-items:center;gap:6px">' +
+                    '<span style="font-size:10px;font-weight:700;letter-spacing:0.5px;padding:2px 6px;border-radius:4px;' + badgeStyle + '">' + asset.toUpperCase() + '</span>' +
+                    'OPEN POSITION' +
+                    (isActive ? '' : ' <span style="font-size:9px;color:#8b949e">(switch tab to manage)</span>') +
+                    '</div>' +
                     '<div class="trading-position-detail">' +
                     (p.totalContracts || p.contracts) + 'x ' + p.side.toUpperCase() + ' @ ' + p.entryPrice + '\u00A2' +
                     ' &middot; ' + holdStr +
                     '</div>' +
-                    '<div style="display:flex;gap:12px;margin-top:4px">' +
+                    '<div style="display:flex;gap:12px;margin-top:4px;flex-wrap:wrap">' +
                     '<div style="font-size:10px;color:#8b949e">Cost: <span style="color:#e6edf3;font-weight:700">$' + (costCents / 100).toFixed(2) + '</span></div>' +
                     '<div style="font-size:10px;color:#8b949e">Max Payout: <span style="color:#3fb950;font-weight:700">$' + (maxPayoutCents / 100).toFixed(2) + '</span></div>' +
                     '<div style="font-size:10px;color:#8b949e">Max Profit: <span style="color:#56d364;font-weight:700">+$' + (maxProfitCents / 100).toFixed(2) + '</span></div>' +
                     '</div>' +
                     '</div>';
+            };
+            if (btcPos || ethPos) {
+                posArea.innerHTML = renderPositionCard('btc', btcPos) + renderPositionCard('eth', ethPos);
             } else {
                 posArea.innerHTML = '';
             }
