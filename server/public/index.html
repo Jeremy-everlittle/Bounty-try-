@@ -1146,7 +1146,7 @@
                 kalshiOrderBookError: e.kalshiOrderBookError || null,
                 history: e.history,
                 prediction: e.prediction,
-                predictionLog: e.predictionLog,
+                // predictionLog: kept from root (server already merged BTC+ETH)
                 sellSignal: e.sellSignal,
                 nextPeriodPreview: e.nextPeriodPreview,
                 betQuality: e.betQuality,
@@ -1296,16 +1296,17 @@
             localStorage.setItem('btcPredLog', JSON.stringify(predictionLog));
         }
 
-        // Merge server log into local log, dedup by periodKey, keep all entries
+        // Merge server log into local log. Compound key by `asset:periodKey`
+        // so BTC and ETH entries for the same 15m period don't overwrite each
+        // other. Legacy entries without an asset tag default to btc.
         function mergePredictionLogs(serverLog) {
             const byKey = new Map();
-            // Local entries first
+            const keyOf = (p) => (p.asset || 'btc') + ':' + (p.periodKey || '');
             for (const p of predictionLog) {
-                if (p.periodKey) byKey.set(p.periodKey, p);
+                if (p.periodKey) byKey.set(keyOf(p), p);
             }
-            // Server entries overwrite (they have grading from server)
             for (const p of serverLog) {
-                if (p.periodKey) byKey.set(p.periodKey, p);
+                if (p.periodKey) byKey.set(keyOf(p), p);
             }
             predictionLog = Array.from(byKey.values())
                 .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
@@ -1561,12 +1562,14 @@
             const graded = predictionLog.filter(p => p.correct !== null);
             const trades = (serverData && serverData.tradingStatus && serverData.tradingStatus.recentTrades) || [];
 
-            // Group trades by periodKey
-            const tradesByPeriod = {};
+            // Group trades by `asset:periodKey` so BTC and ETH trades for the
+            // same 15m period don't collide.
+            const tradesByKey = {};
+            const keyOf = (asset, pk) => (asset || 'btc') + ':' + (pk || 'unknown');
             for (const t of trades) {
-                const pk = t.periodKey || 'unknown';
-                if (!tradesByPeriod[pk]) tradesByPeriod[pk] = [];
-                tradesByPeriod[pk].push(t);
+                const k = keyOf(t.asset, t.periodKey);
+                if (!tradesByKey[k]) tradesByKey[k] = [];
+                tradesByKey[k].push(t);
             }
 
             // Build combined period entries from predictions
@@ -1574,15 +1577,16 @@
             const seenKeys = new Set();
             for (const p of predictionLog) {
                 if (p.correct === null) continue; // skip ungraded (current open period)
-                const pk = p.periodKey;
-                seenKeys.add(pk);
-                periods.push({ prediction: p, trades: tradesByPeriod[pk] || [], timestamp: p.timestamp });
+                const k = keyOf(p.asset, p.periodKey);
+                seenKeys.add(k);
+                periods.push({ prediction: p, asset: p.asset || 'btc', trades: tradesByKey[k] || [], timestamp: p.timestamp });
             }
 
             // Add trade-only periods (no prediction entry)
-            for (const pk of Object.keys(tradesByPeriod)) {
-                if (!seenKeys.has(pk) && pk !== 'unknown') {
-                    periods.push({ prediction: null, trades: tradesByPeriod[pk], timestamp: new Date(tradesByPeriod[pk][0].time).getTime() });
+            for (const k of Object.keys(tradesByKey)) {
+                if (!seenKeys.has(k) && !k.endsWith(':unknown')) {
+                    const arr = tradesByKey[k];
+                    periods.push({ prediction: null, asset: arr[0]?.asset || 'btc', trades: arr, timestamp: new Date(arr[0].time).getTime() });
                 }
             }
 
@@ -1631,25 +1635,42 @@
                 const errors = periodTrades.filter(t => t.type && (t.type.includes('error') || t.type.includes('failed') || t.type.includes('unfilled') || t.type.includes('phantom')));
                 const hasTrades = buys.length > 0 || sells.length > 0 || settlement;
 
-                // Period-level realized P&L: sum of all cash flows on every leg of the
-                // period (buys + sells + settle payout). settlement.pnlCents only
-                // covers the FINAL position, so a sell-for-loss followed by a force
-                // bet wins would show only the force-bet's tiny profit and hide the
-                // earlier loss. Compute the full realized P&L instead.
+                // Period-level realized P&L. We try three sources, in order:
+                //   1. settle.pnlCents — server-stamped, accounts for full cost basis
+                //      even when the original BUY trade has scrolled out of the
+                //      recentTrades window (which was producing $0.00 totals
+                //      against -$108 settle rows).
+                //   2. sell legs that include sellProceeds + originalCost.
+                //   3. Replay buys+sells+settle from the visible trade list.
                 function periodRealizedPnlCents() {
                     let pnl = 0;
+                    let used = false;
+                    if (settlement && typeof settlement.pnlCents === 'number') {
+                        pnl += settlement.pnlCents;
+                        used = true;
+                    }
+                    for (const t of sells) {
+                        if (typeof t.pnlCents === 'number') { pnl += t.pnlCents; used = true; }
+                        else if (typeof t.sellProceeds === 'number' && typeof t.originalCost === 'number') {
+                            pnl += (t.sellProceeds - t.originalCost);
+                            used = true;
+                        }
+                    }
+                    if (used) return pnl;
+                    // Fallback replay
+                    let replay = 0;
                     for (const t of buys) {
                         const price = t.limitPrice || t.entryPrice || 0;
-                        pnl -= (t.contracts || 0) * price;
+                        replay -= (t.contracts || 0) * price;
                     }
                     for (const t of sells) {
                         const price = t.limitPrice || t.entryPrice || 0;
-                        pnl += (t.contracts || 0) * price;
+                        replay += (t.contracts || 0) * price;
                     }
                     if (settlement && settlement.correct) {
-                        pnl += (settlement.contracts || 0) * 100; // winning contracts pay out 100¢
+                        replay += (settlement.contracts || 0) * 100;
                     }
-                    return pnl;
+                    return replay;
                 }
                 const periodPnlCents = periodRealizedPnlCents();
 
@@ -1676,8 +1697,13 @@
                 }
 
                 html += '<div class="period-item ' + periodCls + '">';
-                // Header: time + outcome badge
+                // Header: asset + time + outcome badge
+                const periodAsset = (period.asset || (p && p.asset) || 'btc').toUpperCase();
+                const assetBadgeStyle = periodAsset === 'ETH'
+                    ? 'background:rgba(99,102,241,0.18);color:#a5b4fc;border:1px solid rgba(99,102,241,0.3);'
+                    : 'background:rgba(247,147,26,0.18);color:#f7931a;border:1px solid rgba(247,147,26,0.3);';
                 html += '<div class="period-header">' +
+                    '<span class="period-asset-badge" style="font-size:10px;font-weight:700;letter-spacing:0.5px;padding:2px 6px;border-radius:4px;margin-right:6px;' + assetBadgeStyle + '">' + periodAsset + '</span>' +
                     '<span class="period-time">' + displayTime + '</span>' +
                     '<span class="period-outcome ' + outcomeCls + '">' + outcomeLabel + '</span>' +
                     '</div>';

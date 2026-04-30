@@ -564,6 +564,14 @@ const ethState = {
 const ethEngine = engine.createEngine('eth');
 const ethExecutor = tradeExecutor.createExecutor('eth');
 
+// Combined prediction log: merge BTC + ETH entries, tag each with asset.
+// The frontend renders one history feed regardless of which tab is active.
+function combinedPredictionLog() {
+    const btc = (store.getPredictionLog() || []).map(p => ({ ...p, asset: 'btc' }));
+    const eth = (store.getPredictionLog('eth') || []).map(p => ({ ...p, asset: 'eth' }));
+    return [...btc, ...eth].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+}
+
 function getPeriodKey() {
     const now = new Date();
     const mins = now.getMinutes();
@@ -1572,7 +1580,7 @@ async function fetchAllData() {
             staleData: state._staleData || false,
             // Prediction data (from server!)
             prediction: store.getCurrentPeriod(),
-            predictionLog: store.getPredictionLog(),
+            predictionLog: combinedPredictionLog(),
             sellSignal: store.getState().sellSignal,
             nextPeriodPreview: store.getState().nextPeriodPreview,
             serverUptime: process.uptime(),
@@ -1691,7 +1699,7 @@ wss.on('connection', (ws, req) => {
         periodKey: state.periodKey,
         // Prediction data (from server!)
         prediction: store.getCurrentPeriod(),
-        predictionLog: store.getPredictionLog(),
+        predictionLog: combinedPredictionLog(),
         sellSignal: store.getState().sellSignal,
         nextPeriodPreview: store.getState().nextPeriodPreview,
         serverUptime: process.uptime(),
@@ -1818,7 +1826,7 @@ app.get('/api/state', (req, res) => {
     res.json({
         ...state,
         prediction: store.getCurrentPeriod(),
-        predictionLog: store.getPredictionLog(),
+        predictionLog: combinedPredictionLog(),
         sellSignal: store.getState().sellSignal,
         nextPeriodPreview: store.getState().nextPeriodPreview,
         serverUptime: process.uptime(),
@@ -1860,7 +1868,7 @@ app.get('/api/predictions', (req, res) => {
 
 app.get('/api/history', (req, res) => {
     res.json({
-        predictionLog: store.getPredictionLog()
+        predictionLog: combinedPredictionLog()
     });
 });
 

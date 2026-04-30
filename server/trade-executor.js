@@ -38,6 +38,18 @@ const liveBalanceCache = { demo: null, production: null };
 const liveBalanceFetchedAt = { demo: 0, production: 0 };
 const LIVE_BALANCE_TTL_MS = 15_000;
 let liveBalanceInflight = { demo: null, production: null };
+// Combined trade log + daily stats across assets — every trade carries an
+// `asset` tag from pushTrade so the UI can render per-asset badges while
+// totals (daily P&L, trade count, W/L) reflect the whole bot.
+let recentTrades = [];
+let dailyStats = { date: null, tradeCount: 0, wins: 0, losses: 0, pnlCents: 0 };
+function todayKey() { return new Date().toISOString().slice(0, 10); }
+function ensureDailyStats() {
+    const today = todayKey();
+    if (dailyStats.date !== today) {
+        dailyStats = { date: today, tradeCount: 0, wins: 0, losses: 0, pnlCents: 0 };
+    }
+}
 
 // ── Per-asset executor factory ────────────────────────────────────
 function createExecutor(assetKey = 'btc') {
@@ -45,8 +57,6 @@ const isBtc = assetKey === 'btc';
 let currentPosition = null;     // { ticker, side, action, contracts, entryPrice, orderId, periodKey, totalCostCents, totalContracts, entryTime, strike }
 let soldThisPeriod = false;
 let lastPeriodKey = null;
-let recentTrades = [];          // most-recent first, capped at 200
-let dailyStats = { date: null, tradeCount: 0, wins: 0, losses: 0, pnlCents: 0 };
 let thought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
 
 function setThought(status, message, detail) {
@@ -57,15 +67,7 @@ function activeEnv() { return kalshiAuth.getEnvironment ? kalshiAuth.getEnvironm
 function paperBal() { return paperBalances[activeEnv()] ?? 250000; }
 function setPaperBal(v) { paperBalances[activeEnv()] = Math.max(0, Math.round(v)); }
 
-// ── Daily stats handling ──────────────────────────────────────────
-function todayKey() { return new Date().toISOString().slice(0, 10); }
-
-function ensureDailyStats() {
-    const today = todayKey();
-    if (dailyStats.date !== today) {
-        dailyStats = { date: today, tradeCount: 0, wins: 0, losses: 0, pnlCents: 0 };
-    }
-}
+// ── Daily stats handling (shared via module scope above) ─────────
 
 function dailyStopHit() {
     ensureDailyStats();
