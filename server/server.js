@@ -249,28 +249,35 @@ async function fetchKalshiData() {
 }
 
 // Extract strike price ONLY from Kalshi API fields. No fallbacks or guessing.
-// Returns true if any text field clearly indicates Kalshi hasn't published the
-// strike yet (e.g. "Target price: TBD"). Distinct from a parse-miss or API
-// failure: the market exists but Kalshi will fill in the strike at open time.
+// Returns true ONLY when (a) at least one subtitle field literally says "TBD"
+// AND (b) there are no numeric strike fields populated either. If Kalshi
+// publishes the strike via floor_strike/cap_strike but leaves stale subtitle
+// text, we should NOT flag this as pending — extractStrike will pick it up.
 function isStrikePending(m) {
     if (!m) return false;
-    for (const field of ['yes_sub_title', 'no_sub_title', 'subtitle', 'title']) {
+    let hasTBD = false;
+    for (const field of ['yes_sub_title', 'no_sub_title', 'subtitle']) {
         const text = m[field];
-        if (typeof text === 'string' && /\bTBD\b/i.test(text)) return true;
+        if (typeof text === 'string' && /\bTBD\b/i.test(text)) { hasTBD = true; break; }
     }
-    return false;
+    if (!hasTBD) return false;
+    for (const field of ['custom_strike', 'floor_strike', 'cap_strike']) {
+        const v = parseFloat(m[field]);
+        if (Number.isFinite(v) && v > 0) return false; // numeric strike present
+    }
+    return true;
 }
 
 function extractStrike(m) {
     if (!m) return null;
 
-    // ── 1: "Target price: $X" in yes_sub_title / no_sub_title ──
+    // ── 1: "Target price: $X" / "Target: $X" / "Strike: $X" in subtitle fields ──
     for (const field of ['yes_sub_title', 'no_sub_title', 'subtitle']) {
         if (!m[field] || typeof m[field] !== 'string') continue;
         const text = m[field];
-        if (/TBD/i.test(text)) continue; // Not set yet
+        if (/\bTBD\b/i.test(text)) continue; // Not set yet
 
-        const match = text.match(/(?:Target price|target):\s*\$?([\d,]+\.?\d*)/i);
+        const match = text.match(/(?:Target price|target|strike|cap|floor)\s*:?\s*\$?([\d,]+\.?\d*)/i);
         if (match) {
             const v = parseFloat(match[1].replace(/,/g, ''));
             if (v > 10000 && v < 500000) {
@@ -1492,7 +1499,57 @@ wss.on('connection', (ws, req) => {
 
 // ═══════════════════════════════════════════════════════════════
 // API ENDPOINTS
-// ═══════════════════════════════════════════════════════════════
+
+// Live Kalshi-strike diagnostics. Returns the raw market object plus what our
+// extractor saw, so we can compare against what Kalshi shows in their UI when
+// the dashboard says "pending" but a strike appears to be published.
+app.get('/api/diagnostics/kalshi-strike', async (req, res) => {
+    try {
+        const seriesTicker = req.query.series || 'KXBTC15M';
+        const url = KALSHI_MARKET_API + `/markets?series_ticker=${encodeURIComponent(seriesTicker)}&status=open&limit=20`;
+        const data = await fetchJSON(url, 8000, 'diag-strike');
+        const markets = (data && data.markets) || [];
+        const now = new Date();
+
+        // Detail-fetch each future market so we see the same fields extractStrike does
+        const futures = [];
+        for (const m of markets) {
+            const closeTime = new Date(m.close_time || m.expiration_time);
+            if (!(closeTime > now)) continue;
+            let detailed = m;
+            try {
+                const detail = await fetchJSON(KALSHI_MARKET_API + '/markets/' + m.ticker, 5000, 'diag-detail');
+                if (detail && detail.market) detailed = detail.market;
+            } catch (e) { /* keep summary */ }
+            futures.push({
+                ticker: detailed.ticker,
+                close_time: detailed.close_time,
+                title: detailed.title,
+                yes_sub_title: detailed.yes_sub_title,
+                no_sub_title: detailed.no_sub_title,
+                subtitle: detailed.subtitle,
+                strike_extracted: extractStrike(detailed),
+                pending_detected: isStrikePending(detailed),
+                // Surface every key Kalshi returns so we can spot new fields
+                allKeys: Object.keys(detailed).sort(),
+            });
+        }
+
+        res.json({
+            now: now.toISOString(),
+            queryUrl: url,
+            currentState: {
+                kalshiStrike: state.kalshiStrike,
+                kalshiTicker: state.kalshiTicker,
+                strikeSource: state._strikeSource,
+            },
+            marketCount: markets.length,
+            futureMarkets: futures,
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
 
 app.get('/api/health', (req, res) => {
     res.json({
