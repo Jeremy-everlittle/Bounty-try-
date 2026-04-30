@@ -932,7 +932,8 @@
                 <button class="trading-btn" id="notif-btn" onclick="toggleNotifications()" style="font-size:12px">Notifications: OFF</button>
             </div>
             <div style="margin-top:6px;display:flex;gap:6px;">
-                <button class="trading-btn" id="force-bet-btn" onclick="forceBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(136,87,255,0.15);border-color:rgba(136,87,255,0.4);color:#a371f7;">FORCE BET</button>
+                <button class="trading-btn" id="force-up-btn" onclick="forceBet('up')" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(63,185,80,0.15);border-color:rgba(63,185,80,0.4);color:#3fb950;">&#9650; FORCE UP</button>
+                <button class="trading-btn" id="force-down-btn" onclick="forceBet('down')" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(248,81,73,0.15);border-color:rgba(248,81,73,0.4);color:#f85149;">&#9660; FORCE DOWN</button>
                 <button class="trading-btn" id="press-bet-btn" onclick="pressBet()" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(56,139,253,0.15);border-color:rgba(56,139,253,0.4);color:#58a6ff;display:none;">PRESS BET</button>
             </div>
             <div style="border-top: 1px solid #30363d; margin: 8px 0;"></div>
@@ -2271,19 +2272,23 @@
             renderPeriodHistory();
 
             // Force bet / Press bet button state
-            const forceBtn = document.getElementById('force-bet-btn');
+            const upBtn = document.getElementById('force-up-btn');
+            const downBtn = document.getElementById('force-down-btn');
             const pressBtn = document.getElementById('press-bet-btn');
-            if (forceBtn && !forceBtn.disabled) {
+            const setForceBtnState = (btn, label) => {
+                if (!btn || btn.disabled) return;
                 if (ts.currentPosition) {
-                    forceBtn.textContent = 'POSITION OPEN';
-                    forceBtn.style.opacity = '0.4';
-                    forceBtn.style.pointerEvents = 'none';
+                    btn.textContent = 'POSITION OPEN';
+                    btn.style.opacity = '0.4';
+                    btn.style.pointerEvents = 'none';
                 } else {
-                    forceBtn.textContent = 'FORCE BET';
-                    forceBtn.style.opacity = '1';
-                    forceBtn.style.pointerEvents = 'auto';
+                    btn.textContent = label;
+                    btn.style.opacity = '1';
+                    btn.style.pointerEvents = 'auto';
                 }
-            }
+            };
+            setForceBtnState(upBtn, '▲ FORCE UP');
+            setForceBtnState(downBtn, '▼ FORCE DOWN');
             if (pressBtn) {
                 if (ts.currentPosition && !pressBtn.disabled) {
                     pressBtn.style.display = '';
@@ -2677,49 +2682,45 @@
             }
         }
 
-        async function forceBet() {
+        async function forceBet(direction) {
             const ts = serverData && serverData.tradingStatus;
             if (ts && ts.currentPosition) {
                 showToast('Already have a position for this period.', 'error');
                 return;
             }
-            const pred = serverData && serverData.prediction;
-            const dir = pred && pred.updatedPrediction
-                ? (pred.updatedPrediction.predictedPrice >= (serverData.kalshiStrike || 0) ? 'UP' : 'DOWN')
-                : pred && pred.originalPrediction
-                ? (pred.originalPrediction.predictedPrice >= (serverData.kalshiStrike || 0) ? 'UP' : 'DOWN')
-                : '??';
-            if (!confirm('Force a ' + dir + ' bet for this period?')) return;
-            const btn = document.getElementById('force-bet-btn');
+            const dir = direction === 'down' ? 'DOWN' : 'UP';
+            if (!confirm('Force a ' + dir + ' bet on ' + currentTab.toUpperCase() + ' for this period?')) return;
+            const btn = document.getElementById(direction === 'down' ? 'force-down-btn' : 'force-up-btn');
+            const originalLabel = (direction === 'down' ? '\u25BC FORCE DOWN' : '\u25B2 FORCE UP');
+            const originalBg = btn.style.background;
+            const originalColor = btn.style.color;
+            const originalBorder = btn.style.borderColor;
             btn.textContent = 'PLACING...';
             btn.disabled = true;
             try {
                 const resp = await fetch('/api/trading/force-bet', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ asset: currentTab })
+                    body: JSON.stringify({ asset: currentTab, direction: direction })
                 });
                 const result = await resp.json();
                 if (result.ok) {
-                    btn.textContent = result.direction + ' ' + result.contracts + 'x @ ' + result.entryPrice + '\u00A2';
-                    btn.style.background = 'rgba(63,185,80,0.2)';
-                    btn.style.color = '#3fb950';
-                    btn.style.borderColor = 'rgba(63,185,80,0.4)';
+                    btn.textContent = (result.direction || dir) + ' ' + (result.contracts || result.position?.contracts || '') + 'x @ ' + (result.entryPrice || result.position?.entryPrice || '?') + '\u00A2';
                     setTimeout(() => {
-                        btn.textContent = 'FORCE BET';
-                        btn.style.background = 'rgba(136,87,255,0.15)';
-                        btn.style.color = '#a371f7';
-                        btn.style.borderColor = 'rgba(136,87,255,0.4)';
+                        btn.textContent = originalLabel;
+                        btn.style.background = originalBg;
+                        btn.style.color = originalColor;
+                        btn.style.borderColor = originalBorder;
                         btn.disabled = false;
                     }, 5000);
                 } else {
                     showToast(friendlyError(result.reason || result.error), 'error');
-                    btn.textContent = 'FORCE BET';
+                    btn.textContent = originalLabel;
                     btn.disabled = false;
                 }
             } catch (e) {
                 showToast(friendlyError(e.message), 'error');
-                btn.textContent = 'FORCE BET';
+                btn.textContent = originalLabel;
                 btn.disabled = false;
             }
         }

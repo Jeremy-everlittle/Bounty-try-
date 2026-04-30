@@ -482,6 +482,7 @@ function createEngine(assetKey = 'btc') {
 const _defaultEngine = createEngine('btc');
 module.exports = createEngine;
 module.exports.createEngine = createEngine;
+module.exports.getKalshiAsk = getKalshiAsk;
 for (const key of Object.keys(_defaultEngine)) {
     if (module.exports[key] === undefined) {
         module.exports[key] = _defaultEngine[key];

@@ -2382,6 +2382,7 @@ function executorContext(asset) {
             ticker: ethState.kalshiTicker,
             strike: ethState.kalshiStrike,
             periodKey: period?.periodKey,
+            orderBook: ethState.kalshiOrderBook,
         };
     }
     const period = store.getCurrentPeriod();
@@ -2391,21 +2392,42 @@ function executorContext(asset) {
         ticker: state.kalshiTicker,
         strike: state.kalshiStrike,
         periodKey: state.periodKey,
+        orderBook: state.kalshiOrderBook,
     };
 }
 
 app.post('/api/trading/force-bet', async (req, res) => {
     const asset = req.body?.asset === 'eth' ? 'eth' : 'btc';
     const contracts = req.body?.contracts; // optional override
+    const direction = req.body?.direction === 'up' || req.body?.direction === 'down' ? req.body.direction : null;
     const ctx = executorContext(asset);
 
-    if (!ctx.prediction) return res.status(400).json({ error: `No ${asset.toUpperCase()} prediction available for current period` });
     if (!ctx.ticker) return res.status(400).json({ error: `No Kalshi ticker available for ${asset.toUpperCase()}` });
     if (!ctx.strike) return res.status(400).json({ error: `No strike price available for ${asset.toUpperCase()}` });
+    // For an explicit direction we don't strictly need a model prediction.
+    if (!direction && !ctx.prediction) return res.status(400).json({ error: `No ${asset.toUpperCase()} prediction available for current period` });
+
+    // When the user picks a direction, look up the ask for THAT side from the
+    // live orderbook — model-derived betQuality.factors.ask is for the model's
+    // preferred side and won't match the opposite leg.
+    let askOverride = null;
+    if (direction) {
+        const side = direction === 'up' ? 'yes' : 'no';
+        askOverride = engine.getKalshiAsk({ kalshiOrderBook: ctx.orderBook }, side);
+        if (askOverride == null) {
+            return res.status(400).json({ error: `No ${side.toUpperCase()} ask quote in ${asset.toUpperCase()} orderbook` });
+        }
+    }
 
     try {
-        const result = await ctx.executor.forceBet(ctx.prediction, ctx.ticker, ctx.strike, ctx.periodKey, contracts || null);
-        res.json({ asset, ...result });
+        const result = await ctx.executor.forceBet(
+            ctx.prediction || {},
+            ctx.ticker, ctx.strike, ctx.periodKey,
+            contracts || null,
+            direction,
+            askOverride
+        );
+        res.json({ asset, direction, ...result });
     } catch (err) {
         res.status(500).json({ ok: false, reason: err.message });
     }

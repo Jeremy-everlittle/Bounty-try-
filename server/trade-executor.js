@@ -391,14 +391,19 @@ async function onReentryCheck(prediction, strike, currentPrice, minutesRemaining
 }
 
 // ── Manual controls ───────────────────────────────────────────────
-async function forceBet(prediction, ticker, strike, periodKey, contractsOverride) {
+async function forceBet(prediction, ticker, strike, periodKey, contractsOverride, directionOverride, askOverride) {
     if (!ticker || !strike) return { ok: false, reason: 'missing ticker/strike' };
-    const goingUp = prediction.predictedPrice >= strike;
-    const side = goingUp ? 'yes' : 'no';
-    const askCents = prediction._betQuality?.factors?.ask;
-    if (askCents == null) return { ok: false, reason: 'no ask quote' };
+    let side;
+    if (directionOverride === 'up' || directionOverride === 'down') {
+        side = directionOverride === 'up' ? 'yes' : 'no';
+    } else {
+        const goingUp = prediction.predictedPrice >= strike;
+        side = goingUp ? 'yes' : 'no';
+    }
+    const askCents = (typeof askOverride === 'number') ? askOverride : prediction?._betQuality?.factors?.ask;
+    if (askCents == null) return { ok: false, reason: 'no ask quote for ' + side };
     const contracts = Math.max(1, Math.min(config.convictionMaxContracts, contractsOverride || config.baseContracts));
-    return placeBuy({ ticker, side, contracts, askCents, periodKey, strike, prediction, edge: prediction._betQuality?.edge, betQuality: prediction._betQuality });
+    return placeBuy({ ticker, side, contracts, askCents, periodKey, strike, prediction, edge: prediction?._betQuality?.edge, betQuality: prediction?._betQuality });
 }
 
 async function pressBet(arg1) {
