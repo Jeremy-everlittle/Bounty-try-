@@ -9,6 +9,7 @@ const { execSync } = require('child_process');
 const store = require('./store');
 const engine = require('./prediction-engine');
 const decisionLog = require('./decision-logger');
+const autoTraderLog = require('./auto-trader-log');
 const tradeExecutor = require('./trade-executor');
 const kalshiAuth = require('./kalshi-auth');
 const db = require('./db');
@@ -1038,6 +1039,7 @@ async function fetchAllData() {
                     // ── Decision log: new period prediction ──
                     decisionLog.logNewPeriod({ periodKey, strike: state.kalshiStrike, currentPrice: state.brtiPrice, minutesAhead, kalshiTicker: state.kalshiTicker });
                     decisionLog.logPrediction({ periodKey, strike: state.kalshiStrike, currentPrice: state.brtiPrice, prediction, betQuality: bq, minutesAhead, marketData });
+                    autoTraderLog.logPeriodOpen({ periodKey, currentPrice: state.brtiPrice, strike: state.kalshiStrike, prediction, betQuality: bq });
 
                     // ── DB: snapshot prediction + market data for algorithm improvement ──
                     capturePredictionSnapshot('new_period', periodKey, state.kalshiTicker, state.kalshiStrike, state.brtiPrice, prediction, bq, minutesAhead, marketData);
@@ -1089,6 +1091,7 @@ async function fetchAllData() {
 
                 // ── Decision log: late prediction ──
                 decisionLog.logPrediction({ periodKey, strike: state.kalshiStrike, currentPrice: state.brtiPrice, prediction, betQuality: bq, minutesAhead, marketData });
+                autoTraderLog.logPeriodOpen({ periodKey, currentPrice: state.brtiPrice, strike: state.kalshiStrike, prediction, betQuality: bq });
 
                 // ── DB: snapshot late prediction + market data ──
                 capturePredictionSnapshot('new_period', periodKey, state.kalshiTicker, state.kalshiStrike, state.brtiPrice, prediction, bq, minutesAhead, marketData);
@@ -1131,6 +1134,17 @@ async function fetchAllData() {
                 if (sellSignal && sellSignal.level !== 'hold' && sellSignal.level !== 'winning' && sellSignal.level !== 'strong_hold') {
                     decisionLog.logSellDecision({ sellSignal, minutesRemaining: minutesAhead, acted: false, currentPrice: state.brtiPrice, strike: state.kalshiStrike });
                 }
+
+                // ── Narrative log: per-tick line (auto-throttled to 15s + regime changes) ──
+                autoTraderLog.logTick({
+                    periodKey,
+                    minutesRemaining: minutesAhead,
+                    currentPrice: state.brtiPrice,
+                    strike: state.kalshiStrike,
+                    prediction: updated,
+                    sellSignal,
+                    position: tradeExecutor.getStatus().currentPosition,
+                });
                 // Log price ticks (sampled every 30s)
                 decisionLog.logPriceTick({ currentPrice: state.brtiPrice, strike: state.kalshiStrike, periodKey, minutesAhead, history: state.history });
 
@@ -1347,6 +1361,23 @@ function broadcast(data) {
 // Forward trade events to all WebSocket clients for push notifications
 tradeExecutor.onTradeNotify((trade) => {
     broadcast({ type: 'trade', trade });
+    autoTraderLog.logTradeAction(trade);
+
+    // After a settle, snapshot session state so the narrative log shows
+    // running balance + W/L progression next to each closed period.
+    if (trade && trade.type === 'settle') {
+        try {
+            const status = tradeExecutor.getStatus();
+            autoTraderLog.logSessionState({
+                env: kalshiAuth.getEnvironment ? kalshiAuth.getEnvironment() : '?',
+                balanceCents: status.balanceCents,
+                dailyPnlCents: status.daily?.pnlCents,
+                wins: status.daily?.wins,
+                losses: status.daily?.losses,
+                tradeCount: status.daily?.tradeCount,
+            });
+        } catch (e) { /* non-fatal */ }
+    }
 });
 
 wss.on('connection', (ws, req) => {
@@ -2140,6 +2171,29 @@ app.post('/api/trading/paper-balance', (req, res) => {
 app.get('/api/logs', (req, res) => {
     const files = decisionLog.listLogs();
     res.json({ files, logDir: decisionLog.LOG_DIR });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// AUTO-TRADER NARRATIVE LOG — human-readable per-event stream
+// ═══════════════════════════════════════════════════════════════
+
+// Today's narrative log as plain text. Tail with ?tail=N for the last N lines.
+app.get('/api/auto-log', (req, res) => {
+    const tailN = parseInt(req.query.tail, 10);
+    const content = Number.isFinite(tailN) && tailN > 0 ? autoTraderLog.tail(tailN) : autoTraderLog.readToday();
+    res.type('text/plain').send(content || '(no entries yet today)\n');
+});
+
+// Specific date — auto-trader-YYYY-MM-DD.log
+app.get('/api/auto-log/:date', (req, res) => {
+    const content = autoTraderLog.read(req.params.date);
+    if (content == null) return res.status(404).send('No log file for that date.');
+    res.type('text/plain').send(content);
+});
+
+// List available narrative log files.
+app.get('/api/auto-log/list/files', (req, res) => {
+    res.json({ files: autoTraderLog.list(), logDir: autoTraderLog.LOG_DIR });
 });
 
 app.get('/api/logs/today', (req, res) => {
