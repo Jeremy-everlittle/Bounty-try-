@@ -3681,9 +3681,15 @@
                     body: JSON.stringify(body)
                 });
                 const result = await resp.json();
-                if (result.ok) {
+                const rejected = Array.isArray(result.rejected) ? result.rejected : [];
+                if (result.ok && rejected.length === 0) {
                     btn.textContent = 'Saved!';
                     btn.style.color = '#3fb950';
+                    setTimeout(() => { btn.textContent = 'Save Settings'; btn.disabled = false; btn.style.color = '#3fb950'; }, 2000);
+                } else if (result.ok && rejected.length) {
+                    btn.textContent = 'Partial — see alert';
+                    btn.style.color = '#d29922';
+                    alert('Some settings were rejected:\n\n' + rejected.map(r => `• ${r.key} = ${r.value}: ${r.reason}`).join('\n'));
                     setTimeout(() => { btn.textContent = 'Save Settings'; btn.disabled = false; btn.style.color = '#3fb950'; }, 2000);
                 } else {
                     btn.textContent = 'Error';

@@ -595,17 +595,27 @@ async function savePaperBalancesToDB() {
 // are persisted, not just mutated in-memory.
 function applyConfig(updates) {
     const allowed = ['baseContracts', 'maxPositionContracts', 'convictionMaxContracts', 'maxDailyLossCents', 'maxDailyTrades'];
-    const bounds = { baseContracts: 500, maxPositionContracts: 500, convictionMaxContracts: 500, maxDailyLossCents: 1000000, maxDailyTrades: 1000 };
+    const bounds = {
+        baseContracts: 5000,
+        maxPositionContracts: 10000,
+        convictionMaxContracts: 10000,
+        maxDailyLossCents: 10000000, // $100k
+        maxDailyTrades: 10000,
+    };
     const applied = {};
+    const rejected = [];
     for (const key of allowed) {
         if (updates[key] === undefined) continue;
         const val = parseInt(updates[key], 10);
-        if (!Number.isFinite(val) || val <= 0 || val > (bounds[key] || 1000)) continue;
+        const max = bounds[key];
+        if (!Number.isFinite(val)) { rejected.push({ key, value: updates[key], reason: 'not a number' }); continue; }
+        if (val <= 0)              { rejected.push({ key, value: val, reason: 'must be > 0' }); continue; }
+        if (val > max)             { rejected.push({ key, value: val, reason: `exceeds max ${max}` }); continue; }
         config[key] = val;
         applied[key] = val;
     }
     saveConfigToDB();
-    return applied;
+    return { applied, rejected };
 }
 
 function resetState() {

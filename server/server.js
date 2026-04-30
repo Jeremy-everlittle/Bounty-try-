@@ -2408,10 +2408,10 @@ app.post('/api/trading/config', (req, res) => {
     if (!updates || typeof updates !== 'object') {
         return res.status(400).json({ error: 'Invalid config' });
     }
-    const applied = tradeExecutor.applyConfig(updates);
+    const { applied, rejected } = tradeExecutor.applyConfig(updates);
     const cfg = tradeExecutor.config;
-    console.log('[server] Config updated:', applied);
-    res.json({ ok: true, applied, config: { baseContracts: cfg.baseContracts, maxPositionContracts: cfg.maxPositionContracts, convictionMaxContracts: cfg.convictionMaxContracts, maxDailyLossCents: cfg.maxDailyLossCents, maxDailyTrades: cfg.maxDailyTrades } });
+    console.log('[server] Config updated:', applied, rejected.length ? '(rejected: ' + JSON.stringify(rejected) + ')' : '');
+    res.json({ ok: true, applied, rejected, config: { baseContracts: cfg.baseContracts, maxPositionContracts: cfg.maxPositionContracts, convictionMaxContracts: cfg.convictionMaxContracts, maxDailyLossCents: cfg.maxDailyLossCents, maxDailyTrades: cfg.maxDailyTrades } });
 });
 
 app.post('/api/trading/mode', (req, res) => {
