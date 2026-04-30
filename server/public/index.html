@@ -1838,7 +1838,11 @@
             } else {
                 kalshiStrike = null;
                 dataSourceName = `BRTI~(${sources})`;
-                if (debugEl) debugEl.textContent = 'Strike: API failed — no strike available';
+                if (debugEl) {
+                    debugEl.textContent = strikeSource === 'pending'
+                        ? 'Strike: pending — Kalshi will publish at market open'
+                        : 'Strike: API failed — no strike available';
+                }
             }
 
             return {
@@ -3042,7 +3046,10 @@
                 changeEl.textContent = `${direction} ${formatPrice(Math.abs(strikeDelta))} vs strike`;
                 changeEl.style.color = strikeDelta >= 0 ? '#3fb950' : '#f85149';
             } else {
-                changeEl.textContent = 'Strike unavailable (API failed)';
+                const ss = serverData && serverData.strikeSource;
+                changeEl.textContent = ss === 'pending'
+                    ? 'Strike pending — Kalshi sets it at market open'
+                    : 'Strike unavailable (API failed)';
                 changeEl.style.color = '#f0c040';
             }
 
@@ -3056,9 +3063,15 @@
                 deltaEl.style.color = delta >= 0 ? '#3fb950' : '#f85149';
                 document.getElementById('period-label').textContent = 'Kalshi strike';
             } else {
-                // No Kalshi strike — show API failed clearly
-                document.getElementById('period-start-price').textContent = 'API Failed';
-                document.getElementById('period-delta').textContent = 'Strike not available from Kalshi API';
+                // No Kalshi strike — distinguish "pending" from real API failure
+                const ss = serverData && serverData.strikeSource;
+                if (ss === 'pending') {
+                    document.getElementById('period-start-price').textContent = 'Pending';
+                    document.getElementById('period-delta').textContent = 'Kalshi will publish strike at market open';
+                } else {
+                    document.getElementById('period-start-price').textContent = 'API Failed';
+                    document.getElementById('period-delta').textContent = 'Strike not available from Kalshi API';
+                }
                 document.getElementById('period-delta').style.color = '#f0c040';
                 document.getElementById('period-label').textContent = 'Kalshi strike';
             }

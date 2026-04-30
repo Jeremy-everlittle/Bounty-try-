@@ -249,6 +249,18 @@ async function fetchKalshiData() {
 }
 
 // Extract strike price ONLY from Kalshi API fields. No fallbacks or guessing.
+// Returns true if any text field clearly indicates Kalshi hasn't published the
+// strike yet (e.g. "Target price: TBD"). Distinct from a parse-miss or API
+// failure: the market exists but Kalshi will fill in the strike at open time.
+function isStrikePending(m) {
+    if (!m) return false;
+    for (const field of ['yes_sub_title', 'no_sub_title', 'subtitle', 'title']) {
+        const text = m[field];
+        if (typeof text === 'string' && /\bTBD\b/i.test(text)) return true;
+    }
+    return false;
+}
+
 function extractStrike(m) {
     if (!m) return null;
 
@@ -486,7 +498,7 @@ const state = {
     brtiSources: '',
     kalshiStrike: null,
     _lastStrikePeriodKey: null,  // tracks which period the strike was locked for
-    _strikeSource: null,         // 'api' or 'failed' — tracks where strike came from
+    _strikeSource: null,         // 'api' | 'pending' (Kalshi TBD) | 'failed' — tracks where strike came from
     kalshiCloseTime: null,
     kalshiTicker: null,
     kalshiMarket: null,
@@ -858,12 +870,15 @@ async function fetchAllData() {
                     console.log(`[strike] API strike=$${k.strike.toFixed(2)} for ${currentPeriodKey}`);
                 }
             } else if (!state.kalshiStrike) {
-                state._strikeSource = 'failed';
-                // Surface enough context to diagnose: do we have a market at all?
-                // is it a parsing miss vs a network failure vs no listed market?
+                // Distinguish "Kalshi hasn't published strike yet" (TBD) from
+                // an actual API/parse failure so the UI can show the right hint.
+                const pending = isStrikePending(k.market);
+                state._strikeSource = pending ? 'pending' : 'failed';
                 if (isNewPeriod || !state._lastStrikeFailLog || (Date.now() - state._lastStrikeFailLog) > 60000) {
                     state._lastStrikeFailLog = Date.now();
-                    if (k.market) {
+                    if (pending) {
+                        console.log(`[strike] PENDING for ${currentPeriodKey} on ${k.ticker} — Kalshi listed market with "Target price: TBD"`);
+                    } else if (k.market) {
                         console.warn(`[strike] FAILED to extract from market ${k.ticker} | yes_sub_title="${k.market.yes_sub_title || ''}" | title="${k.market.title || ''}" | subtitle="${k.market.subtitle || ''}"`);
                     } else if (k.ticker) {
                         console.warn(`[strike] Market metadata missing for ${k.ticker}`);
@@ -1333,7 +1348,7 @@ async function fetchAllData() {
             brtiPrice: state.brtiPrice,
             brtiSources: state.brtiSources,
             kalshiStrike: state.kalshiStrike,
-            strikeSource: state._strikeSource,  // 'api', 'failed', or null
+            strikeSource: state._strikeSource,  // 'api' | 'pending' | 'failed' | null
             kalshiCloseTime: state.kalshiCloseTime,
             kalshiTicker: state.kalshiTicker,
             kalshiMarket: state.kalshiMarket,
