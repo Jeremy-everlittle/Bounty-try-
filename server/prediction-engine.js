@@ -373,8 +373,37 @@ function createEngine(assetKey = 'btc') {
         return prediction;
     }
 
+    // EWMA-smoothed update on every same-period tick. Without this, every
+    // call to handleSamePeriod recomputes probability + confidence from
+    // scratch on whatever data happens to be in marketData at that instant,
+    // producing the 5%↔24% confidence swings the user observed and the
+    // sell-signal-fires-seconds-after-buy thrash.
+    //
+    // Alpha tunable via SMOOTHING_ALPHA — 0.3 means each new tick is 30%
+    // weighted, the prior carries 70%. Starts at 1.0 (pure new estimate)
+    // when there's no prior.
+    const SMOOTHING_ALPHA = 0.3;
     function handleSamePeriod(marketData, minutesAhead, kalshiStrike, _periodKey) {
-        return predictPrice(marketData, minutesAhead, kalshiStrike);
+        const fresh = predictPrice(marketData, minutesAhead, kalshiStrike);
+        const period = store.getCurrentPeriod(assetKey);
+        const prior = period?.updatedPrediction || period?.originalPrediction;
+        if (!prior || typeof prior.probability !== 'number') return fresh;
+        // Don't smooth across periods (different strike, different prior set).
+        if (prior.startPrice != null && kalshiStrike != null && Math.abs(prior.startPrice - kalshiStrike) > 0.01) {
+            return fresh;
+        }
+        const blend = (next, prev, a) => (next != null && prev != null) ? (a * next + (1 - a) * prev) : (next != null ? next : prev);
+        const a = SMOOTHING_ALPHA;
+        const smoothed = {
+            ...fresh,
+            probability: blend(fresh.probability, prior.probability, a),
+            confidence: blend(fresh.confidence, prior.confidence, a),
+            // Predicted price is more dynamic — let it move faster (alpha 0.5).
+            predictedPrice: blend(fresh.predictedPrice, prior.predictedPrice, 0.5),
+        };
+        // Recompute predicted direction from the smoothed predictedPrice/strike.
+        smoothed.predictedDirection = smoothed.predictedPrice >= kalshiStrike ? 'up' : 'down';
+        return smoothed;
     }
 
     function gradeBayesianPrediction(actualPrice, periodKey) {
