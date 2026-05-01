@@ -2763,11 +2763,19 @@ store.load();
 // is still loading the saved position, producing a double-position bug.
 // We additionally init the ETH executor here (it was missing before) so
 // any saved ETH state, kill-switch row, or settings load on boot.
-const initPromise = Promise.allSettled([
-    tradeExecutor.initFromDB(),
-    ethExecutor.initFromDB(),
-    store.loadFromDB(),
-]).then((results) => {
+// db.init() was exported but never called — `ready` stayed false, all DB
+// reads returned [] and all writes silently no-op'd. Predictions persisted
+// only because store.js also writes a JSON file; trades had no fallback,
+// so every restart wiped the bet history. Call init FIRST, await it, then
+// run the per-asset loaders.
+const initPromise = db.init()
+    .catch(e => { console.error('[db] init failed:', e?.message || e); return null; })
+    .then(() => Promise.allSettled([
+        tradeExecutor.initFromDB(),
+        ethExecutor.initFromDB(),
+        store.loadFromDB(),
+    ]))
+    .then((results) => {
     const failed = results.filter(r => r.status === 'rejected');
     if (failed.length) {
         for (const f of failed) console.error('[db] init step failed:', f.reason?.message || f.reason);

@@ -258,7 +258,12 @@ function pushTrade(trade) {
         timestamp: trade.timestamp || nowIso,
     };
     recentTrades.unshift(enriched);
-    if (recentTrades.length > 200) recentTrades.length = 200;
+    // 1000 entries covers ~250 periods of trading (4 trades each: BUY,
+    // PRESS, SELL, settle). The cycle/period log easily reaches that depth,
+    // so the trade buffer needs to match — without this, post-restart the
+    // history page would show graded periods with empty Trade Activity rows
+    // because their trades had aged out of the in-memory buffer.
+    if (recentTrades.length > 1000) recentTrades.length = 1000;
     eventLog.log('trade', {
         asset: assetKey,
         type: enriched.type, side: enriched.side, contracts: enriched.contracts,
@@ -874,7 +879,9 @@ async function initFromDB() {
             if (stats) dailyStats = { ...dailyStats, ...stats, date: todayKey() };
         } catch (e) { /* non-fatal */ }
         try {
-            const trades = await db.getRecentTrades(50);
+            // Match the in-memory cap so a restart restores the full window
+            // of trade history that the period-history renderer expects.
+            const trades = await db.getRecentTrades(1000);
             if (Array.isArray(trades) && trades.length) recentTrades = trades;
         } catch (e) { /* non-fatal */ }
     }

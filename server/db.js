@@ -635,7 +635,7 @@ async function logTrade(entry) {
     }
 }
 
-async function getRecentTrades(limit = 200) {
+async function getRecentTrades(limit = 1000) {
     if (!ready) return [];
     try {
         const { rows } = await pool.query('SELECT * FROM trades ORDER BY id DESC LIMIT $1', [limit]);
@@ -653,6 +653,11 @@ async function getRecentTrades(limit = 200) {
             if (row.strategy) entry.strategy = row.strategy;
             if (row.order_id) entry.orderId = row.order_id;
             if (row.filled_contracts != null) entry.filledContracts = row.filled_contracts;
+            // The asset column is populated by every trade (post-P2.1 migration),
+            // so reload it explicitly. Without this, trades loaded from the DB
+            // had no asset tag and the period-history grouping (asset:periodKey)
+            // misclassified them all as BTC by default.
+            if (row.asset) entry.asset = row.asset;
             if (row.data) {
                 try { Object.assign(entry, JSON.parse(row.data)); } catch (_) {}
             }
