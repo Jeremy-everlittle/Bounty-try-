@@ -1975,7 +1975,8 @@
             };
         }
         function formatPrice(price) {
-            return '$' + price.toLocaleString('en-US', {
+            if (price == null || !Number.isFinite(Number(price))) return '--';
+            return '$' + Number(price).toLocaleString('en-US', {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2
             });
