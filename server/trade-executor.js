@@ -63,6 +63,7 @@ let soldThisPeriod = false;
 let lastPeriodKey = null;
 let reentriesThisPeriod = 0;
 let lastEntryTime = 0;          // ms epoch of most recent buy; gates reflexive sells
+let consecutiveEmptyReconciles = 0; // debounce for reconcile clear
 let thought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
 // Latest market data snapshot (orderbook + price) for this asset.
 // Updated once per fetch cycle by the server so placeSell can crystallize
@@ -77,43 +78,67 @@ function setMarketData(md) { latestMarketData = md || null; }
 //   3. Position resolved on Kalshi but our onPeriodEnd never fired.
 // Paper mode is local-only — no reconcile needed. On API failure we keep our
 // state as-is rather than wiping a real position on a transient network blip.
+// Reconcile is gated by THREE safety mechanisms because a false-positive
+// clear is much worse than a missed clear (it doubles a real position when
+// the bot re-enters):
+//   1. Age guard: skip if the position is < 60s old. Kalshi's positions
+//      endpoint can take ~30-60s to reflect a fresh fill.
+//   2. Debounce: require RECONCILE_DEBOUNCE_HITS consecutive empty
+//      responses before clearing. A momentary API blip won't nuke a real
+//      position.
+//   3. Every decision is logged to event-log for forensics.
+const RECONCILE_MIN_AGE_MS = 60_000;
+const RECONCILE_DEBOUNCE_HITS = 2;
+
 async function reconcileFromKalshi() {
     if (config.paperMode) return;
-    if (!currentPosition) return;
+    if (!currentPosition) { consecutiveEmptyReconciles = 0; return; }
     if (!(kalshiAuth.isConfigured && kalshiAuth.isConfigured())) return;
-    // Ignore positions placed in the last ~10s — Kalshi's positions endpoint
-    // can lag a freshly-filled order by a second or two, and a false-negative
-    // here would wipe a real position right after we entered it.
     const ageMs = Date.now() - (lastEntryTime || currentPosition.entryTime || 0);
-    if (ageMs < 10_000) return;
+    if (ageMs < RECONCILE_MIN_AGE_MS) return;
     try {
         const ticker = currentPosition.ticker;
-        const resp = await kalshi.getPositions(); // all positions; we'll filter
+        const resp = await kalshi.getPositions();
         const list = (resp && resp.market_positions) || [];
         const match = list.find(p => p && p.ticker === ticker);
         const liveQty = match ? Math.abs(parseInt(match.position, 10) || 0) : 0;
+
         if (liveQty === 0) {
+            consecutiveEmptyReconciles += 1;
+            // Debounce: only clear after N consecutive empty responses so a
+            // single API blip doesn't wipe a real position.
+            if (consecutiveEmptyReconciles < RECONCILE_DEBOUNCE_HITS) {
+                eventLog.log('reconcile_empty_pending', {
+                    asset: assetKey, ticker,
+                    consecutiveEmpty: consecutiveEmptyReconciles,
+                    needed: RECONCILE_DEBOUNCE_HITS,
+                    listSize: list.length,
+                    sampleTickers: list.slice(0, 5).map(p => p.ticker),
+                });
+                return;
+            }
             const stale = currentPosition;
             currentPosition = null;
             soldThisPeriod = true; // don't re-enter the same period reflexively
-            setThought('reconcile', `cleared stale ${stale.contracts}x ${stale.side} on ${ticker} — Kalshi shows no position`);
+            consecutiveEmptyReconciles = 0;
+            setThought('reconcile', `cleared stale ${stale.contracts}x ${stale.side} on ${ticker} after ${RECONCILE_DEBOUNCE_HITS} empty checks`);
             pushTrade({
                 type: 'reconcile_clear', action: 'reconcile', ticker,
                 side: stale.side, direction: stale.side, contracts: stale.contracts,
                 periodKey: stale.periodKey, paperMode: false,
-                reason: 'Kalshi has no matching position',
+                reason: `Kalshi shows no matching position (${RECONCILE_DEBOUNCE_HITS} consecutive checks)`,
             });
         } else if (liveQty !== currentPosition.totalContracts) {
-            // Order partially filled (or we have leftover from earlier). Trust
-            // Kalshi's count rather than our optimistic local one.
+            consecutiveEmptyReconciles = 0;
             const before = currentPosition.totalContracts;
             currentPosition.totalContracts = liveQty;
             currentPosition.contracts = liveQty;
             setThought('reconcile', `adjusted contracts ${before}→${liveQty} from Kalshi for ${ticker}`);
             eventLog.log('reconcile_adjust', { asset: assetKey, ticker, before, after: liveQty });
+        } else {
+            consecutiveEmptyReconciles = 0;
         }
     } catch (e) {
-        // Transient API failure — keep local state, log once.
         console.warn('[trade-executor] reconcile failed:', e.message);
         eventLog.log('reconcile_error', { asset: assetKey, message: e.message });
     }
@@ -198,6 +223,7 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
             totalCostCents: costCents, totalContracts: contracts, entryTime: Date.now(),
         };
         lastEntryTime = Date.now();
+        consecutiveEmptyReconciles = 0;
         setThought('entry', `PAPER BUY ${contracts}x ${side} @ ${limitPrice}c on ${ticker}`, { side, contracts, edge: betQuality?.edge, quality: betQuality?.quality, probability: betQuality?.factors?.probability });
         ensureDailyStats();
         dailyStats.tradeCount += 1;
@@ -221,6 +247,7 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
             totalCostCents: costCents, totalContracts: contracts, entryTime: Date.now(),
         };
         lastEntryTime = Date.now();
+        consecutiveEmptyReconciles = 0;
         setThought('entry', `LIVE BUY ${contracts}x ${side} @ ${limitPrice}c on ${ticker} → order ${orderId}`, { side, contracts, edge: betQuality?.edge, quality: betQuality?.quality, probability: betQuality?.factors?.probability });
         ensureDailyStats();
         dailyStats.tradeCount += 1;
