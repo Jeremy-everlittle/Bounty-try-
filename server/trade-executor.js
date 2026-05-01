@@ -27,6 +27,8 @@ const config = {
     convictionMaxContracts: 200,
     maxDailyLossCents: 50000,    // $500 default daily stop
     maxDailyTrades: 100,
+    maxReentriesPerPeriod: 1,    // hard cap on round-trips per 15m period
+    minHoldSeconds: 45,          // must hold this long before sell signals can fire
 };
 
 // ── Shared state (one wallet / one switch across BTC/ETH/etc) ─────
@@ -58,6 +60,8 @@ const isBtc = assetKey === 'btc';
 let currentPosition = null;     // { ticker, side, action, contracts, entryPrice, orderId, periodKey, totalCostCents, totalContracts, entryTime, strike }
 let soldThisPeriod = false;
 let lastPeriodKey = null;
+let reentriesThisPeriod = 0;
+let lastEntryTime = 0;          // ms epoch of most recent buy; gates reflexive sells
 let thought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
 // Latest market data snapshot (orderbook + price) for this asset.
 // Updated once per fetch cycle by the server so placeSell can crystallize
@@ -124,6 +128,7 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
             ticker, side, action: 'buy', contracts, entryPrice: limitPrice, orderId, periodKey, strike,
             totalCostCents: costCents, totalContracts: contracts, entryTime: Date.now(),
         };
+        lastEntryTime = Date.now();
         setThought('entry', `PAPER BUY ${contracts}x ${side} @ ${limitPrice}c on ${ticker}`, { side, contracts, edge: betQuality?.edge, quality: betQuality?.quality, probability: betQuality?.factors?.probability });
         ensureDailyStats();
         dailyStats.tradeCount += 1;
@@ -146,6 +151,7 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
             ticker, side, action: 'buy', contracts, entryPrice: limitPrice, orderId, periodKey, strike,
             totalCostCents: costCents, totalContracts: contracts, entryTime: Date.now(),
         };
+        lastEntryTime = Date.now();
         setThought('entry', `LIVE BUY ${contracts}x ${side} @ ${limitPrice}c on ${ticker} → order ${orderId}`, { side, contracts, edge: betQuality?.edge, quality: betQuality?.quality, probability: betQuality?.factors?.probability });
         ensureDailyStats();
         dailyStats.tradeCount += 1;
@@ -220,6 +226,7 @@ async function onNewPrediction(prediction, ticker, strike, periodKey) {
     if (lastPeriodKey !== periodKey) {
         lastPeriodKey = periodKey;
         soldThisPeriod = false;
+        reentriesThisPeriod = 0;
     }
 
     const stop = dailyStopHit();
@@ -256,6 +263,14 @@ async function onSellSignal(sellSignal, minutesRemaining, prediction, strike, cu
     if (!sellSignal) return;
 
     if (sellSignal.level === 'lost_cause' || sellSignal.level === 'confident_flip') {
+        // Block reflexive sells: a buy that was placed seconds ago shouldn't
+        // be flushed by a transient sellSignal. The sellSignal will fire
+        // again on the next cycle if the thesis really has flipped.
+        const heldSec = (Date.now() - (lastEntryTime || 0)) / 1000;
+        if (heldSec < (config.minHoldSeconds || 0)) {
+            setThought('holding', `holding ${currentPosition.contracts}x ${currentPosition.side} (min hold ${Math.ceil((config.minHoldSeconds||0) - heldSec)}s left)`);
+            return;
+        }
         decisionLog.logSellDecision({
             sellSignal, minutesRemaining, acted: true,
             currentPrice, strike,
@@ -394,10 +409,18 @@ async function onReentryCheck(prediction, strike, currentPrice, minutesRemaining
     if (killSwitch || currentPosition) return;
     if (!soldThisPeriod) return;
     if ((minutesRemaining || 0) < 5) return;
+    // Hard cap re-entries per period — without this, every sell could be
+    // immediately followed by another buy, leading to BUY/SELL/BUY/SELL
+    // thrash that bleeds bid-ask spread on every round-trip.
+    if (reentriesThisPeriod >= (config.maxReentriesPerPeriod ?? 1)) {
+        setThought('skip', `re-entry cap reached (${reentriesThisPeriod}/${config.maxReentriesPerPeriod ?? 1})`);
+        return;
+    }
     const bq = prediction?._betQuality;
     if (!bq || !bq.shouldBet) return;
     if (bq.edge < 0.10) return; // higher bar for re-entry
 
+    reentriesThisPeriod += 1;
     soldThisPeriod = false;     // allow this re-entry
     await onNewPrediction(prediction, ticker, strike, periodKey);
 }
@@ -577,6 +600,9 @@ async function initFromDB() {
             for (const k of ['baseContracts', 'maxPositionContracts', 'convictionMaxContracts', 'maxDailyLossCents', 'maxDailyTrades']) {
                 if (typeof saved[k] === 'number' && saved[k] > 0) config[k] = saved[k];
             }
+            for (const k of ['maxReentriesPerPeriod', 'minHoldSeconds']) {
+                if (typeof saved[k] === 'number' && saved[k] >= 0) config[k] = saved[k];
+            }
         }
     } catch (e) { /* non-fatal */ }
     try {
@@ -600,6 +626,8 @@ async function saveConfigToDB() {
             convictionMaxContracts: config.convictionMaxContracts,
             maxDailyLossCents: config.maxDailyLossCents,
             maxDailyTrades: config.maxDailyTrades,
+            maxReentriesPerPeriod: config.maxReentriesPerPeriod,
+            minHoldSeconds: config.minHoldSeconds,
         });
     } catch (e) { /* non-fatal */ }
 }
@@ -612,22 +640,27 @@ async function savePaperBalancesToDB() {
 // Public setter the server.js config endpoint should call so changes
 // are persisted, not just mutated in-memory.
 function applyConfig(updates) {
-    const allowed = ['baseContracts', 'maxPositionContracts', 'convictionMaxContracts', 'maxDailyLossCents', 'maxDailyTrades'];
+    const allowed = ['baseContracts', 'maxPositionContracts', 'convictionMaxContracts', 'maxDailyLossCents', 'maxDailyTrades', 'maxReentriesPerPeriod', 'minHoldSeconds'];
     const bounds = {
         baseContracts: 5000,
         maxPositionContracts: 10000,
         convictionMaxContracts: 10000,
         maxDailyLossCents: 10000000, // $100k
         maxDailyTrades: 10000,
+        maxReentriesPerPeriod: 20,
+        minHoldSeconds: 900, // up to a full 15m period
     };
+    // Settings that may be set to 0 to mean 'disabled'.
+    const allowZero = new Set(['maxReentriesPerPeriod', 'minHoldSeconds']);
     const applied = {};
     const rejected = [];
     for (const key of allowed) {
         if (updates[key] === undefined) continue;
         const val = parseInt(updates[key], 10);
         const max = bounds[key];
+        const minOk = allowZero.has(key) ? 0 : 1;
         if (!Number.isFinite(val)) { rejected.push({ key, value: updates[key], reason: 'not a number' }); continue; }
-        if (val <= 0)              { rejected.push({ key, value: val, reason: 'must be > 0' }); continue; }
+        if (val < minOk)           { rejected.push({ key, value: val, reason: minOk === 0 ? 'must be >= 0' : 'must be > 0' }); continue; }
         if (val > max)             { rejected.push({ key, value: val, reason: `exceeds max ${max}` }); continue; }
         config[key] = val;
         applied[key] = val;
@@ -640,6 +673,8 @@ function resetState() {
     currentPosition = null;
     soldThisPeriod = false;
     lastPeriodKey = null;
+    reentriesThisPeriod = 0;
+    lastEntryTime = 0;
     dailyStats = { date: todayKey(), tradeCount: 0, wins: 0, losses: 0, pnlCents: 0 };
     recentTrades = [];
     setThought('idle', 'state reset');
