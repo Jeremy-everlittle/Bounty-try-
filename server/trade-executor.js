@@ -665,6 +665,12 @@ async function onReentryCheck(prediction, strike, currentPrice, minutesRemaining
 
 // ── Manual controls ───────────────────────────────────────────────
 async function forceBet(prediction, ticker, strike, periodKey, contractsOverride, directionOverride, askOverride) {
+    // Manual entry must respect every safety gate. The whole point of the
+    // kill switch and the daily-loss stop is that they apply UNIVERSALLY,
+    // including to operator-driven actions.
+    if (killSwitch) return { ok: false, reason: 'kill switch is ON' };
+    const stop = dailyStopHit();
+    if (stop) return { ok: false, reason: `daily stop hit: ${stop}` };
     if (!ticker || !strike) return { ok: false, reason: 'missing ticker/strike' };
     let side;
     if (directionOverride === 'up' || directionOverride === 'down') {
@@ -680,6 +686,9 @@ async function forceBet(prediction, ticker, strike, periodKey, contractsOverride
 }
 
 async function pressBet(arg1) {
+    if (killSwitch) return { ok: false, reason: 'kill switch is ON' };
+    const stop = dailyStopHit();
+    if (stop) return { ok: false, reason: `daily stop hit: ${stop}` };
     if (!currentPosition) return { ok: false, reason: 'no position' };
     const addContracts = typeof arg1 === 'number' ? arg1 : config.baseContracts;
     const { ticker, side, periodKey, entryPrice } = currentPosition;
@@ -707,6 +716,10 @@ async function pressBet(arg1) {
 }
 
 async function forceSell() {
+    // forceSell is intentionally NOT gated by killSwitch or dailyStopHit.
+    // The kill switch is meant to stop opening new exposure, but the operator
+    // must always be able to close out an existing position — that's the point
+    // of an emergency stop.
     if (!currentPosition) return { ok: false, reason: 'no position' };
     return placeSell('manual force sell');
 }
