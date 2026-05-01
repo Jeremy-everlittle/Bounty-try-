@@ -1118,6 +1118,7 @@
         let currentTab = 'btc'; // 'btc' | 'eth'
         let wsConnected = false;
         let wsReconnectTimer = null;
+        let wsReconnectAttempt = 0; // resets on successful open
 
         // Remap root fields from msg.eth.* so the existing render code can run
         // unchanged for either asset. BTC tab leaves msg as-is.
@@ -1209,6 +1210,7 @@
 
             ws.onopen = () => {
                 wsConnected = true;
+                wsReconnectAttempt = 0; // successful open resets backoff
                 console.log('WebSocket connected');
                 startHeartbeat();
                 document.getElementById('status-bar').innerHTML =
@@ -1259,10 +1261,19 @@
             ws.onclose = () => {
                 wsConnected = false;
                 if (wsHeartbeatInterval) clearInterval(wsHeartbeatInterval);
-                console.log('WebSocket disconnected, reconnecting in 3s...');
+                // Exponential backoff with jitter so a server crash with N
+                // tabs open doesn't synchronize their reconnect attempts.
+                wsReconnectAttempt = Math.min(wsReconnectAttempt + 1, 6);
+                const base = Math.min(30000, 1000 * Math.pow(2, wsReconnectAttempt - 1));
+                const jitter = Math.random() * Math.min(1000, base * 0.25);
+                const delay = base + jitter;
+                // Drop stale data so old prices/positions don't keep rendering
+                // between disconnect and the first new frame.
+                latestRawData = null;
+                console.log(`WebSocket disconnected, reconnecting in ${Math.round(delay)}ms (attempt ${wsReconnectAttempt})`);
                 document.getElementById('status-bar').innerHTML =
-                    '&#9888; Server disconnected — reconnecting...';
-                wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+                    '&#9888; Server disconnected — reconnecting (attempt ' + wsReconnectAttempt + ')…';
+                wsReconnectTimer = setTimeout(connectWebSocket, delay);
             };
 
             ws.onerror = (e) => {
@@ -1281,8 +1292,22 @@
             predictionLog = JSON.parse(localStorage.getItem('btcPredLog') || '[]');
         } catch(e) { predictionLog = []; }
 
+        // Cap localStorage at the most recent 500 entries. Without this an
+        // unbounded log eventually trips QuotaExceededError inside ws.onmessage,
+        // which would break the entire frame parse loop. Wrapped in try/catch
+        // for the same reason — if it ever fails, we'd rather lose the persisted
+        // history than crash the live UI.
+        const MAX_LOCAL_PRED_ENTRIES = 500;
         function savePredictionLog() {
-            localStorage.setItem('btcPredLog', JSON.stringify(predictionLog));
+            try {
+                const tail = predictionLog.length > MAX_LOCAL_PRED_ENTRIES
+                    ? predictionLog.slice(-MAX_LOCAL_PRED_ENTRIES)
+                    : predictionLog;
+                localStorage.setItem('btcPredLog', JSON.stringify(tail));
+            } catch (e) {
+                // Likely QuotaExceededError. Drop history but don't break the UI.
+                try { localStorage.removeItem('btcPredLog'); } catch (e2) {}
+            }
         }
 
         // Merge server log into local log. Compound key by `asset:periodKey`
@@ -3600,7 +3625,11 @@
 
         function friendlyError(raw) {
             if (!raw) return 'Something went wrong. Please try again.';
-            const s = String(raw);
+            // First line only — server errors sometimes return Error.toString()
+            // including the stack on subsequent lines, which leaks node
+            // internals into the toast.
+            const firstLine = String(raw).split('\n')[0];
+            const s = firstLine.length > 240 ? firstLine.slice(0, 240) + '…' : firstLine;
             if (s.includes('→ 503')) return 'Kalshi is temporarily unavailable (503). Try again in a moment.';
             if (s.includes('→ 429')) return 'Too many requests — Kalshi is rate-limiting. Wait a few seconds.';
             if (s.includes('→ 401') || s.includes('→ 403')) return 'Authentication error. Check your API keys.';
@@ -3614,6 +3643,9 @@
             if (s.includes('No fills')) return 'Order got no fills after multiple attempts. The price may have moved.';
             if (s.includes('canceled') || s.includes('rejected')) return 'Order was rejected by Kalshi. Price may have moved too far.';
             if (s.includes('exhausted all attempts')) return 'Could not fill order after multiple tries. Try again.';
+            if (s.includes('kill switch')) return 'Trading is blocked by the kill switch. Toggle it off in the UI to resume.';
+            if (s.includes('daily stop hit')) return 'Daily loss/trade cap reached. Trading is paused until the next day.';
+            if (/at \w+\s*\(.*:\d+:\d+\)/.test(s)) return 'Server error. Check the event log for details.';
             return s;
         }
 
