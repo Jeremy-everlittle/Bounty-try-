@@ -2655,21 +2655,31 @@ app.get('/api/logs/today/summary', (req, res) => {
 // GRACEFUL SHUTDOWN — Save state on exit
 // ═══════════════════════════════════════════════════════════════
 
-process.on('SIGTERM', async () => {
-    console.log('SIGTERM received, saving state...');
-    store.forceSave();
-    const db = require('./db');
-    await db.close().catch(() => {});
+// Bounded shutdown: flush state + per-asset balance snapshots, then close
+// the DB. The 3s deadline guarantees the process exits even if a DB write
+// is hanging — without it, Railway's SIGKILL after 10s would lose anything
+// still in flight.
+async function gracefulShutdown(signal) {
+    console.log(`${signal} received, saving state…`);
+    const deadline = new Promise((resolve) => setTimeout(() => resolve('timeout'), 3000));
+    try {
+        await Promise.race([
+            Promise.all([
+                store.forceSave(),
+                tradeExecutor.snapshotBalanceToDB().catch(() => {}),
+                ethExecutor.snapshotBalanceToDB().catch(() => {}),
+            ]),
+            deadline,
+        ]);
+    } catch (e) {
+        console.error('[shutdown] flush error:', e.message);
+    }
+    try { await require('./db').close(); } catch (e) { /* non-fatal */ }
     process.exit(0);
-});
+}
 
-process.on('SIGINT', async () => {
-    console.log('SIGINT received, saving state...');
-    store.forceSave();
-    const db = require('./db');
-    await db.close().catch(() => {});
-    process.exit(0);
-});
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 process.on('uncaughtException', (err) => {
     console.error('Uncaught exception, saving state:', err.message);

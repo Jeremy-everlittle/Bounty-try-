@@ -251,11 +251,16 @@ async function _doSaveDB() {
     }
 }
 
+// forceSave returns a promise so shutdown handlers can await the in-flight
+// DB write. Without the await, the file write completes synchronously but
+// the DB write is fire-and-forget and the process can exit before it lands.
 function forceSave() {
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     _doSave();
     if (dbSaveTimer) { clearTimeout(dbSaveTimer); dbSaveTimer = null; }
-    _doSaveDB();
+    return Promise.resolve(_doSaveDB()).catch((e) => {
+        console.error('[store] forceSave DB write failed:', e.message);
+    });
 }
 
 // ── Slice accessor ───────────────────────────────────────────────
