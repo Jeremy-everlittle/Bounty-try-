@@ -12,6 +12,7 @@ const decisionLog = require('./decision-logger');
 const autoTraderLog = require('./auto-trader-log');
 const eventLog = require('./event-log');
 const dailyLearning = require('./daily-learning');
+const logRetention = require('./log-retention');
 const tradeExecutor = require('./trade-executor');
 const kalshiAuth = require('./kalshi-auth');
 const db = require('./db');
@@ -2773,6 +2774,12 @@ const initPromise = Promise.allSettled([
         console.log('[daily-learning] Nightly schedule armed');
     } catch (e) {
         console.error('[daily-learning] Failed to schedule:', e.message);
+    }
+    try {
+        logRetention.scheduleDaily();
+        console.log(`[log-retention] Pruning logs older than ${logRetention.RETENTION_DAYS} days`);
+    } catch (e) {
+        console.error('[log-retention] Failed to schedule:', e.message);
     }
 });
 
