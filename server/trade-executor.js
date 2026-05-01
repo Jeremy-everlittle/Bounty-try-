@@ -827,9 +827,14 @@ function getStatus() {
 
 // ── Persistence ───────────────────────────────────────────────────
 async function persistDailyStats() {
-    if (!isBtc) return; // schema currently BTC-only; multi-asset migration TODO
-    try { await db.saveDailyStats(dailyStats); } catch (e) { /* non-fatal */ }
-    try { await db.savePosition(currentPosition); } catch (e) { /* non-fatal */ }
+    // Schema is multi-asset post-P2.1: every executor persists to its own
+    // asset-keyed row. dailyStats is shared at module scope so we only need
+    // to save once per process; do it from BTC's executor to avoid two
+    // concurrent writes of identical content.
+    if (isBtc) {
+        try { await db.saveDailyStats(dailyStats, 'btc'); } catch (e) { /* non-fatal */ }
+    }
+    try { await db.savePosition(currentPosition, assetKey); } catch (e) { /* non-fatal */ }
 }
 
 async function snapshotBalanceToDB() {
@@ -846,31 +851,33 @@ async function snapshotBalanceToDB() {
 }
 
 async function initFromDB() {
-    if (!isBtc) return; // schema currently BTC-only; ETH starts fresh
-    // Kill switch: load the operator's last decision. Module default is ON
-    // (safety) so if there's no saved row the bot stays parked until the user
-    // explicitly enables trading.
+    // Kill switch + paperBalances + trading-config are SHARED across both
+    // executors (module-scope state). Load them only from BTC's init pass to
+    // avoid two concurrent loaders racing on the same keys.
+    if (isBtc) {
+        try {
+            const saved = await db.loadStoreState('kill-switch');
+            if (saved && typeof saved === 'object' && typeof saved.active === 'boolean') {
+                killSwitch = saved.active;
+                setThought(killSwitch ? 'killed' : 'idle', killSwitch ? 'KILL SWITCH ON (loaded from DB)' : 'kill-switch off (loaded from DB)');
+            } else {
+                setThought('killed', 'KILL SWITCH ON (default — flip off in UI to enable trading)');
+            }
+            console.log(`[trade-executor] Kill switch on startup: ${killSwitch ? 'ON' : 'off'}`);
+        } catch (e) { /* non-fatal — keep default ON */ }
+        try {
+            const stats = await db.loadDailyStats(todayKey(), 'btc');
+            if (stats) dailyStats = { ...dailyStats, ...stats, date: todayKey() };
+        } catch (e) { /* non-fatal */ }
+        try {
+            const trades = await db.getRecentTrades(50);
+            if (Array.isArray(trades) && trades.length) recentTrades = trades;
+        } catch (e) { /* non-fatal */ }
+    }
+    // Per-asset position load — both BTC and ETH read from their own row.
     try {
-        const saved = await db.loadStoreState('kill-switch');
-        if (saved && typeof saved === 'object' && typeof saved.active === 'boolean') {
-            killSwitch = saved.active;
-            setThought(killSwitch ? 'killed' : 'idle', killSwitch ? 'KILL SWITCH ON (loaded from DB)' : 'kill-switch off (loaded from DB)');
-        } else {
-            setThought('killed', 'KILL SWITCH ON (default — flip off in UI to enable trading)');
-        }
-        console.log(`[trade-executor] Kill switch on startup: ${killSwitch ? 'ON' : 'off'}`);
-    } catch (e) { /* non-fatal — keep default ON */ }
-    try {
-        const stats = await db.loadDailyStats(todayKey());
-        if (stats) dailyStats = { ...dailyStats, ...stats, date: todayKey() };
-    } catch (e) { /* non-fatal */ }
-    try {
-        const pos = await db.loadPosition();
+        const pos = await db.loadPosition(assetKey);
         if (pos && pos.totalContracts > 0) currentPosition = pos;
-    } catch (e) { /* non-fatal */ }
-    try {
-        const trades = await db.getRecentTrades(50);
-        if (Array.isArray(trades) && trades.length) recentTrades = trades;
     } catch (e) { /* non-fatal */ }
     // Restore user-tuned config + paper balances across restarts so settings
     // edits survive Railway redeploys instead of reverting to in-code defaults.

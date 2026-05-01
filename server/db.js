@@ -548,8 +548,48 @@ async function init() {
         CREATE INDEX IF NOT EXISTS idx_ob_snap_period_created ON orderbook_snapshots(period_key, created_at);
     `);
 
+    // ── Multi-asset migration (idempotent) ─────────────────────────
+    // Adds an `asset` column to every BTC-shaped table so BTC and ETH
+    // (and future assets) can coexist. Backfills existing rows to 'btc'
+    // — anything previously written was BTC-only, this is correct.
+    // Drops the singleton id=1 PRIMARY KEY on positions and re-keys by
+    // (asset). Drops daily_stats's date-only PRIMARY KEY and re-keys by
+    // (date, asset).
+    await pool.query(`
+        -- trades: add asset column + index
+        ALTER TABLE trades ADD COLUMN IF NOT EXISTS asset TEXT NOT NULL DEFAULT 'btc';
+        CREATE INDEX IF NOT EXISTS idx_trades_asset ON trades(asset);
+
+        -- prediction_log: add asset column + index
+        ALTER TABLE prediction_log ADD COLUMN IF NOT EXISTS asset TEXT NOT NULL DEFAULT 'btc';
+        CREATE INDEX IF NOT EXISTS idx_prediction_log_asset ON prediction_log(asset);
+
+        -- daily_stats: add asset, replace PK with (date, asset)
+        ALTER TABLE daily_stats ADD COLUMN IF NOT EXISTS asset TEXT NOT NULL DEFAULT 'btc';
+    `);
+    // PK rotations need to be in their own statements / catch-able blocks.
+    try {
+        await pool.query(`ALTER TABLE daily_stats DROP CONSTRAINT IF EXISTS daily_stats_pkey`);
+        await pool.query(`ALTER TABLE daily_stats ADD PRIMARY KEY (date, asset)`);
+    } catch (e) { /* PK already in place from a prior boot — non-fatal */ }
+
+    await pool.query(`ALTER TABLE positions ADD COLUMN IF NOT EXISTS asset TEXT NOT NULL DEFAULT 'btc'`);
+    try {
+        // Singleton id=1 check + the original PK both go away. New PK = asset.
+        await pool.query(`ALTER TABLE positions DROP CONSTRAINT IF EXISTS positions_id_check`);
+        await pool.query(`ALTER TABLE positions DROP CONSTRAINT IF EXISTS positions_pkey`);
+        await pool.query(`ALTER TABLE positions DROP COLUMN IF EXISTS id`);
+        await pool.query(`ALTER TABLE positions ADD PRIMARY KEY (asset)`);
+    } catch (e) { /* migration already applied — non-fatal */ }
+
+    // prediction_log: PK from period_key alone -> (period_key, asset)
+    try {
+        await pool.query(`ALTER TABLE prediction_log DROP CONSTRAINT IF EXISTS prediction_log_pkey`);
+        await pool.query(`ALTER TABLE prediction_log ADD PRIMARY KEY (period_key, asset)`);
+    } catch (e) { /* already applied — non-fatal */ }
+
     ready = true;
-    console.log(`[db] PostgreSQL initialized`);
+    console.log(`[db] PostgreSQL initialized (multi-asset schema)`);
     return pool;
 }
 
@@ -558,9 +598,11 @@ async function init() {
 async function logTrade(entry) {
     if (!ready) return;
 
-    // Extract known columns, store the rest as JSON
+    // Extract known columns, store the rest as JSON. `asset` is now a real
+    // column (post-migration); keep it out of the JSON blob.
     const known = ['type', 'time', 'ticker', 'side', 'contracts', 'limitPrice', 'entryPrice',
-                   'periodKey', 'direction', 'pnlCents', 'correct', 'strategy', 'orderId', 'filledContracts'];
+                   'periodKey', 'direction', 'pnlCents', 'correct', 'strategy', 'orderId', 'filledContracts',
+                   'asset'];
     const extra = {};
     for (const [k, v] of Object.entries(entry)) {
         if (!known.includes(k)) extra[k] = v;
@@ -568,8 +610,8 @@ async function logTrade(entry) {
 
     try {
         await pool.query(`
-            INSERT INTO trades (type, time, ticker, side, contracts, limit_price, entry_price, period_key, direction, pnl_cents, correct, strategy, order_id, filled_contracts, data)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            INSERT INTO trades (type, time, ticker, side, contracts, limit_price, entry_price, period_key, direction, pnl_cents, correct, strategy, order_id, filled_contracts, data, asset)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         `, [
             entry.type || null,
             entry.time || new Date().toISOString(),
@@ -586,6 +628,7 @@ async function logTrade(entry) {
             entry.orderId || null,
             entry.filledContracts != null ? entry.filledContracts : null,
             Object.keys(extra).length > 0 ? JSON.stringify(extra) : null,
+            entry.asset || 'btc',
         ]);
     } catch (e) {
         console.error('[db] Failed to log trade:', e.message);
@@ -631,32 +674,33 @@ async function getTradeCount() {
 
 // ── Daily Stats ────────────────────────────────────────────────
 
-async function saveDailyStats(stats) {
+async function saveDailyStats(stats, asset = 'btc') {
     if (!ready) return;
     try {
         await pool.query(`
-            INSERT INTO daily_stats (date, pnl_cents, trade_count, wins, losses, updated_at)
-            VALUES ($1, $2, $3, $4, $5, NOW())
-            ON CONFLICT(date) DO UPDATE SET
-                pnl_cents = $2,
-                trade_count = $3,
-                wins = $4,
-                losses = $5,
+            INSERT INTO daily_stats (date, asset, pnl_cents, trade_count, wins, losses, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            ON CONFLICT(date, asset) DO UPDATE SET
+                pnl_cents = $3,
+                trade_count = $4,
+                wins = $5,
+                losses = $6,
                 updated_at = NOW()
-        `, [stats.date, stats.pnlCents, stats.tradeCount, stats.wins, stats.losses]);
+        `, [stats.date, asset, stats.pnlCents, stats.tradeCount, stats.wins, stats.losses]);
     } catch (e) {
         console.error('[db] Failed to save daily stats:', e.message);
     }
 }
 
-async function loadDailyStats(date) {
+async function loadDailyStats(date, asset = 'btc') {
     if (!ready) return null;
     try {
-        const { rows } = await pool.query('SELECT * FROM daily_stats WHERE date = $1', [date]);
+        const { rows } = await pool.query('SELECT * FROM daily_stats WHERE date = $1 AND asset = $2', [date, asset]);
         if (rows.length === 0) return null;
         const row = rows[0];
         return {
             date: row.date,
+            asset: row.asset,
             pnlCents: row.pnl_cents,
             tradeCount: row.trade_count,
             wins: row.wins,
@@ -684,27 +728,28 @@ async function getDailyStatsHistory(days = 30) {
 
 // ── Position Persistence ───────────────────────────────────────
 
-async function savePosition(pos) {
+async function savePosition(pos, asset = 'btc') {
     if (!ready) return;
     try {
         if (!pos) {
-            await pool.query('DELETE FROM positions WHERE id = 1');
+            await pool.query('DELETE FROM positions WHERE asset = $1', [asset]);
             return;
         }
         const extra = {};
-        const known = ['ticker', 'side', 'contracts', 'entryPrice', 'entryTime', 'periodKey', 'totalCostCents', 'totalContracts'];
+        const known = ['ticker', 'side', 'contracts', 'entryPrice', 'entryTime', 'periodKey', 'totalCostCents', 'totalContracts', 'asset'];
         for (const [k, v] of Object.entries(pos)) {
             if (!known.includes(k)) extra[k] = v;
         }
         await pool.query(`
-            INSERT INTO positions (id, ticker, side, contracts, entry_price, entry_time, period_key, total_cost_cents, total_contracts, data, updated_at)
-            VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-            ON CONFLICT(id) DO UPDATE SET
-                ticker = $1, side = $2, contracts = $3,
-                entry_price = $4, entry_time = $5, period_key = $6,
-                total_cost_cents = $7, total_contracts = $8,
-                data = $9, updated_at = NOW()
+            INSERT INTO positions (asset, ticker, side, contracts, entry_price, entry_time, period_key, total_cost_cents, total_contracts, data, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+            ON CONFLICT(asset) DO UPDATE SET
+                ticker = $2, side = $3, contracts = $4,
+                entry_price = $5, entry_time = $6, period_key = $7,
+                total_cost_cents = $8, total_contracts = $9,
+                data = $10, updated_at = NOW()
         `, [
+            asset,
             pos.ticker || null,
             pos.side || null,
             pos.contracts || null,
@@ -720,10 +765,10 @@ async function savePosition(pos) {
     }
 }
 
-async function loadPosition() {
+async function loadPosition(asset = 'btc') {
     if (!ready) return null;
     try {
-        const { rows } = await pool.query('SELECT * FROM positions WHERE id = 1');
+        const { rows } = await pool.query('SELECT * FROM positions WHERE asset = $1', [asset]);
         if (rows.length === 0) return null;
         const row = rows[0];
         const pos = {
@@ -1364,31 +1409,33 @@ async function getBalanceSummary() {
 
 // ── Prediction Log (UI Period History) ────────────────────────
 
-async function savePredictionLogEntry(entry) {
+async function savePredictionLogEntry(entry, asset = 'btc') {
     if (!ready) return;
     try {
-        // Extract core fields, store everything else in data JSONB
+        // Extract core fields, store everything else in data JSONB. `asset`
+        // is now part of the composite primary key.
         const known = ['periodKey', 'time', 'timestamp', 'startPrice', 'predictedPrice',
                        'predictedDirection', 'actualPrice', 'actualDirection', 'correct',
-                       'confidence', 'probability'];
+                       'confidence', 'probability', 'asset'];
         const extra = {};
         for (const [k, v] of Object.entries(entry)) {
             if (!known.includes(k)) extra[k] = v;
         }
 
         await pool.query(`
-            INSERT INTO prediction_log (period_key, time, timestamp, start_price, predicted_price,
+            INSERT INTO prediction_log (period_key, asset, time, timestamp, start_price, predicted_price,
                 predicted_direction, actual_price, actual_direction, correct, confidence, probability, data)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            ON CONFLICT(period_key) DO UPDATE SET
-                predicted_direction = COALESCE($6, prediction_log.predicted_direction),
-                actual_price = COALESCE($7, prediction_log.actual_price),
-                actual_direction = COALESCE($8, prediction_log.actual_direction),
-                correct = COALESCE($9, prediction_log.correct),
-                data = COALESCE($12, prediction_log.data),
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT(period_key, asset) DO UPDATE SET
+                predicted_direction = COALESCE($7, prediction_log.predicted_direction),
+                actual_price = COALESCE($8, prediction_log.actual_price),
+                actual_direction = COALESCE($9, prediction_log.actual_direction),
+                correct = COALESCE($10, prediction_log.correct),
+                data = COALESCE($13, prediction_log.data),
                 updated_at = NOW()
         `, [
             entry.periodKey,
+            asset,
             entry.time || null,
             entry.timestamp || null,
             entry.startPrice || null,

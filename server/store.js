@@ -283,31 +283,30 @@ function updateCurrentPeriod(updates, assetKey) {
 }
 
 function recordPrediction(entry, assetKey) {
-    const log = slice(assetKey).predictionLog;
+    const asset = assetKey || 'btc';
+    const log = slice(asset).predictionLog;
     if (log.length && log[log.length - 1].periodKey === entry.periodKey) return;
     log.push(entry);
     save();
     const db = getDb();
     if (db) {
-        // Keep BTC entries flowing into the legacy single-asset table for
-        // backward compatibility with existing analysis tools; ETH entries
-        // live only in JSON + the per-asset key/value DB rows for now.
-        if ((assetKey || 'btc') === 'btc') {
-            db.savePredictionLogEntry(entry).catch(e =>
-                console.error('[store] Failed to save prediction to DB:', e.message));
-        }
+        // Multi-asset post-P2.1 — both BTC and ETH persist to the prediction
+        // _log table keyed by (period_key, asset).
+        db.savePredictionLogEntry(entry, asset).catch(e =>
+            console.error('[store] Failed to save prediction to DB:', e.message));
     }
 }
 
 function updatePredictionLog(updater, assetKey) {
-    const log = slice(assetKey).predictionLog;
+    const asset = assetKey || 'btc';
+    const log = slice(asset).predictionLog;
     updater(log);
     save();
     const db = getDb();
-    if (db && (assetKey || 'btc') === 'btc') {
+    if (db) {
         for (const entry of log) {
             if (entry.actualPrice != null || entry._directionUpdated) {
-                db.savePredictionLogEntry(entry).catch(e =>
+                db.savePredictionLogEntry(entry, asset).catch(e =>
                     console.error('[store] Failed to update prediction in DB:', e.message));
                 delete entry._directionUpdated;
             }
