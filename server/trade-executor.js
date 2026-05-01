@@ -30,6 +30,12 @@ const config = {
     maxDailyTrades: 100,
     maxReentriesPerPeriod: 1,    // hard cap on round-trips per 15m period
     minHoldSeconds: 45,          // must hold this long before sell signals can fire
+    // Default time-in-force for ALL Kalshi orders we send. 'IOC' (immediate-
+    // or-cancel) fills whatever's matchable now and cancels the remainder, so
+    // we don't accumulate resting orders that pollute the book and could fill
+    // hours later at stale prices. Set to null to use Kalshi's default
+    // (resting limit, GTC) if a specific deploy needs the old behavior.
+    orderTimeInForce: 'IOC',
 };
 
 // ── Shared state (one wallet / one switch across BTC/ETH/etc) ─────
@@ -313,7 +319,7 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
     try {
         const yesPrice = side === 'yes' ? limitPrice : undefined;
         const noPrice  = side === 'no'  ? limitPrice : undefined;
-        const resp = await kalshi.placeOrder({ ticker, side, action: 'buy', count: contracts, yesPrice, noPrice });
+        const resp = await kalshi.placeOrder({ ticker, side, action: 'buy', count: contracts, yesPrice, noPrice, timeInForce: config.orderTimeInForce || undefined });
         const orderId = resp?.order?.order_id || null;
         metaByTicker[ticker] = {
             periodKey, strike, orderId,
@@ -376,7 +382,7 @@ async function placeSell(reasonText) {
     try {
         const yesPrice = side === 'yes' ? sellPrice : undefined;
         const noPrice  = side === 'no'  ? sellPrice : undefined;
-        const resp = await kalshi.placeOrder({ ticker, side, action: 'sell', count: contracts, yesPrice, noPrice });
+        const resp = await kalshi.placeOrder({ ticker, side, action: 'sell', count: contracts, yesPrice, noPrice, timeInForce: config.orderTimeInForce || undefined });
         setThought('exit-pending', `LIVE SELL ${contracts}x ${side} @ ${sellPrice}c placed on ${ticker} (${reasonText}, awaiting fill)`, { side, contracts });
         pushTrade({
             type: 'sell', action: 'sell', side, direction: side, contracts, limitPrice: sellPrice,
@@ -553,7 +559,7 @@ async function onDipOpportunity(prediction, sellSignal, strike, currentPrice, mi
         try {
             const yesPrice = currentPosition.side === 'yes' ? askCents : undefined;
             const noPrice  = currentPosition.side === 'no'  ? askCents : undefined;
-            await kalshi.placeOrder({ ticker, side: currentPosition.side, action: 'buy', count: addContracts, yesPrice, noPrice });
+            await kalshi.placeOrder({ ticker, side: currentPosition.side, action: 'buy', count: addContracts, yesPrice, noPrice, timeInForce: config.orderTimeInForce || undefined });
         } catch (e) {
             setThought('error', `dip add failed: ${e.message}`);
             return;
@@ -599,7 +605,7 @@ async function onLateLock(prediction, strike, currentPrice, minutesRemaining, ti
         try {
             const yesPrice = side === 'yes' ? askCents : undefined;
             const noPrice  = side === 'no'  ? askCents : undefined;
-            await kalshi.placeOrder({ ticker, side, action: 'buy', count: contracts, yesPrice, noPrice });
+            await kalshi.placeOrder({ ticker, side, action: 'buy', count: contracts, yesPrice, noPrice, timeInForce: config.orderTimeInForce || undefined });
         } catch (e) {
             setThought('error', `late lock failed: ${e.message}`);
             return;
@@ -700,7 +706,7 @@ async function pressBet(arg1) {
         try {
             const yesPrice = side === 'yes' ? entryPrice : undefined;
             const noPrice  = side === 'no'  ? entryPrice : undefined;
-            await kalshi.placeOrder({ ticker, side, action: 'buy', count: addContracts, yesPrice, noPrice });
+            await kalshi.placeOrder({ ticker, side, action: 'buy', count: addContracts, yesPrice, noPrice, timeInForce: config.orderTimeInForce || undefined });
         } catch (e) { return { ok: false, reason: e.message }; }
     }
     if (config.paperMode) {
