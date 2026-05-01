@@ -11,6 +11,7 @@ const engine = require('./prediction-engine');
 const decisionLog = require('./decision-logger');
 const autoTraderLog = require('./auto-trader-log');
 const eventLog = require('./event-log');
+const dailyLearning = require('./daily-learning');
 const tradeExecutor = require('./trade-executor');
 const kalshiAuth = require('./kalshi-auth');
 const db = require('./db');
@@ -2763,6 +2764,16 @@ const initPromise = Promise.allSettled([
     setInterval(() => {
         db.runRetention().catch(e => console.error('[server] Retention error:', e.message));
     }, 3600000);
+
+    // Schedule the nightly learning pass. Was dead code — module had a
+    // scheduleNightly() that nothing called. The pass runs 30s after boot
+    // (analysis on yesterday's data), then every 24h at UTC midnight.
+    try {
+        dailyLearning.scheduleNightly();
+        console.log('[daily-learning] Nightly schedule armed');
+    } catch (e) {
+        console.error('[daily-learning] Failed to schedule:', e.message);
+    }
 });
 
 server.listen(PORT, () => {
