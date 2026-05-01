@@ -126,15 +126,31 @@ async function refreshLivePosition() {
         }
 
         if (!kpos) {
-            // Kalshi shows no relevant position. Clear local state.
+            // Kalshi shows no relevant position. There are two distinct cases:
+            //   A. We had a real position that's now gone (sell completed,
+            //      manual exit, or settlement). Mark soldThisPeriod=true so
+            //      we don't reflexively re-buy the same period.
+            //   B. We placed a buy that hasn't filled yet (still resting on
+            //      the book). currentPosition was never set by us — it would
+            //      only be here if a previous refresh confirmed it. Clearing
+            //      it shouldn't lock out the period because nothing actually
+            //      sold. The pending order is still pending.
+            // Distinguish by whether the position was previously confirmed by
+            // a prior Kalshi refresh (meta.confirmedAt set).
             if (currentPosition) {
                 const stale = currentPosition;
+                const meta = metaByTicker[stale.ticker] || {};
+                const wasConfirmed = !!meta.confirmedAt;
                 currentPosition = null;
-                soldThisPeriod = true; // don't reflexively re-enter same period
+                if (wasConfirmed) {
+                    soldThisPeriod = true; // genuine exit/settlement — don't re-enter
+                }
                 eventLog.log('position_cleared_by_kalshi', {
                     asset: assetKey, ticker: stale.ticker,
                     contracts: stale.contracts, side: stale.side,
                     activeCount: active.length,
+                    wasConfirmed,
+                    soldThisPeriodSet: wasConfirmed,
                 });
             }
             return;
@@ -154,9 +170,12 @@ async function refreshLivePosition() {
         if (wasNew && !meta.entryTime) {
             // First time we're seeing this position — anchor metadata now.
             meta.entryTime = Date.now();
-            metaByTicker[kpos.ticker] = meta;
             lastEntryTime = Date.now();
         }
+        // Mark the position as confirmed by Kalshi. Used by the clear path
+        // above to distinguish a real exit from a never-filled order.
+        meta.confirmedAt = meta.confirmedAt || Date.now();
+        metaByTicker[kpos.ticker] = meta;
 
         currentPosition = {
             ticker: kpos.ticker,
@@ -385,6 +404,20 @@ async function onNewPrediction(prediction, ticker, strike, periodKey) {
         soldThisPeriod = false;
         reentriesThisPeriod = 0;
         lastSellAt = 0;
+        // Drop metadata for tickers from prior periods so a stale `confirmedAt`
+        // doesn't trick refreshLivePosition into thinking a stale position is
+        // ours, and so `lastEntryTime` from the old period doesn't survive into
+        // a new entry's min-hold check.
+        for (const t of Object.keys(metaByTicker)) {
+            if (metaByTicker[t].periodKey !== periodKey) delete metaByTicker[t];
+        }
+        // Clear stale pending-order tag if it's older than 5 minutes — that's
+        // long enough that a resting order should have either filled or be
+        // assumed dead by the operator.
+        if (pendingOrderTicker && (Date.now() - pendingOrderPlacedAt) > 5 * 60_000) {
+            pendingOrderTicker = null;
+            pendingOrderPlacedAt = 0;
+        }
     }
 
     const stop = dailyStopHit();
