@@ -52,6 +52,28 @@ function extractPrices(marketData) {
     return prices;
 }
 
+// Median sample-interval (in minutes) inferred from the history's timestamps.
+// Used to convert raw EWMA vol (per-sample) into per-minute volatility so the
+// remaining-time scaling sqrt(M) is dimensionally correct. Falls back to 1
+// minute if timestamps are missing or non-monotonic.
+function inferSampleIntervalMinutes(marketData) {
+    const hist = marketData?.history || [];
+    const stamps = hist
+        .map(h => (typeof h === 'number' ? null : (h?.timestamp || h?.time)))
+        .map(t => typeof t === 'string' ? Date.parse(t) : t)
+        .filter(t => typeof t === 'number' && isFinite(t));
+    if (stamps.length < 3) return 1;
+    const deltas = [];
+    for (let i = 1; i < stamps.length; i++) {
+        const d = stamps[i] - stamps[i - 1];
+        if (d > 0) deltas.push(d);
+    }
+    if (!deltas.length) return 1;
+    deltas.sort((a, b) => a - b);
+    const median = deltas[Math.floor(deltas.length / 2)];
+    return Math.max(1 / 60, median / 60_000); // floor 1s to avoid div-by-tiny
+}
+
 function logReturns(prices) {
     const out = [];
     for (let i = 1; i < prices.length; i++) {
@@ -210,8 +232,16 @@ function createEngine(assetKey = 'btc') {
         const prices = extractPrices(marketData);
         const current = prices.length ? prices[prices.length - 1] : (marketData?.currentPrice || strikePrice);
         const rets = logReturns(prices);
-        const sigma = ewmaVol(rets);
-        const drift = estimateDrift(rets);
+        const sigmaPerSample = ewmaVol(rets);
+        const driftPerSample = estimateDrift(rets);
+
+        // Convert per-sample stats to per-minute. With 10-second history
+        // samples (Binance klines), sigmaPerSample × √6 = per-minute vol.
+        // Without this normalization the totalSigma below was systematically
+        // tiny, making the lognormal CDF too narrow and prob too extreme.
+        const intervalMin = inferSampleIntervalMinutes(marketData);
+        const sigma = sigmaPerSample / Math.sqrt(intervalMin);
+        const drift = driftPerSample / intervalMin;
 
         const M = Math.max(0.5, minutesAhead || 7.5);
         const totalSigma = sigma * Math.sqrt(M);
@@ -263,7 +293,12 @@ function createEngine(assetKey = 'btc') {
 
     function assessBetQuality(prediction, strikePrice, marketData, minutesAhead) {
         const probUp = prediction.probability;
-        const goingUp = prediction.predictedPrice >= strikePrice;
+        // Side selection: choose YES iff probUp >= 0.5, regardless of where
+        // predictedPrice landed. The previous form (predictedPrice >= strike)
+        // could pick the worse side under skewed vol — drift could push the
+        // mean slightly above strike while the integrated upside probability
+        // was still under 50%.
+        const goingUp = probUp >= 0.5;
         const probForBet = goingUp ? probUp : 1 - probUp;
         const side = goingUp ? 'yes' : 'no';
         const ask = getKalshiAsk(marketData, side);
@@ -286,6 +321,7 @@ function createEngine(assetKey = 'btc') {
         const factors = {
             probability: probForBet, ask, edge, confidence: conf,
             choppiness, exhaustion, sessionMultiplier: riskMult, minutesAhead,
+            side, // exposed so trade-executor can pick the same side without re-deriving
         };
 
         let shouldBet = true;

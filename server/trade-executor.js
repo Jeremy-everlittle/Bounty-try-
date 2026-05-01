@@ -443,8 +443,10 @@ async function onNewPrediction(prediction, ticker, strike, periodKey) {
         return;
     }
 
-    const goingUp = prediction.predictedPrice >= strike;
-    const side = goingUp ? 'yes' : 'no';
+    // Side from betQuality (which uses probUp >= 0.5) so the trade matches
+    // exactly what the model recommended buying. Falls back to predictedPrice
+    // only if betQuality didn't include a side (legacy callers).
+    const side = bq.factors?.side || (prediction.probability >= 0.5 ? 'yes' : 'no');
     const askCents = bq.factors?.ask;
     if (askCents == null) { setThought('skip', 'SKIP: no ask quote'); return; }
 
@@ -585,8 +587,7 @@ async function onLateLock(prediction, strike, currentPrice, minutesRemaining, ti
     if ((minutesRemaining || 0) >= 2) return;
     if ((prediction?.probability ?? 0) < 0.95 && (1 - (prediction?.probability ?? 1)) < 0.95) return;
 
-    const goingUp = prediction.predictedPrice >= strike;
-    const side = goingUp ? 'yes' : 'no';
+    const side = prediction._betQuality?.factors?.side || (prediction.probability >= 0.5 ? 'yes' : 'no');
     const askCents = prediction._betQuality?.factors?.ask;
     if (askCents == null || askCents >= 95) return;
 
@@ -682,8 +683,11 @@ async function forceBet(prediction, ticker, strike, periodKey, contractsOverride
     if (directionOverride === 'up' || directionOverride === 'down') {
         side = directionOverride === 'up' ? 'yes' : 'no';
     } else {
-        const goingUp = prediction.predictedPrice >= strike;
-        side = goingUp ? 'yes' : 'no';
+        // Match the model's recommendation — probUp drives side, not the
+        // mean predicted price (which can sit slightly above strike under
+        // skewed vol while probUp is still <0.5).
+        side = prediction?._betQuality?.factors?.side
+            || ((prediction?.probability ?? 0.5) >= 0.5 ? 'yes' : 'no');
     }
     const askCents = (typeof askOverride === 'number') ? askOverride : prediction?._betQuality?.factors?.ask;
     if (askCents == null) return { ok: false, reason: 'no ask quote for ' + side };
