@@ -190,7 +190,13 @@ function setThought(status, message, detail) {
 
 function activeEnv() { return kalshiAuth.getEnvironment ? kalshiAuth.getEnvironment() : 'demo'; }
 function paperBal() { return paperBalances[activeEnv()] ?? 250000; }
-function setPaperBal(v) { paperBalances[activeEnv()] = Math.max(0, Math.round(v)); }
+// Persist on every internal mutation — paper buys/sells route through this
+// helper, and without the save the in-memory balance silently drifts away
+// from the DB across the trading day until a restart wipes the difference.
+function setPaperBal(v) {
+    paperBalances[activeEnv()] = Math.max(0, Math.round(v));
+    savePaperBalancesToDB();
+}
 
 // ── Daily stats handling (shared via module scope above) ─────────
 
