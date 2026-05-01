@@ -1218,44 +1218,34 @@
             };
 
             ws.onmessage = (event) => {
-                try {
-                    const msg = JSON.parse(event.data);
-                    if (msg.type === 'data') {
-                        latestRawData = msg;
-                        updateTabPrices(msg);
-                        serverData = applyTabView(msg);
-                        // Inject server data into caches
-                        if (msg.orderBook) {
-                            orderBookCache = { timestamp: Date.now(), data: msg.orderBook };
-                        }
-                        if (msg.recentTrades) {
-                            recentTradesCache = { timestamp: Date.now(), trades: msg.recentTrades };
-                        }
-                        if (msg.fundingRate !== null && msg.fundingRate !== undefined) {
-                            fundingRateCache = { timestamp: Date.now(), rate: msg.fundingRate };
-                        }
-                        if (msg.kalshiCloseTime) {
-                            kalshiCloseTime = msg.kalshiCloseTime;
-                        }
-                        if (msg.kalshiTicker) {
-                            kalshiMarketTicker = msg.kalshiTicker;
-                        }
-                        // Merge server prediction history with local (localStorage survives deploys)
-                        if (msg.predictionLog && msg.predictionLog.length > 0) {
-                            mergePredictionLogs(msg.predictionLog);
-                            renderPredictionHistory();
-                        }
-                        // Push the new server data through the render pipeline. Without this,
-                        // updateUI() is only called by the polling fallback (when wsConnected
-                        // is false), so a healthy WebSocket leaves the dashboard frozen on
-                        // dashes. fetchPriceData() reads from serverData, so this is cheap.
-                        try { fetchAndPredict(); } catch (e) { console.error('render after WS data failed:', e); }
-                    } else if (msg.type === 'trade') {
-                        handleTradeNotification(msg.trade);
-                    }
-                } catch (e) {
-                    console.error('WebSocket message parse error:', e);
+                let msg;
+                try { msg = JSON.parse(event.data); }
+                catch (e) { console.error('WS parse:', e); return; }
+                if (!msg) return;
+                if (msg.type === 'trade') {
+                    try { handleTradeNotification(msg.trade); } catch (e) { console.error('trade notify:', e); }
+                    return;
                 }
+                if (msg.type !== 'data') return;
+                // Each step is independent — a throw in one path must not
+                // prevent the others from running. Without this isolation, a
+                // single bad field leaves the dashboard frozen on dashes
+                // even though the WS is healthy and data is flowing.
+                try { latestRawData = msg; } catch (e) { console.error('latestRawData:', e); }
+                try { updateTabPrices(msg); } catch (e) { console.error('updateTabPrices:', e); }
+                try { serverData = applyTabView(msg); } catch (e) { console.error('applyTabView:', e); serverData = msg; }
+                try { if (msg.orderBook) orderBookCache = { timestamp: Date.now(), data: msg.orderBook }; } catch (e) {}
+                try { if (msg.recentTrades) recentTradesCache = { timestamp: Date.now(), trades: msg.recentTrades }; } catch (e) {}
+                try { if (msg.fundingRate !== null && msg.fundingRate !== undefined) fundingRateCache = { timestamp: Date.now(), rate: msg.fundingRate }; } catch (e) {}
+                try { if (msg.kalshiCloseTime) kalshiCloseTime = msg.kalshiCloseTime; } catch (e) {}
+                try { if (msg.kalshiTicker) kalshiMarketTicker = msg.kalshiTicker; } catch (e) {}
+                try {
+                    if (msg.predictionLog && msg.predictionLog.length > 0) {
+                        mergePredictionLogs(msg.predictionLog);
+                        renderPredictionHistory();
+                    }
+                } catch (e) { console.error('predictionLog merge/render:', e); }
+                try { fetchAndPredict(); } catch (e) { console.error('fetchAndPredict:', e); }
             };
 
             ws.onclose = () => {
