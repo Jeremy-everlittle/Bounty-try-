@@ -69,6 +69,20 @@ let lastEntryTime = 0;          // ms epoch of most recent buy; gates reflexive 
 let lastSellAt = 0;             // ms epoch of most recent sell order; prevents hammering
 let consecutiveEmptyReconciles = 0; // legacy debounce, kept for compat
 let thought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
+
+// Per-asset operation queue — serializes every public method that reads or
+// writes currentPosition or talks to Kalshi. Without this, the fetch loop
+// can fire onSellSignal while refreshLivePosition is mid-flight, leading to
+// torn reads of currentPosition. Internal helpers (placeBuy/placeSell/etc.)
+// are NOT enqueued; they always run inside an already-locked outer call.
+let opChain = Promise.resolve();
+function enqueue(fn) {
+    const next = opChain.then(fn, fn);
+    // Don't propagate failures down the chain — one failed op shouldn't
+    // poison every subsequent op.
+    opChain = next.then(() => undefined, () => undefined);
+    return next;
+}
 // Latest market data snapshot (orderbook + price) for this asset.
 // Updated once per fetch cycle by the server so placeSell can crystallize
 // paper sells at the live bid instead of the stale entry price.
@@ -884,18 +898,24 @@ function resetState() {
     setThought('idle', 'state reset');
 }
 
+// Methods that read/write currentPosition or call Kalshi go through the
+// per-asset op queue so they execute serially. Synchronous setters/getters
+// (setKillSwitch, getStatus, getPaperBalances, etc.) bypass the queue.
 return {
     assetKey,
     initFromDB,
     setMarketData,
-    reconcileFromKalshi,
-    clearLocalPosition,
-    onNewPrediction,
-    onSellSignal,
-    onPeriodEnd,
-    onDipOpportunity,
-    onLateLock,
-    onReentryCheck,
+    reconcileFromKalshi: (...args) => enqueue(() => reconcileFromKalshi(...args)),
+    clearLocalPosition: (...args) => enqueue(() => clearLocalPosition(...args)),
+    onNewPrediction: (...args) => enqueue(() => onNewPrediction(...args)),
+    onSellSignal: (...args) => enqueue(() => onSellSignal(...args)),
+    onPeriodEnd: (...args) => enqueue(() => onPeriodEnd(...args)),
+    onDipOpportunity: (...args) => enqueue(() => onDipOpportunity(...args)),
+    onLateLock: (...args) => enqueue(() => onLateLock(...args)),
+    onReentryCheck: (...args) => enqueue(() => onReentryCheck(...args)),
+    forceBet: (...args) => enqueue(() => forceBet(...args)),
+    pressBet: (...args) => enqueue(() => pressBet(...args)),
+    forceSell: (...args) => enqueue(() => forceSell(...args)),
     setKillSwitch,
     setPaperMode,
     setPaperBalance,
@@ -905,9 +925,6 @@ return {
     resetState,
     getStatus,
     onTradeNotify,
-    forceBet,
-    pressBet,
-    forceSell,
     snapshotBalanceToDB,
     applyConfig,
     config,
