@@ -18,6 +18,7 @@ const kalshiAuth = require('./kalshi-auth');
 const db = require('./db');
 const decisionLog = require('./decision-logger');
 const engine = require('./prediction-engine');
+const eventLog = require('./event-log');
 
 // ── Config ────────────────────────────────────────────────────────
 const config = {
@@ -109,10 +110,12 @@ async function reconcileFromKalshi() {
             currentPosition.totalContracts = liveQty;
             currentPosition.contracts = liveQty;
             setThought('reconcile', `adjusted contracts ${before}→${liveQty} from Kalshi for ${ticker}`);
+            eventLog.log('reconcile_adjust', { asset: assetKey, ticker, before, after: liveQty });
         }
     } catch (e) {
         // Transient API failure — keep local state, log once.
         console.warn('[trade-executor] reconcile failed:', e.message);
+        eventLog.log('reconcile_error', { asset: assetKey, message: e.message });
     }
 }
 
@@ -157,6 +160,14 @@ function pushTrade(trade) {
     };
     recentTrades.unshift(enriched);
     if (recentTrades.length > 200) recentTrades.length = 200;
+    eventLog.log('trade', {
+        asset: assetKey,
+        type: enriched.type, side: enriched.side, contracts: enriched.contracts,
+        limitPrice: enriched.limitPrice, ticker: enriched.ticker,
+        periodKey: enriched.periodKey, pnlCents: enriched.pnlCents,
+        reason: enriched.reason, paperMode: enriched.paperMode,
+        sellPriceSource: enriched.sellPriceSource,
+    });
     for (const cb of tradeListeners) {
         try { cb(enriched); } catch (e) { console.error('[trade-executor] listener error:', e.message); }
     }
@@ -327,6 +338,10 @@ async function onSellSignal(sellSignal, minutesRemaining, prediction, strike, cu
         const heldSec = (Date.now() - (lastEntryTime || 0)) / 1000;
         if (heldSec < (config.minHoldSeconds || 0)) {
             setThought('holding', `holding ${currentPosition.contracts}x ${currentPosition.side} (min hold ${Math.ceil((config.minHoldSeconds||0) - heldSec)}s left)`);
+            eventLog.log('min_hold_block', {
+                asset: assetKey, sellLevel: sellSignal.level, heldSec: Math.round(heldSec),
+                minHoldSeconds: config.minHoldSeconds, side: currentPosition.side, ticker: currentPosition.ticker,
+            });
             return;
         }
         decisionLog.logSellDecision({
@@ -472,6 +487,10 @@ async function onReentryCheck(prediction, strike, currentPrice, minutesRemaining
     // thrash that bleeds bid-ask spread on every round-trip.
     if (reentriesThisPeriod >= (config.maxReentriesPerPeriod ?? 1)) {
         setThought('skip', `re-entry cap reached (${reentriesThisPeriod}/${config.maxReentriesPerPeriod ?? 1})`);
+        eventLog.log('reentry_cap', {
+            asset: assetKey, periodKey, reentriesThisPeriod,
+            cap: config.maxReentriesPerPeriod ?? 1,
+        });
         return;
     }
     const bq = prediction?._betQuality;

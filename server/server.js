@@ -10,6 +10,7 @@ const store = require('./store');
 const engine = require('./prediction-engine');
 const decisionLog = require('./decision-logger');
 const autoTraderLog = require('./auto-trader-log');
+const eventLog = require('./event-log');
 const tradeExecutor = require('./trade-executor');
 const kalshiAuth = require('./kalshi-auth');
 const db = require('./db');
@@ -999,6 +1000,7 @@ async function fetchAllData() {
                 const errMsg = `${e.message}${e.status ? ' (HTTP ' + e.status + ')' : ''}`;
                 console.log(`[kalshi-ob] Auth API failed (${kalshiAuth.getEnvironment()}): ${errMsg}`);
                 state.kalshiOrderBookError = errMsg;
+                eventLog.log('kalshi_ob_fail', { asset: 'btc', stage: 'auth', message: errMsg, env: kalshiAuth.getEnvironment() });
             }
             // Try 2: public Kalshi API (same data, no auth needed)
             if (!state.kalshiOrderBook) {
@@ -1445,6 +1447,7 @@ async function fetchAllData() {
                 const errMsg = `${e.message}${e.status ? ' (HTTP ' + e.status + ')' : ''}`;
                 console.log(`[kalshi-ob-eth] Auth API failed (${kalshiAuth.getEnvironment()}): ${errMsg}`);
                 ethState.kalshiOrderBookError = errMsg;
+                eventLog.log('kalshi_ob_fail', { asset: 'eth', stage: 'auth', message: errMsg, env: kalshiAuth.getEnvironment() });
             }
             if (!ethState.kalshiOrderBook) {
                 try {
@@ -1650,6 +1653,7 @@ async function fetchAllData() {
     } catch (e) {
         console.error('Fetch cycle error:', e);
         state.error = e.message;
+        eventLog.log('fetch_cycle_error', { message: e.message, stack: (e.stack || '').split('\n').slice(0, 5).join('\n') });
     }
 }
 
@@ -1966,6 +1970,31 @@ app.get('/api/error-analysis', (req, res) => {
 
 app.get('/api/learned-corrections', (req, res) => {
     res.json(engine.getLearnedCorrections());
+});
+
+// ── Debug: structured event log (ring buffer) ──
+// Query: ?n=500 (default 500, max 5000) ?since=ISO ?type=trade,reconcile_clear ?asset=btc ?format=jsonl
+app.get('/api/debug/events', (req, res) => {
+    const n = Math.min(5000, Math.max(1, parseInt(req.query.n, 10) || 500));
+    const events = eventLog.recent({
+        n,
+        since: req.query.since || undefined,
+        type: req.query.type || undefined,
+        asset: req.query.asset || undefined,
+    });
+    if (req.query.format === 'jsonl') {
+        res.type('application/x-ndjson').send(events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : ''));
+    } else {
+        res.json({ count: events.length, counts: eventLog.counts(), events });
+    }
+});
+app.get('/api/debug/events/files', (req, res) => {
+    res.json({ files: eventLog.listFiles(), logDir: eventLog.LOG_DIR });
+});
+app.get('/api/debug/events/:date', (req, res) => {
+    const content = eventLog.readFile(req.params.date);
+    if (content == null) return res.status(404).send('No event log for that date.');
+    res.type('application/x-ndjson').send(content);
 });
 
 // ── Debug: raw Kalshi market data (dumps EVERYTHING) ──
@@ -2651,6 +2680,12 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
     console.error('Unhandled rejection, saving state:', reason);
     store.forceSave();
+    try {
+        eventLog.log('unhandled_rejection', {
+            message: reason?.message || String(reason),
+            stack: (reason?.stack || '').split('\n').slice(0, 5).join('\n'),
+        });
+    } catch (e) { /* event-log itself failed; nothing to do */ }
     // Activate kill switch on unhandled rejection — unknown failure mode
     if (tradeExecutor && typeof tradeExecutor.setKillSwitch === 'function') {
         console.error('[server] CRITICAL: Activating kill switch due to unhandled rejection');
@@ -2688,6 +2723,7 @@ tradeExecutor.initFromDB().then(async () => {
 });
 
 server.listen(PORT, () => {
+    eventLog.log('server_start', { port: PORT, version: BUILD_VERSION.hash, env: kalshiAuth.getEnvironment() });
     console.log(`BTC Predictor server running on port ${PORT}`);
     console.log(`Frontend: http://localhost:${PORT}`);
     console.log(`Health:   http://localhost:${PORT}/api/health`);
