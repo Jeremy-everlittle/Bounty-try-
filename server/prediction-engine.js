@@ -16,6 +16,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 const store = require('./store');
+const externalSignals = require('./external-signals');
 
 // ── Tunables (shared across assets — tune by editing here) ───────
 const EWMA_LAMBDA   = 0.94;
@@ -264,7 +265,48 @@ function createEngine(assetKey = 'btc') {
         // tiny, making the lognormal CDF too narrow and prob too extreme.
         const intervalMin = inferSampleIntervalMinutes(marketData);
         const sigma = sigmaPerSample / Math.sqrt(intervalMin);
-        const drift = driftPerSample / intervalMin;
+        const baseDrift = driftPerSample / intervalMin;
+
+        // External signals nudge drift slightly. All weights are intentionally
+        // small (~5-20% of typical |drift|) so the price-action history
+        // remains the dominant input. Each contribution is logged on the
+        // prediction so we can audit which signals moved the bet.
+        const signalContributions = {};
+        let drift = baseDrift;
+
+        // fearGreed in [0,100], 50=neutral. Greedy = mildly bullish bias.
+        if (marketData?.fearGreed != null) {
+            const fg = (marketData.fearGreed - 50) / 50; // -> [-1, 1]
+            const adj = fg * 0.00005; // tiny per-minute log-return nudge
+            drift += adj;
+            signalContributions.fearGreed = adj;
+        }
+        // fundingRate (perp funding): positive = crowded longs = mean-reverting
+        // bearish. Negative = crowded shorts = mean-reverting bullish.
+        const fr = marketData?.fundingRate;
+        const frVal = typeof fr === 'number' ? fr : (fr ? fr.settledRate : null);
+        if (typeof frVal === 'number' && isFinite(frVal)) {
+            const adj = -frVal * 0.02; // funding ~0.0001 -> drift adj ~-2e-6
+            drift += adj;
+            signalContributions.fundingRate = adj;
+        }
+        // macroEvent: imminent FOMC/CPI/NFP — dampen drift toward zero
+        // (uncertainty flips sign rapidly across an event window).
+        if (marketData?.macroEvent && marketData.macroEvent.imminent) {
+            const dampen = -baseDrift * 0.5;
+            drift += dampen;
+            signalContributions.macroEventDampen = dampen;
+        }
+        // External-signals composite riskAppetite (S&P, DXY, VIX, gold).
+        // Cached, non-blocking — empty values when fetches haven't run yet.
+        try {
+            const ext = externalSignals.getSignalSummary && externalSignals.getSignalSummary();
+            if (ext && typeof ext.riskAppetite === 'number') {
+                const adj = ext.riskAppetite * 0.0001; // ~10% of typical drift
+                drift += adj;
+                signalContributions.riskAppetite = adj;
+            }
+        } catch (e) { /* don't let a stale fetch break the prediction */ }
 
         const M = Math.max(0.5, minutesAhead || 7.5);
         const totalSigma = sigma * Math.sqrt(M);
@@ -310,6 +352,7 @@ function createEngine(assetKey = 'btc') {
         const out = {
             predictedPrice, predictedHigh, predictedLow,
             probability, rawProbability, confidence, signals, ensembleConfidence,
+            signalContributions, // per-input drift adjustments for transparency
             _exhaustion: exhaustion, _choppiness: choppiness, _remainingVol: totalSigma,
             _rawSignals: { momentum, trend, rsi, sigma, drift, current },
         };
