@@ -33,7 +33,10 @@ const config = {
 };
 
 // ── Shared state (one wallet / one switch across BTC/ETH/etc) ─────
-let killSwitch = false;
+// Kill switch defaults to ON across the multi-week reliability refactor.
+// Real money is blocked until the user explicitly flips it off in the UI;
+// the choice is then persisted in `store_state` so it survives restarts.
+let killSwitch = true;
 const tradeListeners = [];
 // Paper balances in CENTS — demo + production tracked separately
 const paperBalances = { demo: 250000, production: 250000 };
@@ -649,6 +652,14 @@ async function forceSell() {
 function setKillSwitch(active) {
     killSwitch = !!active;
     setThought(killSwitch ? 'killed' : 'idle', killSwitch ? 'KILL SWITCH ON' : 'kill-switch off');
+    // Persist so a restart respects the operator's last decision rather than
+    // silently re-enabling trading on the in-memory default.
+    saveKillSwitchToDB();
+}
+
+async function saveKillSwitchToDB() {
+    try { await db.saveStoreState('kill-switch', { active: killSwitch }); }
+    catch (e) { /* non-fatal */ }
 }
 
 function setPaperMode(paperMode) {
@@ -754,6 +765,19 @@ async function snapshotBalanceToDB() {
 
 async function initFromDB() {
     if (!isBtc) return; // schema currently BTC-only; ETH starts fresh
+    // Kill switch: load the operator's last decision. Module default is ON
+    // (safety) so if there's no saved row the bot stays parked until the user
+    // explicitly enables trading.
+    try {
+        const saved = await db.loadStoreState('kill-switch');
+        if (saved && typeof saved === 'object' && typeof saved.active === 'boolean') {
+            killSwitch = saved.active;
+            setThought(killSwitch ? 'killed' : 'idle', killSwitch ? 'KILL SWITCH ON (loaded from DB)' : 'kill-switch off (loaded from DB)');
+        } else {
+            setThought('killed', 'KILL SWITCH ON (default — flip off in UI to enable trading)');
+        }
+        console.log(`[trade-executor] Kill switch on startup: ${killSwitch ? 'ON' : 'off'}`);
+    } catch (e) { /* non-fatal — keep default ON */ }
     try {
         const stats = await db.loadDailyStats(todayKey());
         if (stats) dailyStats = { ...dailyStats, ...stats, date: todayKey() };
