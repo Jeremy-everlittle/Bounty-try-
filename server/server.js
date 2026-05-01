@@ -1041,6 +1041,9 @@ async function fetchAllData() {
             kalshiOrderBook: state.kalshiOrderBook,
             currentPrice: state.brtiPrice,
         });
+        // Reconcile local position with Kalshi (live mode only). Clears stale
+        // 'currentPosition' if Kalshi shows no actual fill / position.
+        tradeExecutor.reconcileFromKalshi().catch(e => console.warn('[server] BTC reconcile:', e.message));
 
         // ═══════════════════════════════════════════════════════
         // SERVER-SIDE PREDICTION ENGINE
@@ -1476,6 +1479,7 @@ async function fetchAllData() {
             kalshiOrderBook: ethState.kalshiOrderBook,
             currentPrice: ethState.currentPrice,
         });
+        ethExecutor.reconcileFromKalshi().catch(e => console.warn('[server] ETH reconcile:', e.message));
 
         try {
             const ethPeriod = store.getCurrentPeriod('eth');
@@ -2424,6 +2428,19 @@ app.post('/api/trading/force-sell-all', async (req, res) => {
     res.json({ ok: true, results });
 });
 
+// Manually clear a stale local position when the executor thinks it has one
+// but Kalshi shows nothing. No order is placed.
+app.post('/api/trading/clear-local-position', (req, res) => {
+    const asset = req.body?.asset === 'eth' ? 'eth' : 'btc';
+    const { executor } = executorContext(asset);
+    try {
+        const result = executor.clearLocalPosition();
+        res.json({ asset, ...result });
+    } catch (err) {
+        res.status(500).json({ ok: false, reason: err.message });
+    }
+});
+
 app.post('/api/trading/config', (req, res) => {
     const updates = req.body;
     if (!updates || typeof updates !== 'object') {
@@ -2451,9 +2468,13 @@ app.post('/api/trading/environment', (req, res) => {
         return res.status(400).json({ error: "environment must be 'demo' or 'production'" });
     }
     try {
-        tradeExecutor.setKillSwitch(true);
+        tradeExecutor.setKillSwitch(true); // shared switch — applies to both
         kalshiAuth.setEnvironment(env);
+        // Reset BOTH executors. resetState is per-asset (currentPosition,
+        // soldThisPeriod, etc. live in each closure); without resetting eth
+        // an ETH position from the prior environment would survive the swap.
         tradeExecutor.resetState();
+        ethExecutor.resetState();
         // SAFETY: switching to production forces paper mode on — user must explicitly disable it
         if (env === 'production') {
             tradeExecutor.setPaperMode(true);

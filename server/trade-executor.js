@@ -69,6 +69,64 @@ let thought = { status: 'idle', message: 'Waiting for prediction', timestamp: Da
 let latestMarketData = null;
 function setMarketData(md) { latestMarketData = md || null; }
 
+// Pull live positions from Kalshi and clear our local state if Kalshi shows
+// nothing for our ticker. Catches three drift scenarios:
+//   1. Order was placed but never filled (Kalshi rejected, expired, etc.).
+//   2. Position was sold/settled out-of-band (manually in the Kalshi app).
+//   3. Position resolved on Kalshi but our onPeriodEnd never fired.
+// Paper mode is local-only — no reconcile needed. On API failure we keep our
+// state as-is rather than wiping a real position on a transient network blip.
+async function reconcileFromKalshi() {
+    if (config.paperMode) return;
+    if (!currentPosition) return;
+    if (!(kalshiAuth.isConfigured && kalshiAuth.isConfigured())) return;
+    // Ignore positions placed in the last ~10s — Kalshi's positions endpoint
+    // can lag a freshly-filled order by a second or two, and a false-negative
+    // here would wipe a real position right after we entered it.
+    const ageMs = Date.now() - (lastEntryTime || currentPosition.entryTime || 0);
+    if (ageMs < 10_000) return;
+    try {
+        const ticker = currentPosition.ticker;
+        const resp = await kalshi.getPositions(); // all positions; we'll filter
+        const list = (resp && resp.market_positions) || [];
+        const match = list.find(p => p && p.ticker === ticker);
+        const liveQty = match ? Math.abs(parseInt(match.position, 10) || 0) : 0;
+        if (liveQty === 0) {
+            const stale = currentPosition;
+            currentPosition = null;
+            soldThisPeriod = true; // don't re-enter the same period reflexively
+            setThought('reconcile', `cleared stale ${stale.contracts}x ${stale.side} on ${ticker} — Kalshi shows no position`);
+            pushTrade({
+                type: 'reconcile_clear', action: 'reconcile', ticker,
+                side: stale.side, direction: stale.side, contracts: stale.contracts,
+                periodKey: stale.periodKey, paperMode: false,
+                reason: 'Kalshi has no matching position',
+            });
+        } else if (liveQty !== currentPosition.totalContracts) {
+            // Order partially filled (or we have leftover from earlier). Trust
+            // Kalshi's count rather than our optimistic local one.
+            const before = currentPosition.totalContracts;
+            currentPosition.totalContracts = liveQty;
+            currentPosition.contracts = liveQty;
+            setThought('reconcile', `adjusted contracts ${before}→${liveQty} from Kalshi for ${ticker}`);
+        }
+    } catch (e) {
+        // Transient API failure — keep local state, log once.
+        console.warn('[trade-executor] reconcile failed:', e.message);
+    }
+}
+
+// Manual escape hatch: nuke local position without placing any order. For when
+// reconcile hasn't caught the drift yet and the user wants to clear the panel.
+function clearLocalPosition() {
+    if (!currentPosition) return { ok: false, reason: 'no local position' };
+    const cleared = currentPosition;
+    currentPosition = null;
+    soldThisPeriod = true;
+    setThought('idle', `manually cleared local ${cleared.contracts}x ${cleared.side}`);
+    return { ok: true, cleared };
+}
+
 function setThought(status, message, detail) {
     thought = { status, message, timestamp: Date.now(), detail: detail || null };
 }
@@ -684,6 +742,8 @@ return {
     assetKey,
     initFromDB,
     setMarketData,
+    reconcileFromKalshi,
+    clearLocalPosition,
     onNewPrediction,
     onSellSignal,
     onPeriodEnd,
