@@ -1683,8 +1683,19 @@
                 }
                 const periodPnlCents = periodRealizedPnlCents();
 
-                // Determine outcome
+                // Determine outcome.
+                // The badge has three potential sources of truth:
+                //   1. A 'settle' trade row exists (period closed with position
+                //      still open at expiry — onPeriodEnd pushed it).
+                //   2. The prediction was graded (p.correct !== null) and we
+                //      have realized P&L from a mid-period sell. Without this
+                //      branch, every period that exited early via SELL stayed
+                //      stuck on PENDING forever even though the period had
+                //      ended — the renderer was waiting for a settle row that
+                //      onPeriodEnd never pushes when currentPosition was null.
+                //   3. Period still active or undecided.
                 let outcomeLabel, outcomeCls, periodCls;
+                const isGraded = p && p.correct !== null && p.correct !== undefined;
                 if (settlement) {
                     if (settlement.correct) {
                         outcomeLabel = 'WIN'; outcomeCls = 'period-outcome-win'; periodCls = 'period-win';
@@ -1694,6 +1705,31 @@
                         totalLosses++;
                     }
                     totalPnlCents += periodPnlCents;
+                } else if (isGraded && hasTrades) {
+                    // Mid-period exit. Win/Loss is determined by realized P&L,
+                    // NOT by whether the prediction was right — a "wrong"
+                    // prediction can still be a winning trade if we sold into
+                    // a favorable bid before the period closed.
+                    if (periodPnlCents > 0) {
+                        outcomeLabel = 'WIN'; outcomeCls = 'period-outcome-win'; periodCls = 'period-win';
+                        totalWins++;
+                    } else if (periodPnlCents < 0) {
+                        outcomeLabel = 'LOSS'; outcomeCls = 'period-outcome-loss'; periodCls = 'period-loss';
+                        totalLosses++;
+                    } else {
+                        // Exactly break-even (sold at entry). Use the
+                        // prediction's correct flag for tie-breaking.
+                        if (p.correct) {
+                            outcomeLabel = 'WIN'; outcomeCls = 'period-outcome-win'; periodCls = 'period-win';
+                            totalWins++;
+                        } else {
+                            outcomeLabel = 'LOSS'; outcomeCls = 'period-outcome-loss'; periodCls = 'period-loss';
+                            totalLosses++;
+                        }
+                    }
+                    totalPnlCents += periodPnlCents;
+                } else if (!hasTrades && isGraded) {
+                    outcomeLabel = 'NO BET'; outcomeCls = 'period-outcome-nobet'; periodCls = 'period-no-bet';
                 } else if (!hasTrades) {
                     outcomeLabel = 'NO BET'; outcomeCls = 'period-outcome-nobet'; periodCls = 'period-no-bet';
                 } else {
@@ -1824,8 +1860,11 @@
                         html += '</div>';
                     }
 
-                    // P&L summary for the period (sum across every leg, not just the final settle)
-                    if (settlement) {
+                    // P&L summary for the period — show on any resolved
+                    // period (settle row OR graded prediction with trades),
+                    // not just on full settlements. Without this, mid-period
+                    // exits had a winning SELL row but no Period P&L line.
+                    if (settlement || (isGraded && hasTrades)) {
                         const pnl = periodPnlCents;
                         const pnlPos = pnl > 0;
                         html += '<div class="period-pnl-summary">' +
