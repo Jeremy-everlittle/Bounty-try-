@@ -2713,23 +2713,32 @@ const PORT = process.env.PORT || 3000;
 store.load();
 
 // Initialize PostgreSQL database, restore trade history & store state, then start server
-tradeExecutor.initFromDB().then(async () => {
+// Init promise: complete BEFORE the prediction/trading loop starts.
+// Without this gate, fetchLoop -> onNewPrediction can fire while initFromDB
+// is still loading the saved position, producing a double-position bug.
+// We additionally init the ETH executor here (it was missing before) so
+// any saved ETH state, kill-switch row, or settings load on boot.
+const initPromise = Promise.allSettled([
+    tradeExecutor.initFromDB(),
+    ethExecutor.initFromDB(),
+    store.loadFromDB(),
+]).then((results) => {
+    const failed = results.filter(r => r.status === 'rejected');
+    if (failed.length) {
+        for (const f of failed) console.error('[db] init step failed:', f.reason?.message || f.reason);
+    }
     console.log('[db] Database initialization complete');
-    // Load persistent store data from DB (fills gaps if JSON file was wiped by deploy)
-    await store.loadFromDB();
-
-    // Position reconciliation on startup
     const tradeStatus = tradeExecutor.getStatus();
     if (tradeStatus.currentPosition) {
-        console.warn(`[server] STARTUP: Found existing position — ${tradeStatus.currentPosition.side} ${tradeStatus.currentPosition.contracts || tradeStatus.currentPosition.totalContracts}x. Verify this matches Kalshi exchange state.`);
+        console.warn(`[server] STARTUP: Found existing BTC position — ${tradeStatus.currentPosition.side} ${tradeStatus.currentPosition.contracts || tradeStatus.currentPosition.totalContracts}x. Verify this matches Kalshi exchange state.`);
     }
-
-    // Run data retention cleanup every hour
+    const ethStatus = ethExecutor.getStatus();
+    if (ethStatus.currentPosition) {
+        console.warn(`[server] STARTUP: Found existing ETH position — ${ethStatus.currentPosition.side} ${ethStatus.currentPosition.contracts || ethStatus.currentPosition.totalContracts}x. Verify this matches Kalshi exchange state.`);
+    }
     setInterval(() => {
         db.runRetention().catch(e => console.error('[server] Retention error:', e.message));
-    }, 3600000); // 1 hour
-}).catch(e => {
-    console.error('[db] Database initialization failed (continuing without DB):', e.message);
+    }, 3600000);
 });
 
 server.listen(PORT, () => {
@@ -2747,14 +2756,17 @@ server.listen(PORT, () => {
         console.warn('⚠️  WARNING: LIVE TRADING WITH REAL MONEY IS ACTIVE. Set KALSHI_ENV=demo or PAPER_MODE=true to disable.');
     }
 
-    // Fetch loop: setTimeout recursion prevents overlapping when APIs are slow
-    async function fetchLoop() {
-        try {
-            await fetchAllData();
-        } catch (e) {
-            console.error('[server] fetchLoop error (will retry next cycle):', e.message);
+    // Wait for DB init before any trade decision can fire.
+    initPromise.then(() => {
+        console.log('[server] Init complete — starting fetch loop');
+        async function fetchLoop() {
+            try {
+                await fetchAllData();
+            } catch (e) {
+                console.error('[server] fetchLoop error (will retry next cycle):', e.message);
+            }
+            setTimeout(fetchLoop, 2000);
         }
-        setTimeout(fetchLoop, 2000);
-    }
-    fetchLoop();
+        fetchLoop();
+    });
 });
