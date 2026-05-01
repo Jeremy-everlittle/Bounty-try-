@@ -199,7 +199,7 @@ function createEngine(assetKey = 'btc') {
         edgeDecayAlert: false,
     };
 
-    function recordOutcome(correct) {
+    function recordOutcome(correct, pnlCents = 0) {
         sessionRisk.results.push(correct ? 'W' : 'L');
         if (sessionRisk.results.length > 50) sessionRisk.results.shift();
         if (correct) {
@@ -219,10 +219,27 @@ function createEngine(assetKey = 'btc') {
         const last20 = sessionRisk.results.slice(-20);
         const wins = last20.filter(x => x === 'W').length;
         sessionRisk.edgeDecayAlert = last20.length >= 20 && wins / last20.length < 0.40;
+        // Track running session P&L + peak so drawdown gating is real, not
+        // just an unused field. pnlCents may be 0 when caller doesn't have a
+        // figure (e.g. live-mode settle), in which case drawdown stays put.
+        if (typeof pnlCents === 'number' && isFinite(pnlCents)) {
+            sessionRisk.sessionPnL = (sessionRisk.sessionPnL || 0) + pnlCents;
+            if (sessionRisk.sessionPnL > (sessionRisk.peakPnL || 0)) {
+                sessionRisk.peakPnL = sessionRisk.sessionPnL;
+            }
+            sessionRisk.currentDrawdown = Math.max(0, (sessionRisk.peakPnL || 0) - sessionRisk.sessionPnL);
+        }
     }
 
     function getSessionRiskMultiplier() {
         if (sessionRisk.coolingOff) return 0.0;
+        // Drawdown gating: scale bet size down as the session digs deeper
+        // below its prior peak. ≥$200 drawdown -> 50%, ≥$500 -> 25%, ≥$1000 ->
+        // pause. Above and beyond the existing consecutive-loss check.
+        const dd = sessionRisk.currentDrawdown || 0;
+        if (dd >= 100000) return 0.0;
+        if (dd >= 50000) return 0.25;
+        if (dd >= 20000) return 0.5;
         if (sessionRisk.edgeDecayAlert) return 0.5;
         if (sessionRisk.consecutiveLosses >= 2) return 0.7;
         if (sessionRisk.consecutiveWins >= 3) return 1.1;
