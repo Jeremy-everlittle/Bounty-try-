@@ -288,42 +288,47 @@ function createEngine(assetKey = 'btc') {
         // small (~5-20% of typical |drift|) so the price-action history
         // remains the dominant input. Each contribution is logged on the
         // prediction so we can audit which signals moved the bet.
+        // NOTE: every isFinite() check below is load-bearing — typeof NaN ===
+        // 'number' in JS, so a single NaN in any input would otherwise
+        // poison drift -> probability -> the whole prediction.
         const signalContributions = {};
         let drift = baseDrift;
 
         // fearGreed in [0,100], 50=neutral. Greedy = mildly bullish bias.
-        if (marketData?.fearGreed != null) {
+        if (Number.isFinite(marketData?.fearGreed)) {
             const fg = (marketData.fearGreed - 50) / 50; // -> [-1, 1]
-            const adj = fg * 0.00005; // tiny per-minute log-return nudge
+            const adj = fg * 0.00005;
             drift += adj;
             signalContributions.fearGreed = adj;
         }
         // fundingRate (perp funding): positive = crowded longs = mean-reverting
         // bearish. Negative = crowded shorts = mean-reverting bullish.
         const fr = marketData?.fundingRate;
-        const frVal = typeof fr === 'number' ? fr : (fr ? fr.settledRate : null);
-        if (typeof frVal === 'number' && isFinite(frVal)) {
-            const adj = -frVal * 0.02; // funding ~0.0001 -> drift adj ~-2e-6
+        const frVal = Number.isFinite(fr) ? fr : (fr && Number.isFinite(fr.settledRate) ? fr.settledRate : null);
+        if (Number.isFinite(frVal)) {
+            const adj = -frVal * 0.02;
             drift += adj;
             signalContributions.fundingRate = adj;
         }
-        // macroEvent: imminent FOMC/CPI/NFP — dampen drift toward zero
-        // (uncertainty flips sign rapidly across an event window).
-        if (marketData?.macroEvent && marketData.macroEvent.imminent) {
+        // macroEvent: imminent FOMC/CPI/NFP — dampen drift toward zero.
+        if (marketData?.macroEvent && marketData.macroEvent.imminent && Number.isFinite(baseDrift)) {
             const dampen = -baseDrift * 0.5;
             drift += dampen;
             signalContributions.macroEventDampen = dampen;
         }
         // External-signals composite riskAppetite (S&P, DXY, VIX, gold).
-        // Cached, non-blocking — empty values when fetches haven't run yet.
         try {
             const ext = externalSignals.getSignalSummary && externalSignals.getSignalSummary();
-            if (ext && typeof ext.riskAppetite === 'number') {
-                const adj = ext.riskAppetite * 0.0001; // ~10% of typical drift
+            if (ext && Number.isFinite(ext.riskAppetite)) {
+                const adj = ext.riskAppetite * 0.0001;
                 drift += adj;
                 signalContributions.riskAppetite = adj;
             }
         } catch (e) { /* don't let a stale fetch break the prediction */ }
+        // Final safety: if any path above somehow still produced a NaN drift,
+        // fall back to baseDrift. Better to skip the signal than to NaN the
+        // entire prediction loop for the rest of the period.
+        if (!Number.isFinite(drift)) drift = Number.isFinite(baseDrift) ? baseDrift : 0;
 
         const M = Math.max(0.5, minutesAhead || 7.5);
         const totalSigma = sigma * Math.sqrt(M);
@@ -333,13 +338,19 @@ function createEngine(assetKey = 'btc') {
         const predictedLow  = current * Math.exp(expectedLogMove - 1.96 * totalSigma);
 
         let rawProbability = 0.5;
-        if (strikePrice && current > 0) {
+        if (strikePrice && current > 0 && Number.isFinite(totalSigma) && totalSigma > 0) {
             const z = (Math.log(strikePrice) - Math.log(current) - expectedLogMove) / totalSigma;
-            rawProbability = clip(1 - normCdf(z), 0.01, 0.99);
+            if (Number.isFinite(z)) {
+                rawProbability = clip(1 - normCdf(z), 0.01, 0.99);
+            }
         }
         // Apply learned calibration. Stays close to raw until we have ≥20
         // graded samples in the matching bin.
-        const probability = calibrate(rawProbability);
+        let probability = calibrate(rawProbability);
+        // Final NaN/Infinity guard — any upstream bug would otherwise leak
+        // 'P(up)=NaN%' into the UI and the bet quality assessment.
+        if (!Number.isFinite(probability)) probability = 0.5;
+        if (!Number.isFinite(rawProbability)) rawProbability = 0.5;
 
         const momentum = computeMomentum(prices);
         const trend = computeTrend(prices);
@@ -354,7 +365,8 @@ function createEngine(assetKey = 'btc') {
         let alignmentBonus = 0;
         if (momentumAligned) alignmentBonus += 0.1;
         if (trendAligned) alignmentBonus += 0.1;
-        const confidence = clip(distanceFrom50 + alignmentBonus - 0.3 * choppiness - 0.3 * exhaustion, 0.05, 0.95);
+        let confidence = clip(distanceFrom50 + alignmentBonus - 0.3 * (choppiness || 0) - 0.3 * (exhaustion || 0), 0.05, 0.95);
+        if (!Number.isFinite(confidence)) confidence = 0.05;
 
         const signals = {
             momentum: momentum > 0.0005 ? 'Bullish' : momentum < -0.0005 ? 'Bearish' : 'Neutral',
