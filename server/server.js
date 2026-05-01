@@ -898,6 +898,7 @@ async function fetchAllData() {
 
         // Store previous BRTI price before updating — used for accurate period-end grading
         const previousBrtiPrice = state.brtiPrice;
+        const previousEthPrice = ethState.currentPrice;
         if (brti.status === 'fulfilled' && brti.value) {
             state.brtiPrice = brti.value.price;
             state.brtiSources = brti.value.sources;
@@ -1520,15 +1521,33 @@ async function fetchAllData() {
 
             if (periodKey !== ethPeriod.periodKey) {
                 if (ethPeriod.periodKey !== null && ethState.currentPrice) {
-                    const ethGraded = ethEngine.gradeBayesianPrediction(ethState.currentPrice, periodKey);
-                    ethEngine.gradePreviousPrediction(ethState.currentPrice, periodKey);
-                    if (ethGraded && ethPeriod.periodKey) {
+                    // Grade against the LAST tick price from the closing period
+                    // (matches BTC pattern). gradeBayesianPrediction populates
+                    // calibration bins; gradePreviousPrediction marks the entry
+                    // 'correct'. After both run we read the graded entry from
+                    // the prediction log to feed onPeriodEnd — gradeBayesian
+                    // returns undefined, which was making the gate below
+                    // always false and ETH positions never settled.
+                    const ethGradingPrice = previousEthPrice || ethState.currentPrice;
+                    ethEngine.gradeBayesianPrediction(ethGradingPrice, periodKey);
+                    ethEngine.gradePreviousPrediction(ethGradingPrice, periodKey);
+
+                    const ethLog = store.getPredictionLog('eth');
+                    let ethLastGraded = null;
+                    for (let i = ethLog.length - 1; i >= 0; i--) {
+                        if (ethLog[i].correct !== undefined && ethLog[i].correct !== null && ethLog[i].periodKey !== periodKey) {
+                            ethLastGraded = ethLog[i];
+                            break;
+                        }
+                    }
+                    console.log(`[eth] Period transition ${ethPeriod.periodKey} → ${periodKey} | lastGraded: ${ethLastGraded ? ethLastGraded.periodKey + ' correct=' + ethLastGraded.correct : 'NONE'}`);
+                    if (ethLastGraded) {
                         await ethExecutor.onPeriodEnd({
-                            correct: ethGraded.correct,
-                            periodKey: ethPeriod.periodKey,
-                            actualDirection: ethGraded.actualDirection,
-                            strikePrice: ethPeriod.kalshiStrike,
-                            settlementPrice: ethState.currentPrice,
+                            correct: ethLastGraded.correct,
+                            periodKey: ethLastGraded.periodKey,
+                            actualDirection: ethLastGraded.actualDirection,
+                            strikePrice: ethLastGraded.startPrice,
+                            settlementPrice: ethLastGraded.actualPrice,
                         }).catch(e => console.error('[eth-executor] onPeriodEnd:', e.message));
                     }
                 }
