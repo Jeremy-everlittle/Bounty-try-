@@ -506,18 +506,28 @@ async function onPeriodEnd({ correct, periodKey, actualDirection, strikePrice, s
 
     const pnl = proceeds - totalCostCents;
     ensureDailyStats();
-    dailyStats.pnlCents += pnl;
+    // Only paper mode mutates dailyStats from a synthetic settlement. Live
+    // mode P&L is sourced from Kalshi-confirmed fills (each placeBuy/placeSell
+    // pushes its real cash flow); double-counting here was tripping the
+    // daily-loss kill switch on phantom losses. Wins/losses counters are
+    // updated either way so the W/L badge matches reality.
+    if (config.paperMode) {
+        dailyStats.pnlCents += pnl;
+    }
     if (won) dailyStats.wins += 1; else dailyStats.losses += 1;
 
     pushTrade({
         type: 'settle', action: 'settle', side, direction: side, contracts,
-        limitPrice: settleCents, ticker, periodKey, pnlCents: pnl,
+        limitPrice: settleCents, ticker, periodKey,
+        pnlCents: config.paperMode ? pnl : null, // live PnL is on Kalshi's books, not ours
         won, correct: won, actualDirection, strikePrice, settlementPrice,
         paperMode: config.paperMode,
     });
     decisionLog.logSettlement({ periodKey, won, pnlCents: pnl, contracts, side, actualDirection, settlementPrice });
 
     currentPosition = null;
+    // Drop the meta entry for this ticker — settlement closes the chapter.
+    if (ticker && metaByTicker[ticker]) delete metaByTicker[ticker];
     persistDailyStats();
     snapshotBalanceToDB().catch(() => {});
 }
