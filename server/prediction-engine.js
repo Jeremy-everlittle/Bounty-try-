@@ -228,6 +228,29 @@ function createEngine(assetKey = 'btc') {
         return 1.0;
     }
 
+    // Calibration: remap raw model probability through empirical win rates
+    // collected by gradeBayesianPrediction. If the model says "70%" and that
+    // bin has historically won 60% of the time, we report 60%, not 70%.
+    // Fallback to the raw probability when the bin doesn't yet have enough
+    // graded samples to be trusted.
+    const CALIBRATION_MIN_SAMPLES = 20;
+    function calibrate(rawProb) {
+        const bs = store.getBayesianState ? store.getBayesianState(assetKey) : null;
+        const bins = bs && bs.calibrationBins;
+        if (!bins) return rawProb;
+        const binIdx = Math.floor(clip(rawProb, 0, 0.999) * 10) / 10;
+        const key = binIdx.toFixed(1);
+        const bin = bins[key];
+        if (!bin || bin.total < CALIBRATION_MIN_SAMPLES) return rawProb;
+        // Empirical win rate for this raw-probability bin.
+        const empirical = bin.wins / bin.total;
+        // Interpolate halfway between raw and empirical until we have a lot
+        // of data, then trust empirical fully. Cap at 100 samples for full
+        // trust — beyond that nothing changes.
+        const trust = Math.min(1, (bin.total - CALIBRATION_MIN_SAMPLES) / 80);
+        return clip(rawProb * (1 - trust) + empirical * trust, 0.01, 0.99);
+    }
+
     function predictPrice(marketData, minutesAhead, strikePrice) {
         const prices = extractPrices(marketData);
         const current = prices.length ? prices[prices.length - 1] : (marketData?.currentPrice || strikePrice);
@@ -250,11 +273,14 @@ function createEngine(assetKey = 'btc') {
         const predictedHigh = current * Math.exp(expectedLogMove + 1.96 * totalSigma);
         const predictedLow  = current * Math.exp(expectedLogMove - 1.96 * totalSigma);
 
-        let probability = 0.5;
+        let rawProbability = 0.5;
         if (strikePrice && current > 0) {
             const z = (Math.log(strikePrice) - Math.log(current) - expectedLogMove) / totalSigma;
-            probability = clip(1 - normCdf(z), 0.01, 0.99);
+            rawProbability = clip(1 - normCdf(z), 0.01, 0.99);
         }
+        // Apply learned calibration. Stays close to raw until we have ≥20
+        // graded samples in the matching bin.
+        const probability = calibrate(rawProbability);
 
         const momentum = computeMomentum(prices);
         const trend = computeTrend(prices);
@@ -283,7 +309,7 @@ function createEngine(assetKey = 'btc') {
 
         const out = {
             predictedPrice, predictedHigh, predictedLow,
-            probability, confidence, signals, ensembleConfidence,
+            probability, rawProbability, confidence, signals, ensembleConfidence,
             _exhaustion: exhaustion, _choppiness: choppiness, _remainingVol: totalSigma,
             _rawSignals: { momentum, trend, rsi, sigma, drift, current },
         };
@@ -400,7 +426,8 @@ function createEngine(assetKey = 'btc') {
             predictedPrice: prediction.predictedPrice,
             predictedHigh: prediction.predictedHigh,
             predictedLow: prediction.predictedLow,
-            probability: prediction.probability,
+            probability: prediction.probability,        // calibrated
+            rawProbability: prediction.rawProbability,  // pre-calibration (used by grading)
             confidence: prediction.confidence,
             signals: prediction.signals,
             periodEnd,
@@ -447,11 +474,21 @@ function createEngine(assetKey = 'btc') {
         const entry = log.find(p => p.periodKey === periodKey);
         if (!entry || entry.startPrice == null) return;
         const wentUp = actualPrice >= entry.startPrice;
-        const predUp = entry.predictedPrice >= entry.startPrice;
+        // Grade against the bet side the model would actually have taken
+        // (probUp >= 0.5), matching the trade-side selection from P3.2.
+        // Falls back to predictedPrice for legacy entries that pre-date the
+        // probability field.
+        const predUp = entry.probability != null
+            ? entry.probability >= 0.5
+            : (entry.predictedPrice >= entry.startPrice);
         const correct = wentUp === predUp;
+        // Bin by RAW probability so the calibration map learns the model's
+        // bias (raw -> empirical). Falls back to displayed probability if
+        // raw wasn't recorded (older entries).
+        const probForBin = entry.rawProbability != null ? entry.rawProbability : (entry.probability || 0.5);
         store.updateBayesianState((bs) => {
             if (!bs.calibrationBins) bs.calibrationBins = {};
-            const bin = Math.floor((entry.probability || 0.5) * 10) / 10;
+            const bin = Math.floor(probForBin * 10) / 10;
             const key = bin.toFixed(1);
             if (!bs.calibrationBins[key]) bs.calibrationBins[key] = { wins: 0, total: 0 };
             bs.calibrationBins[key].total += 1;
