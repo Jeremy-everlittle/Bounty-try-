@@ -567,10 +567,27 @@ const ethExecutor = tradeExecutor.createExecutor('eth');
 
 // Combined prediction log: merge BTC + ETH entries, tag each with asset.
 // The frontend renders one history feed regardless of which tab is active.
+//
+// Cached because it's hit four times on every broadcast (root + REST + state)
+// and recomputing the sort + spread on 1000+ entries every 2s is wasted CPU.
+// Invalidation: cache key is the (btc.length, eth.length, lastBtcTs, lastEthTs)
+// fingerprint — rebuild only when something changed.
+let _combinedCache = null;
 function combinedPredictionLog() {
-    const btc = (store.getPredictionLog() || []).map(p => ({ ...p, asset: 'btc' }));
-    const eth = (store.getPredictionLog('eth') || []).map(p => ({ ...p, asset: 'eth' }));
-    return [...btc, ...eth].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    const btc = store.getPredictionLog() || [];
+    const eth = store.getPredictionLog('eth') || [];
+    const lastBtcTs = btc.length ? (btc[btc.length - 1].timestamp || 0) : 0;
+    const lastEthTs = eth.length ? (eth[eth.length - 1].timestamp || 0) : 0;
+    const fingerprint = `${btc.length}:${eth.length}:${lastBtcTs}:${lastEthTs}`;
+    if (_combinedCache && _combinedCache.fingerprint === fingerprint) {
+        return _combinedCache.value;
+    }
+    const merged = [
+        ...btc.map(p => ({ ...p, asset: 'btc' })),
+        ...eth.map(p => ({ ...p, asset: 'eth' })),
+    ].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    _combinedCache = { fingerprint, value: merged };
+    return merged;
 }
 
 function getPeriodKey() {
@@ -2017,7 +2034,9 @@ app.get('/api/debug/kalshi-raw', (req, res) => {
 // ── Trading endpoints ──
 
 app.get('/api/trading/status', (req, res) => {
-    res.json(tradeExecutor.getStatus());
+    const asset = req.query.asset === 'eth' ? 'eth' : 'btc';
+    const exec = asset === 'eth' ? ethExecutor : tradeExecutor;
+    res.json({ asset, ...exec.getStatus() });
 });
 
 // Trading analytics — historical data from PostgreSQL
