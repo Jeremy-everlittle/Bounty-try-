@@ -630,10 +630,6 @@ function createEngine(assetKey = 'btc') {
         };
     }
 
-    function getOnlineML() {
-        return { enabled: false, weights: {}, samples: 0 };
-    }
-
     return {
         assetKey,
         predictPrice,
@@ -651,7 +647,6 @@ function createEngine(assetKey = 'btc') {
         detectChoppiness,
         getSessionRiskMultiplier,
         sessionRisk,
-        getOnlineML,
     };
 }
 
