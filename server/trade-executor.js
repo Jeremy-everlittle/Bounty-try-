@@ -63,7 +63,8 @@ let soldThisPeriod = false;
 let lastPeriodKey = null;
 let reentriesThisPeriod = 0;
 let lastEntryTime = 0;          // ms epoch of most recent buy; gates reflexive sells
-let consecutiveEmptyReconciles = 0; // debounce for reconcile clear
+let lastSellAt = 0;             // ms epoch of most recent sell order; prevents hammering
+let consecutiveEmptyReconciles = 0; // legacy debounce, kept for compat
 let thought = { status: 'idle', message: 'Waiting for prediction', timestamp: Date.now(), detail: null };
 // Latest market data snapshot (orderbook + price) for this asset.
 // Updated once per fetch cycle by the server so placeSell can crystallize
@@ -71,78 +72,103 @@ let thought = { status: 'idle', message: 'Waiting for prediction', timestamp: Da
 let latestMarketData = null;
 function setMarketData(md) { latestMarketData = md || null; }
 
-// Pull live positions from Kalshi and clear our local state if Kalshi shows
-// nothing for our ticker. Catches three drift scenarios:
-//   1. Order was placed but never filled (Kalshi rejected, expired, etc.).
-//   2. Position was sold/settled out-of-band (manually in the Kalshi app).
-//   3. Position resolved on Kalshi but our onPeriodEnd never fired.
-// Paper mode is local-only — no reconcile needed. On API failure we keep our
-// state as-is rather than wiping a real position on a transient network blip.
-// Reconcile is gated by THREE safety mechanisms because a false-positive
-// clear is much worse than a missed clear (it doubles a real position when
-// the bot re-enters):
-//   1. Age guard: skip if the position is < 60s old. Kalshi's positions
-//      endpoint can take ~30-60s to reflect a fresh fill.
-//   2. Debounce: require RECONCILE_DEBOUNCE_HITS consecutive empty
-//      responses before clearing. A momentary API blip won't nuke a real
-//      position.
-//   3. Every decision is logged to event-log for forensics.
-const RECONCILE_MIN_AGE_MS = 60_000;
-const RECONCILE_DEBOUNCE_HITS = 2;
+// In LIVE mode, Kalshi is the source of truth for currentPosition. Every
+// fetch cycle we pull /portfolio/positions and rebuild currentPosition from
+// what Kalshi actually shows. This eliminates two bugs the optimistic local
+// model kept producing:
+//   - "Buy" rows for orders that are still resting (never filled).
+//   - "Sell" rows for positions that didn't actually exist on Kalshi.
+//
+// We keep a tiny per-ticker metadata cache (periodKey, entryTime) so that a
+// position pulled from Kalshi can be tagged with the period it belongs to —
+// Kalshi doesn't know about our 15-min slicing.
+//
+// Paper mode is unchanged: currentPosition is local optimistic state, since
+// there's nothing to reconcile against.
+const metaByTicker = {}; // ticker -> { periodKey, entryTime }
+let pendingOrderTicker = null; // ticker of the most recent live order placed
+let pendingOrderPlacedAt = 0;  // ms epoch — used to surface "PENDING FILL" UI hints
 
-async function reconcileFromKalshi() {
+async function refreshLivePosition() {
     if (config.paperMode) return;
-    if (!currentPosition) { consecutiveEmptyReconciles = 0; return; }
     if (!(kalshiAuth.isConfigured && kalshiAuth.isConfigured())) return;
-    const ageMs = Date.now() - (lastEntryTime || currentPosition.entryTime || 0);
-    if (ageMs < RECONCILE_MIN_AGE_MS) return;
     try {
-        const ticker = currentPosition.ticker;
         const resp = await kalshi.getPositions();
         const list = (resp && resp.market_positions) || [];
-        const match = list.find(p => p && p.ticker === ticker);
-        const liveQty = match ? Math.abs(parseInt(match.position, 10) || 0) : 0;
+        const active = list.filter(p => p && Math.abs(parseInt(p.position, 10) || 0) > 0);
 
-        if (liveQty === 0) {
-            consecutiveEmptyReconciles += 1;
-            // Debounce: only clear after N consecutive empty responses so a
-            // single API blip doesn't wipe a real position.
-            if (consecutiveEmptyReconciles < RECONCILE_DEBOUNCE_HITS) {
-                eventLog.log('reconcile_empty_pending', {
-                    asset: assetKey, ticker,
-                    consecutiveEmpty: consecutiveEmptyReconciles,
-                    needed: RECONCILE_DEBOUNCE_HITS,
-                    listSize: list.length,
-                    sampleTickers: list.slice(0, 5).map(p => p.ticker),
+        // Pick which Kalshi position represents OUR position. Prefer one that
+        // matches a ticker we have metadata for (i.e. we placed an order for
+        // it). If none match but there's a pending order ticker, prefer that.
+        let kpos = null;
+        if (currentPosition) kpos = active.find(p => p.ticker === currentPosition.ticker);
+        if (!kpos && pendingOrderTicker) kpos = active.find(p => p.ticker === pendingOrderTicker);
+        if (!kpos) {
+            // Fall back to any active position we have metadata for.
+            kpos = active.find(p => metaByTicker[p.ticker]);
+        }
+
+        if (!kpos) {
+            // Kalshi shows no relevant position. Clear local state.
+            if (currentPosition) {
+                const stale = currentPosition;
+                currentPosition = null;
+                soldThisPeriod = true; // don't reflexively re-enter same period
+                eventLog.log('position_cleared_by_kalshi', {
+                    asset: assetKey, ticker: stale.ticker,
+                    contracts: stale.contracts, side: stale.side,
+                    activeCount: active.length,
                 });
-                return;
             }
-            const stale = currentPosition;
-            currentPosition = null;
-            soldThisPeriod = true; // don't re-enter the same period reflexively
-            consecutiveEmptyReconciles = 0;
-            setThought('reconcile', `cleared stale ${stale.contracts}x ${stale.side} on ${ticker} after ${RECONCILE_DEBOUNCE_HITS} empty checks`);
-            pushTrade({
-                type: 'reconcile_clear', action: 'reconcile', ticker,
-                side: stale.side, direction: stale.side, contracts: stale.contracts,
-                periodKey: stale.periodKey, paperMode: false,
-                reason: `Kalshi shows no matching position (${RECONCILE_DEBOUNCE_HITS} consecutive checks)`,
-            });
-        } else if (liveQty !== currentPosition.totalContracts) {
-            consecutiveEmptyReconciles = 0;
-            const before = currentPosition.totalContracts;
-            currentPosition.totalContracts = liveQty;
-            currentPosition.contracts = liveQty;
-            setThought('reconcile', `adjusted contracts ${before}→${liveQty} from Kalshi for ${ticker}`);
-            eventLog.log('reconcile_adjust', { asset: assetKey, ticker, before, after: liveQty });
-        } else {
-            consecutiveEmptyReconciles = 0;
+            return;
+        }
+
+        // Build currentPosition from Kalshi's view.
+        const rawPos = parseInt(kpos.position, 10) || 0;
+        const qty = Math.abs(rawPos);
+        const side = rawPos > 0 ? 'yes' : 'no';
+        // Kalshi reports market_exposure in CENTS (matches the same convention
+        // as our limitPrice). Avg fill price = exposure / contracts.
+        const exposureCents = Math.abs(parseInt(kpos.market_exposure, 10) || 0);
+        const avgPriceCents = qty > 0 ? Math.round(exposureCents / qty) : 0;
+
+        const meta = metaByTicker[kpos.ticker] || {};
+        const wasNew = !currentPosition || currentPosition.ticker !== kpos.ticker;
+        if (wasNew && !meta.entryTime) {
+            // First time we're seeing this position — anchor metadata now.
+            meta.entryTime = Date.now();
+            metaByTicker[kpos.ticker] = meta;
+            lastEntryTime = Date.now();
+        }
+
+        currentPosition = {
+            ticker: kpos.ticker,
+            side,
+            action: 'buy',
+            contracts: qty,
+            totalContracts: qty,
+            entryPrice: avgPriceCents,
+            totalCostCents: exposureCents,
+            entryTime: meta.entryTime || Date.now(),
+            periodKey: meta.periodKey || lastPeriodKey,
+            strike: meta.strike || null,
+            orderId: meta.orderId || null,
+        };
+
+        // Pending-order hint: if Kalshi now shows our position, the order has
+        // landed; clear the pending tag.
+        if (pendingOrderTicker === kpos.ticker) {
+            pendingOrderTicker = null;
         }
     } catch (e) {
-        console.warn('[trade-executor] reconcile failed:', e.message);
-        eventLog.log('reconcile_error', { asset: assetKey, message: e.message });
+        console.warn('[trade-executor] live position refresh failed:', e.message);
+        eventLog.log('kalshi_refresh_error', { asset: assetKey, message: e.message });
     }
 }
+
+// Backwards-compat alias — server still calls reconcileFromKalshi.
+const reconcileFromKalshi = refreshLivePosition;
+
 
 // Manual escape hatch: nuke local position without placing any order. For when
 // reconcile hasn't caught the drift yet and the user wants to clear the panel.
@@ -236,19 +262,24 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
         return { ok: true, orderId, position: currentPosition };
     }
 
-    // LIVE
+    // LIVE — order placed, but DO NOT optimistically set currentPosition.
+    // The order may be resting (limit price not yet matched) or rejected.
+    // refreshLivePosition() pulls Kalshi as the source of truth; the next
+    // refresh cycle will populate currentPosition if/when Kalshi confirms a
+    // fill. We only stash metadata so the eventual position can be tagged
+    // with the right period.
     try {
         const yesPrice = side === 'yes' ? limitPrice : undefined;
         const noPrice  = side === 'no'  ? limitPrice : undefined;
         const resp = await kalshi.placeOrder({ ticker, side, action: 'buy', count: contracts, yesPrice, noPrice });
         const orderId = resp?.order?.order_id || null;
-        currentPosition = {
-            ticker, side, action: 'buy', contracts, entryPrice: limitPrice, orderId, periodKey, strike,
-            totalCostCents: costCents, totalContracts: contracts, entryTime: Date.now(),
+        metaByTicker[ticker] = {
+            periodKey, strike, orderId,
+            entryTime: (metaByTicker[ticker] && metaByTicker[ticker].entryTime) || null,
         };
-        lastEntryTime = Date.now();
-        consecutiveEmptyReconciles = 0;
-        setThought('entry', `LIVE BUY ${contracts}x ${side} @ ${limitPrice}c on ${ticker} → order ${orderId}`, { side, contracts, edge: betQuality?.edge, quality: betQuality?.quality, probability: betQuality?.factors?.probability });
+        pendingOrderTicker = ticker;
+        pendingOrderPlacedAt = Date.now();
+        setThought('entry-pending', `LIVE BUY ${contracts}x ${side} @ ${limitPrice}c placed on ${ticker} → order ${orderId} (awaiting fill)`, { side, contracts, edge: betQuality?.edge, quality: betQuality?.quality, probability: betQuality?.factors?.probability });
         ensureDailyStats();
         dailyStats.tradeCount += 1;
         pushTrade({
@@ -257,8 +288,9 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
             edge: edge != null ? (edge * 100).toFixed(1) + '%' : null,
             reason: betQuality?.reason || 'auto entry',
             paperMode: false,
+            pendingFill: true,
         });
-        return { ok: true, orderId, position: currentPosition };
+        return { ok: true, orderId, pending: true };
     } catch (e) {
         setThought('error', `LIVE BUY FAILED: ${e.message}`);
         return { ok: false, reason: e.message };
@@ -295,19 +327,25 @@ async function placeSell(reasonText) {
         return { ok: true, pnl };
     }
 
+    // LIVE — sell order placed, but DO NOT optimistically clear
+    // currentPosition. The sell may rest, partially fill, or be rejected
+    // (e.g. zero position to sell). Trust refreshLivePosition to reflect
+    // Kalshi truth on the next cycle.
     try {
         const yesPrice = side === 'yes' ? sellPrice : undefined;
         const noPrice  = side === 'no'  ? sellPrice : undefined;
         const resp = await kalshi.placeOrder({ ticker, side, action: 'sell', count: contracts, yesPrice, noPrice });
-        setThought('exit', `LIVE SELL ${contracts}x ${side} @ ${sellPrice}c (${reasonText})`, { side, contracts });
+        setThought('exit-pending', `LIVE SELL ${contracts}x ${side} @ ${sellPrice}c placed on ${ticker} (${reasonText}, awaiting fill)`, { side, contracts });
         pushTrade({
             type: 'sell', action: 'sell', side, direction: side, contracts, limitPrice: sellPrice,
             ticker, periodKey, reason: reasonText, paperMode: false,
             orderId: resp?.order?.order_id || null,
+            pendingFill: true,
         });
+        // Mark soldThisPeriod so the auto-trader doesn't immediately re-enter
+        // before Kalshi updates. Position itself is cleared by next refresh.
         soldThisPeriod = true;
-        currentPosition = null;
-        return { ok: true };
+        return { ok: true, pending: true };
     } catch (e) {
         setThought('error', `LIVE SELL FAILED: ${e.message}`);
         return { ok: false, reason: e.message };
@@ -323,6 +361,7 @@ async function onNewPrediction(prediction, ticker, strike, periodKey) {
         lastPeriodKey = periodKey;
         soldThisPeriod = false;
         reentriesThisPeriod = 0;
+        lastSellAt = 0;
     }
 
     const stop = dailyStopHit();
@@ -371,6 +410,18 @@ async function onSellSignal(sellSignal, minutesRemaining, prediction, strike, cu
             });
             return;
         }
+        // Don't hammer Kalshi with duplicate sells while a previous sell
+        // order is still resting — wait at least 30s between attempts.
+        const sinceLastSellSec = (Date.now() - (lastSellAt || 0)) / 1000;
+        if (lastSellAt && sinceLastSellSec < 30) {
+            setThought('holding', `sell already pending (${Math.round(sinceLastSellSec)}s ago) — waiting`);
+            eventLog.log('sell_throttled', {
+                asset: assetKey, sinceLastSellSec: Math.round(sinceLastSellSec),
+                ticker: currentPosition.ticker,
+            });
+            return;
+        }
+        lastSellAt = Date.now();
         decisionLog.logSellDecision({
             sellSignal, minutesRemaining, acted: true,
             currentPrice, strike,
@@ -443,8 +494,10 @@ async function onDipOpportunity(prediction, sellSignal, strike, currentPrice, mi
         }
     }
 
-    currentPosition.totalContracts += addContracts;
-    currentPosition.totalCostCents += askCents * addContracts;
+    if (config.paperMode) {
+        currentPosition.totalContracts += addContracts;
+        currentPosition.totalCostCents += askCents * addContracts;
+    } // else: refreshLivePosition will update from Kalshi
     const dipImprovement = (currentPosition.entryPrice - askCents).toFixed(1) + 'c';
     pushTrade({
         type: 'dip_buy', action: 'buy', side: currentPosition.side, direction: currentPosition.side,
@@ -487,20 +540,35 @@ async function onLateLock(prediction, strike, currentPrice, minutesRemaining, ti
         }
     }
 
-    if (!currentPosition) {
-        currentPosition = {
-            ticker, side, action: 'buy', contracts, entryPrice: askCents,
-            orderId: 'late-lock-' + Date.now(), periodKey, strike,
-            totalCostCents: askCents * contracts, totalContracts: contracts, entryTime: Date.now(),
-        };
+    // Paper mode: update currentPosition optimistically.
+    // Live mode: skip — refreshLivePosition will pull truth from Kalshi.
+    if (config.paperMode) {
+        if (!currentPosition) {
+            currentPosition = {
+                ticker, side, action: 'buy', contracts, entryPrice: askCents,
+                orderId: 'late-lock-' + Date.now(), periodKey, strike,
+                totalCostCents: askCents * contracts, totalContracts: contracts, entryTime: Date.now(),
+            };
+            lastEntryTime = Date.now();
+        } else {
+            currentPosition.totalContracts += contracts;
+            currentPosition.totalCostCents += askCents * contracts;
+        }
     } else {
-        currentPosition.totalContracts += contracts;
-        currentPosition.totalCostCents += askCents * contracts;
+        // Anchor metadata so the position pulled from Kalshi inherits the
+        // right period/strike when it lands.
+        metaByTicker[ticker] = {
+            periodKey, strike,
+            entryTime: (metaByTicker[ticker] && metaByTicker[ticker].entryTime) || null,
+        };
+        pendingOrderTicker = ticker;
+        pendingOrderPlacedAt = Date.now();
     }
     pushTrade({
         type: 'late_lock', action: 'buy', side, direction: side,
         contracts, limitPrice: askCents, ticker, periodKey,
         sigmaDistance: sigmaDistance + 'pts', paperMode: config.paperMode,
+        pendingFill: !config.paperMode,
     });
     decisionLog.logMidPeriodStrategy({ kind: 'late_lock', periodKey, contracts, askCents });
 }
@@ -560,8 +628,10 @@ async function pressBet(arg1) {
             await kalshi.placeOrder({ ticker, side, action: 'buy', count: addContracts, yesPrice, noPrice });
         } catch (e) { return { ok: false, reason: e.message }; }
     }
-    currentPosition.totalContracts += addContracts;
-    currentPosition.totalCostCents += entryPrice * addContracts;
+    if (config.paperMode) {
+        currentPosition.totalContracts += addContracts;
+        currentPosition.totalCostCents += entryPrice * addContracts;
+    } // else: refreshLivePosition will pick up the new contracts from Kalshi
     pushTrade({
         type: 'press', action: 'buy', side, direction: side,
         contracts: addContracts, limitPrice: entryPrice, ticker, periodKey,
