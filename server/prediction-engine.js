@@ -490,12 +490,19 @@ function createEngine(assetKey = 'btc') {
 
     function handleNewPeriod(periodKey, marketData, minutesAhead, kalshiStrike, periodEnd) {
         const prediction = predictPrice(marketData, minutesAhead, kalshiStrike);
+        // Stamp the ORIGINAL predicted direction once, at period open. The
+        // history renderer, the grader, and the period-history badges all
+        // read from this single field — without it, the renderer fell back
+        // to a default '▼ DOWN' badge that could disagree with both the
+        // displayed predictedPrice and the 'Correct' flag.
+        const predictedDirection = prediction.predictedPrice >= kalshiStrike ? 'up' : 'down';
         store.recordPrediction({
             periodKey,
             time: new Date().toISOString(),
             timestamp: Date.now(),
             startPrice: kalshiStrike,
             predictedPrice: prediction.predictedPrice,
+            predictedDirection, // canonical — never overwritten by smoothing
             predictedHigh: prediction.predictedHigh,
             predictedLow: prediction.predictedLow,
             probability: prediction.probability,        // calibrated
@@ -546,13 +553,17 @@ function createEngine(assetKey = 'btc') {
         const entry = log.find(p => p.periodKey === periodKey);
         if (!entry || entry.startPrice == null) return;
         const wentUp = actualPrice >= entry.startPrice;
-        // Grade against the bet side the model would actually have taken
-        // (probUp >= 0.5), matching the trade-side selection from P3.2.
-        // Falls back to predictedPrice for legacy entries that pre-date the
-        // probability field.
-        const predUp = entry.probability != null
-            ? entry.probability >= 0.5
-            : (entry.predictedPrice >= entry.startPrice);
+        // Grade against the predictedDirection field stamped at period
+        // open — the SAME field the history renderer shows. Without this
+        // alignment, a 'Correct' flag could disagree with the displayed
+        // direction badge (e.g. badge ▼ DOWN but row says ✓ Correct on a
+        // period that went up). Falls back to legacy comparisons only
+        // for entries from before the field was added.
+        const predUp = entry.predictedDirection
+            ? entry.predictedDirection === 'up'
+            : (entry.probability != null
+                ? entry.probability >= 0.5
+                : (entry.predictedPrice >= entry.startPrice));
         const correct = wentUp === predUp;
         // Bin by RAW probability so the calibration map learns the model's
         // bias (raw -> empirical). Falls back to displayed probability if
@@ -577,7 +588,12 @@ function createEngine(assetKey = 'btc') {
                 if (e.periodKey === currentPeriodKey) continue;
                 if (e.correct == null && e.startPrice != null) {
                     const wentUp = actualPrice >= e.startPrice;
-                    const predUp = e.predictedPrice >= e.startPrice;
+                    // Same source of truth as gradeBayesianPrediction:
+                    // the original predictedDirection stamped at period
+                    // open. predictedPrice fallback for legacy entries.
+                    const predUp = e.predictedDirection
+                        ? e.predictedDirection === 'up'
+                        : (e.predictedPrice >= e.startPrice);
                     e.actualPrice = actualPrice;
                     e.actualDirection = wentUp ? 'up' : 'down';
                     e.correct = wentUp === predUp;
