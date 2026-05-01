@@ -1681,15 +1681,16 @@ function broadcast(data) {
 }
 
 // Forward trade events to all WebSocket clients for push notifications
-tradeExecutor.onTradeNotify((trade) => {
+// Trade-notify handler shared by both executors so ETH fills push to the UI
+// in real time too (was BTC-only before, leaving ETH trade rows dependent on
+// the next polling cycle).
+function handleTradeNotify(trade) {
     broadcast({ type: 'trade', trade });
     autoTraderLog.logTradeAction(trade);
-
-    // After a settle, snapshot session state so the narrative log shows
-    // running balance + W/L progression next to each closed period.
     if (trade && trade.type === 'settle') {
         try {
-            const status = tradeExecutor.getStatus();
+            const exec = trade.asset === 'eth' ? ethExecutor : tradeExecutor;
+            const status = exec.getStatus();
             autoTraderLog.logSessionState({
                 env: kalshiAuth.getEnvironment ? kalshiAuth.getEnvironment() : '?',
                 balanceCents: status.balanceCents,
@@ -1700,7 +1701,9 @@ tradeExecutor.onTradeNotify((trade) => {
             });
         } catch (e) { /* non-fatal */ }
     }
-});
+}
+tradeExecutor.onTradeNotify(handleTradeNotify);
+ethExecutor.onTradeNotify(handleTradeNotify);
 
 wss.on('connection', (ws, req) => {
     console.log(`Client connected (total: ${wss.clients.size})`);
@@ -2445,15 +2448,17 @@ app.post('/api/trading/force-sell', async (req, res) => {
 
 // Force-sell every open position across all assets.
 app.post('/api/trading/force-sell-all', async (req, res) => {
-    const results = {};
-    for (const asset of ['btc', 'eth']) {
+    // Parallel + per-asset 5s timeout so a hang on BTC's Kalshi call can't
+    // block ETH from selling. Each asset reports its own outcome.
+    const sellOne = (asset) => {
         const { executor } = executorContext(asset);
-        try {
-            results[asset] = await executor.forceSell();
-        } catch (err) {
-            results[asset] = { ok: false, reason: err.message };
-        }
-    }
+        return Promise.race([
+            executor.forceSell().catch(err => ({ ok: false, reason: err.message })),
+            new Promise(resolve => setTimeout(() => resolve({ ok: false, reason: 'timeout after 5s' }), 5000)),
+        ]);
+    };
+    const settled = await Promise.allSettled(['btc', 'eth'].map(sellOne));
+    const results = { btc: settled[0].value || settled[0].reason, eth: settled[1].value || settled[1].reason };
     res.json({ ok: true, results });
 });
 
