@@ -2402,6 +2402,14 @@ app.post('/api/trading/kill-switch', (req, res) => {
     res.json({ killSwitch: active, message: active ? 'Kill switch ACTIVATED — all trading halted' : 'Kill switch deactivated' });
 });
 
+app.post('/api/trading/auto-sell', (req, res) => {
+    const enabled = req.body?.enabled !== false; // default to enabling
+    // Apply to both per-asset executors so the toggle covers BTC and ETH.
+    tradeExecutor.setAutoSellEnabled(enabled);
+    ethExecutor.setAutoSellEnabled(enabled);
+    res.json({ autoSellEnabled: enabled, message: enabled ? 'Auto-sell ENABLED' : 'Auto-sell DISABLED — bot will hold positions through sell signals' });
+});
+
 // Resolve the executor + market context for an asset key.
 function executorContext(asset) {
     if (asset === 'eth') {

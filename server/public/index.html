@@ -919,6 +919,9 @@
                 <button class="trading-btn trading-btn-danger" id="trading-kill-btn" onclick="toggleKillSwitch()">Kill Switch</button>
                 <button class="trading-btn" id="notif-btn" onclick="toggleNotifications()" style="font-size:12px">Notifications: OFF</button>
             </div>
+            <div style="margin-top:6px;">
+                <button class="trading-btn" id="auto-sell-btn" onclick="toggleAutoSell()" style="width:100%;font-size:12px">Auto-Sell: ON</button>
+            </div>
             <div style="margin-top:6px;display:flex;gap:6px;">
                 <button class="trading-btn" id="force-up-btn" onclick="forceBet('up')" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(63,185,80,0.15);border-color:rgba(63,185,80,0.4);color:#3fb950;">&#9650; FORCE UP</button>
                 <button class="trading-btn" id="force-down-btn" onclick="forceBet('down')" style="flex:1;padding:8px 0;font-size:12px;font-weight:800;letter-spacing:1px;background:rgba(248,81,73,0.15);border-color:rgba(248,81,73,0.4);color:#f85149;">&#9660; FORCE DOWN</button>
@@ -2385,6 +2388,18 @@
                 killBtn.textContent = 'Kill Switch';
                 killBtn.className = 'trading-btn trading-btn-danger';
             }
+
+            // Auto-sell button state. Default-undefined treated as ON to
+            // match the server-side default and avoid a misleading "OFF"
+            // flicker before the first status payload arrives.
+            const autoSellBtn = document.getElementById('auto-sell-btn');
+            if (autoSellBtn) {
+                const enabled = ts.autoSellEnabled !== false;
+                autoSellBtn.textContent = enabled ? 'Auto-Sell: ON' : 'Auto-Sell: OFF';
+                autoSellBtn.style.background = enabled ? '' : 'rgba(248,81,73,0.15)';
+                autoSellBtn.style.borderColor = enabled ? '' : 'rgba(248,81,73,0.4)';
+                autoSellBtn.style.color = enabled ? '' : '#f85149';
+            }
         }
 
         // ── Edge Quality Bar Rendering ──
@@ -2861,6 +2876,22 @@
                     body: JSON.stringify({ active: activate })
                 });
             } catch (e) { console.error('Kill switch failed:', e); }
+        }
+
+        async function toggleAutoSell() {
+            try {
+                const ts = serverData && serverData.tradingStatus;
+                const currentlyEnabled = ts ? ts.autoSellEnabled !== false : true;
+                const enable = !currentlyEnabled;
+                if (!enable) {
+                    if (!confirm('Disable auto-sell?\n\nThe bot will hold open positions through automatic sell signals (lost-cause / confident-flip). You will need to exit manually via Sell All or Force Sell.')) return;
+                }
+                await fetch('/api/trading/auto-sell', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: enable })
+                });
+            } catch (e) { console.error('Auto-sell toggle failed:', e); }
         }
 
         function renderSellSignal(containerId) {

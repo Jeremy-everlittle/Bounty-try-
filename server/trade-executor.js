@@ -45,6 +45,11 @@ const config = {
 // Real money is blocked until the user explicitly flips it off in the UI;
 // the choice is then persisted in `store_state` so it survives restarts.
 let killSwitch = true;
+// When false, the bot ignores automatic sell signals (sellSignal.level
+// 'lost_cause'/'confident_flip') so a transient price dip doesn't dump a
+// position that may recover. Manual sells (Sell All, Force Sell) bypass
+// this and always execute. Default ON to preserve existing behavior.
+let autoSellEnabled = true;
 const tradeListeners = [];
 // Paper balances in CENTS — demo + production tracked separately
 const paperBalances = { demo: 250000, production: 250000 };
@@ -533,6 +538,12 @@ async function onNewPrediction(prediction, ticker, strike, periodKey) {
 async function onSellSignal(sellSignal, minutesRemaining, prediction, strike, currentPrice) {
     if (killSwitch || !currentPosition) return;
     if (!sellSignal) return;
+    if (!autoSellEnabled) {
+        // Operator turned auto-sell off — hold the position regardless of
+        // sellSignal level. They'll exit manually via Sell All / Force Sell.
+        setThought('holding', `auto-sell OFF — holding ${currentPosition.contracts}x ${currentPosition.side} (${sellSignal.shortLabel || sellSignal.level})`);
+        return;
+    }
 
     if (sellSignal.level === 'lost_cause' || sellSignal.level === 'confident_flip') {
         // Block reflexive sells: a buy that was placed seconds ago shouldn't
@@ -833,6 +844,16 @@ async function saveKillSwitchToDB() {
     catch (e) { /* non-fatal */ }
 }
 
+function setAutoSellEnabled(enabled) {
+    autoSellEnabled = !!enabled;
+    saveAutoSellToDB();
+}
+
+async function saveAutoSellToDB() {
+    try { await db.saveStoreState('auto-sell', { enabled: autoSellEnabled }); }
+    catch (e) { /* non-fatal */ }
+}
+
 function setPaperMode(paperMode) {
     config.paperMode = !!paperMode;
 }
@@ -903,6 +924,7 @@ function getStatus() {
     return {
         paperMode: config.paperMode,
         killSwitch,
+        autoSellEnabled,
         configured: kalshiAuth.isConfigured ? kalshiAuth.isConfigured() : false,
         balanceCents: balanceCents != null ? balanceCents : null,
         currentPosition: posOut,
@@ -953,6 +975,13 @@ async function initFromDB() {
                 setThought('killed', 'KILL SWITCH ON (default — flip off in UI to enable trading)');
             }
             console.log(`[trade-executor] Kill switch on startup: ${killSwitch ? 'ON' : 'off'}`);
+        } catch (e) { /* non-fatal — keep default ON */ }
+        try {
+            const savedAutoSell = await db.loadStoreState('auto-sell');
+            if (savedAutoSell && typeof savedAutoSell === 'object' && typeof savedAutoSell.enabled === 'boolean') {
+                autoSellEnabled = savedAutoSell.enabled;
+            }
+            console.log(`[trade-executor] Auto-sell on startup: ${autoSellEnabled ? 'ON' : 'OFF'}`);
         } catch (e) { /* non-fatal — keep default ON */ }
         try {
             const stats = await db.loadDailyStats(todayKey(), 'btc');
@@ -1077,6 +1106,7 @@ return {
     pressBet: (...args) => enqueue(() => pressBet(...args)),
     forceSell: (...args) => enqueue(() => forceSell(...args)),
     setKillSwitch,
+    setAutoSellEnabled,
     setPaperMode,
     setPaperBalance,
     addPaperBalance,
