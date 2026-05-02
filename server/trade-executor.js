@@ -114,7 +114,9 @@ const metaByTicker = {}; // ticker -> { periodKey, entryTime }
 let pendingOrderTicker = null; // ticker of the most recent live order placed
 let pendingOrderPlacedAt = 0;  // ms epoch — used to surface "PENDING FILL" UI hints
 let lastBuyAt = 0;             // ms epoch of most recent buy (any path) — cooldown floor
+let unfilledAttemptsThisPeriod = 0; // count of IOC orders placed this period that didn't fill
 const MIN_BUY_INTERVAL_MS = 8000;
+const MAX_BUY_ATTEMPTS_PER_PERIOD = 2; // initial + 1 retry. After that, sit out the period.
 
 async function refreshLivePosition() {
     if (config.paperMode) return;
@@ -166,14 +168,18 @@ async function refreshLivePosition() {
             // Clear a stale pending-order flag. With immediate_or_cancel TIF,
             // an order either fills (showing up in active positions above) or
             // cancels within a second. If 10s have passed and Kalshi still
-            // shows no matching position, the order didn't fill — clear the
-            // flag so the next cycle isn't stuck on "awaiting confirmation"
-            // and can place a fresh order.
+            // shows no matching position, the order didn't fill. Count it as
+            // a failed attempt for this period (capped at MAX_BUY_ATTEMPTS_PER_PERIOD
+            // by onNewPrediction) so we don't spam Kalshi with rapid retries.
+            // Also bump lastBuyAt so the per-buy cooldown applies to the retry.
             if (pendingOrderTicker && (Date.now() - pendingOrderPlacedAt) > 10_000) {
+                unfilledAttemptsThisPeriod += 1;
+                lastBuyAt = Date.now();
                 eventLog.log('pending_order_cleared_unfilled', {
                     asset: assetKey, ticker: pendingOrderTicker,
                     pendingForMs: Date.now() - pendingOrderPlacedAt,
                     activeCount: active.length,
+                    unfilledAttemptsThisPeriod,
                 });
                 pendingOrderTicker = null;
                 pendingOrderPlacedAt = 0;
@@ -434,6 +440,7 @@ async function onNewPrediction(prediction, ticker, strike, periodKey) {
         lastPeriodKey = periodKey;
         soldThisPeriod = false;
         reentriesThisPeriod = 0;
+        unfilledAttemptsThisPeriod = 0;
         lastSellAt = 0;
         // Drop metadata for tickers from prior periods so a stale `confirmedAt`
         // doesn't trick refreshLivePosition into thinking a stale position is
@@ -462,6 +469,14 @@ async function onNewPrediction(prediction, ticker, strike, periodKey) {
     // order is still pending, draining the account in seconds.
     if (!config.paperMode && pendingOrderTicker) {
         setThought('holding', `pending live order on ${pendingOrderTicker} — awaiting Kalshi confirmation`);
+        return;
+    }
+    // After MAX_BUY_ATTEMPTS_PER_PERIOD unfilled IOC orders this period, sit
+    // out — the limit price clearly isn't matching the book and burning
+    // through more attempts just clutters logs and risks a partial fill at a
+    // worse price later. Period rollover resets the counter.
+    if (!config.paperMode && unfilledAttemptsThisPeriod >= MAX_BUY_ATTEMPTS_PER_PERIOD) {
+        setThought('idle', `${unfilledAttemptsThisPeriod} unfilled attempts this period — sitting out`);
         return;
     }
     if (!config.paperMode && (Date.now() - lastBuyAt) < MIN_BUY_INTERVAL_MS) {
