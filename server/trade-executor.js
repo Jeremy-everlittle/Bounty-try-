@@ -163,6 +163,21 @@ async function refreshLivePosition() {
                     soldThisPeriodSet: wasConfirmed,
                 });
             }
+            // Clear a stale pending-order flag. With immediate_or_cancel TIF,
+            // an order either fills (showing up in active positions above) or
+            // cancels within a second. If 10s have passed and Kalshi still
+            // shows no matching position, the order didn't fill — clear the
+            // flag so the next cycle isn't stuck on "awaiting confirmation"
+            // and can place a fresh order.
+            if (pendingOrderTicker && (Date.now() - pendingOrderPlacedAt) > 10_000) {
+                eventLog.log('pending_order_cleared_unfilled', {
+                    asset: assetKey, ticker: pendingOrderTicker,
+                    pendingForMs: Date.now() - pendingOrderPlacedAt,
+                    activeCount: active.length,
+                });
+                pendingOrderTicker = null;
+                pendingOrderPlacedAt = 0;
+            }
             return;
         }
 
@@ -427,10 +442,11 @@ async function onNewPrediction(prediction, ticker, strike, periodKey) {
         for (const t of Object.keys(metaByTicker)) {
             if (metaByTicker[t].periodKey !== periodKey) delete metaByTicker[t];
         }
-        // Clear stale pending-order tag if it's older than 5 minutes — that's
-        // long enough that a resting order should have either filled or be
-        // assumed dead by the operator.
-        if (pendingOrderTicker && (Date.now() - pendingOrderPlacedAt) > 5 * 60_000) {
+        // Clear stale pending-order tag. With immediate_or_cancel TIF, orders
+        // resolve in <1s, so 30s is a generous upper bound — anything older
+        // is a stuck flag, not a live order. (refreshLivePosition also clears
+        // this within 10s when no matching position appears.)
+        if (pendingOrderTicker && (Date.now() - pendingOrderPlacedAt) > 30_000) {
             pendingOrderTicker = null;
             pendingOrderPlacedAt = 0;
         }
