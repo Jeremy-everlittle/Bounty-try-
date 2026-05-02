@@ -65,6 +65,7 @@ async function kalshiFetch(method, path, body = null, timeout = 10000) {
             const detail = (data && typeof data === 'object')
                 ? (data.error?.message || data.error?.code || data.message || JSON.stringify(data))
                 : (typeof data === 'string' && data ? data : '');
+            console.error(`[kalshi-trading] ${method} ${path} → ${res.status}; full response: ${typeof data === 'string' ? data : JSON.stringify(data)}`);
             const err = new Error(`Kalshi API ${method} ${path} → ${res.status}${detail ? ` — ${detail}` : ''}`);
             err.status = res.status;
             err.response = data;
@@ -169,7 +170,17 @@ async function placeOrder({ ticker, side, action, count, yesPrice, noPrice, type
     if (noPrice !== undefined) {
         body.no_price_dollars = centsToDollars(noPrice);
     }
-    if (timeInForce) body.time_in_force = timeInForce;
+    if (timeInForce) {
+        // Kalshi rejects shorthand ('IOC', 'FOK', 'GTC') with 400 — accept
+        // common aliases and translate to the API's spelled-out values.
+        const tifMap = {
+            ioc: 'immediate_or_cancel',
+            fok: 'fill_or_kill',
+            gtc: 'good_til_cancelled',
+        };
+        const key = String(timeInForce).toLowerCase();
+        body.time_in_force = tifMap[key] || timeInForce;
+    }
 
     const priceCents = yesPrice || noPrice || 0;
     console.log(`[kalshi-trading] Placing order: ${action} ${count}x ${side} on ${ticker} @ ${priceCents}c ($${centsToDollars(priceCents)})`);

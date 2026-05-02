@@ -30,12 +30,14 @@ const config = {
     maxDailyTrades: 100,
     maxReentriesPerPeriod: 1,    // hard cap on round-trips per 15m period
     minHoldSeconds: 45,          // must hold this long before sell signals can fire
-    // Default time-in-force for ALL Kalshi orders we send. 'IOC' (immediate-
-    // or-cancel) fills whatever's matchable now and cancels the remainder, so
-    // we don't accumulate resting orders that pollute the book and could fill
-    // hours later at stale prices. Set to null to use Kalshi's default
-    // (resting limit, GTC) if a specific deploy needs the old behavior.
-    orderTimeInForce: 'IOC',
+    // Default time-in-force for ALL Kalshi orders we send. 'immediate_or_cancel'
+    // fills whatever's matchable now and cancels the remainder, so we don't
+    // accumulate resting orders that pollute the book and could fill hours
+    // later at stale prices. Set to null to use Kalshi's default (resting
+    // limit, GTC) if a specific deploy needs the old behavior.
+    // NOTE: Must be the spelled-out value — Kalshi rejects shorthand like 'IOC'
+    // with HTTP 400 "invalid parameters".
+    orderTimeInForce: 'immediate_or_cancel',
 };
 
 // ── Shared state (one wallet / one switch across BTC/ETH/etc) ─────
