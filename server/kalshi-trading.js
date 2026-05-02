@@ -146,18 +146,19 @@ async function placeOrder({ ticker, side, action, count, yesPrice, noPrice, type
 
     const clientOrderId = crypto.randomUUID();
 
-    // Convert cents (integer) → dollars (string) for the new API format
-    // e.g. 58 cents → "0.58", 5 cents → "0.05"
-    const centsToDollars = (cents) => (cents / 100).toFixed(2);
+    // Kalshi's fixed-point format wants 4-decimal dollar strings (e.g. "0.5800").
+    // 2-decimal strings ("0.58") are rejected as "invalid parameters".
+    const centsToDollars = (cents) => (cents / 100).toFixed(4);
 
-    // Post-March-12 Kalshi API: send ONLY the new fixed-point fields.
-    // Sending both `count` (legacy int) and `count_fp` (string) — or both
-    // `yes_price` and `yes_price_dollars` — returns HTTP 400.
+    // Kalshi removed legacy integer `yes_price`/`no_price` (cents) in March 2026 —
+    // only the `*_dollars` strings are accepted now. `count` (integer) is still
+    // the canonical contract-quantity field; `count_fp` is also accepted but
+    // must match if both are sent, so we just send the integer.
     const body = {
         ticker,
         side,
         action,
-        count_fp: count.toFixed(2),
+        count: Math.trunc(count),
         type,
         client_order_id: clientOrderId,
     };
