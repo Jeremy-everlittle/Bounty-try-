@@ -113,6 +113,8 @@ function setMarketData(md) { latestMarketData = md || null; }
 const metaByTicker = {}; // ticker -> { periodKey, entryTime }
 let pendingOrderTicker = null; // ticker of the most recent live order placed
 let pendingOrderPlacedAt = 0;  // ms epoch — used to surface "PENDING FILL" UI hints
+let lastBuyAt = 0;             // ms epoch of most recent buy (any path) — cooldown floor
+const MIN_BUY_INTERVAL_MS = 8000;
 
 async function refreshLivePosition() {
     if (config.paperMode) return;
@@ -334,6 +336,7 @@ async function placeBuy({ ticker, side, contracts, askCents, periodKey, strike, 
         };
         pendingOrderTicker = ticker;
         pendingOrderPlacedAt = Date.now();
+        lastBuyAt = Date.now();
         setThought('entry-pending', `LIVE BUY ${contracts}x ${side} @ ${limitPrice}c placed on ${ticker} → order ${orderId} (awaiting fill)`, { side, contracts, edge: betQuality?.edge, quality: betQuality?.quality, probability: betQuality?.factors?.probability });
         ensureDailyStats();
         dailyStats.tradeCount += 1;
@@ -436,6 +439,19 @@ async function onNewPrediction(prediction, ticker, strike, periodKey) {
     const stop = dailyStopHit();
     if (stop) { setThought('stopped', `STOPPED: ${stop}`); return; }
     if (currentPosition) { setThought('holding', `holding ${currentPosition.contracts}x ${currentPosition.side}`, { side: currentPosition.side, contracts: currentPosition.contracts }); return; }
+    // LIVE: an order was placed but Kalshi hasn't reflected the fill yet.
+    // Skip — refreshLivePosition will populate currentPosition once Kalshi
+    // confirms, and the next cycle will then take the holding branch above.
+    // Without this gate, every fetch tick re-fires placeBuy while the first
+    // order is still pending, draining the account in seconds.
+    if (!config.paperMode && pendingOrderTicker) {
+        setThought('holding', `pending live order on ${pendingOrderTicker} — awaiting Kalshi confirmation`);
+        return;
+    }
+    if (!config.paperMode && (Date.now() - lastBuyAt) < MIN_BUY_INTERVAL_MS) {
+        setThought('holding', `buy cooldown — ${Math.ceil((MIN_BUY_INTERVAL_MS - (Date.now() - lastBuyAt)) / 1000)}s left`);
+        return;
+    }
     if (soldThisPeriod) { setThought('idle', 'already sold this period — no re-entry'); return; }
 
     const bq = prediction?._betQuality;
@@ -551,6 +567,12 @@ async function onPeriodEnd({ correct, periodKey, actualDirection, strikePrice, s
 async function onDipOpportunity(prediction, sellSignal, strike, currentPrice, minutesRemaining, ticker, periodKey) {
     if (killSwitch || !currentPosition || currentPosition.periodKey !== periodKey) return;
     if (sellSignal && (sellSignal.level === 'lost_cause' || sellSignal.level === 'confident_flip')) return;
+    // LIVE: a previous order on this ticker hasn't been confirmed by Kalshi
+    // yet — skip the dip add. currentPosition.totalContracts won't reflect
+    // the pending fill, so without this gate we'd stack a dip add on top of
+    // an unconfirmed order on every fetch tick.
+    if (!config.paperMode && pendingOrderTicker) return;
+    if (!config.paperMode && (Date.now() - lastBuyAt) < MIN_BUY_INTERVAL_MS) return;
     const bq = prediction?._betQuality;
     if (!bq || !bq.shouldBet) return;
     if (currentPosition.totalContracts >= config.maxPositionContracts) return;
@@ -569,6 +591,9 @@ async function onDipOpportunity(prediction, sellSignal, strike, currentPrice, mi
             const yesPrice = currentPosition.side === 'yes' ? askCents : undefined;
             const noPrice  = currentPosition.side === 'no'  ? askCents : undefined;
             await kalshi.placeOrder({ ticker, side: currentPosition.side, action: 'buy', count: addContracts, yesPrice, noPrice, timeInForce: config.orderTimeInForce || undefined });
+            pendingOrderTicker = ticker;
+            pendingOrderPlacedAt = Date.now();
+            lastBuyAt = Date.now();
         } catch (e) {
             setThought('error', `dip add failed: ${e.message}`);
             return;
@@ -591,6 +616,8 @@ async function onDipOpportunity(prediction, sellSignal, strike, currentPrice, mi
 async function onLateLock(prediction, strike, currentPrice, minutesRemaining, ticker, periodKey) {
     if (killSwitch) return;
     if (currentPosition && currentPosition.totalContracts >= config.convictionMaxContracts) return;
+    if (!config.paperMode && pendingOrderTicker) return;
+    if (!config.paperMode && (Date.now() - lastBuyAt) < MIN_BUY_INTERVAL_MS) return;
     if ((minutesRemaining || 0) >= 2) return;
     if ((prediction?.probability ?? 0) < 0.95 && (1 - (prediction?.probability ?? 1)) < 0.95) return;
 
@@ -643,6 +670,7 @@ async function onLateLock(prediction, strike, currentPrice, minutesRemaining, ti
         };
         pendingOrderTicker = ticker;
         pendingOrderPlacedAt = Date.now();
+        lastBuyAt = Date.now();
     }
     pushTrade({
         type: 'late_lock', action: 'buy', side, direction: side,
