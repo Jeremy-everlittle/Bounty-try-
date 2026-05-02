@@ -124,7 +124,27 @@ async function refreshLivePosition() {
     try {
         const resp = await kalshi.getPositions();
         const list = (resp && resp.market_positions) || [];
-        const active = list.filter(p => p && Math.abs(parseInt(p.position, 10) || 0) > 0);
+        // Read both the legacy integer fields and the post-March-2026 fixed-
+        // point fields. Kalshi removed the legacy `position` integer in some
+        // responses, leaving only `position_fp` (signed decimal string like
+        // "5.00" / "-5.00"); without this, parseInt(p.position) was NaN and
+        // the filter dropped every active position — making the bot blind to
+        // its own fills.
+        const readPosition = (p) => {
+            const fp = p && (p.position_fp ?? p.position);
+            const n = parseFloat(fp);
+            return Number.isFinite(n) ? n : 0;
+        };
+        const readExposureCents = (p) => {
+            // Prefer the new dollar-string field, fall back to legacy cents.
+            if (p && p.market_exposure_dollars != null) {
+                const dollars = parseFloat(p.market_exposure_dollars);
+                return Number.isFinite(dollars) ? Math.round(dollars * 100) : 0;
+            }
+            const cents = parseInt(p && p.market_exposure, 10);
+            return Number.isFinite(cents) ? cents : 0;
+        };
+        const active = list.filter(p => Math.abs(readPosition(p)) > 0);
 
         // Pick which Kalshi position represents OUR position. Prefer one that
         // matches a ticker we have metadata for (i.e. we placed an order for
@@ -187,13 +207,12 @@ async function refreshLivePosition() {
             return;
         }
 
-        // Build currentPosition from Kalshi's view.
-        const rawPos = parseInt(kpos.position, 10) || 0;
-        const qty = Math.abs(rawPos);
+        // Build currentPosition from Kalshi's view, reading the post-March-
+        // 2026 fixed-point fields (with legacy fallback).
+        const rawPos = readPosition(kpos);
+        const qty = Math.round(Math.abs(rawPos)); // whole binary contracts
         const side = rawPos > 0 ? 'yes' : 'no';
-        // Kalshi reports market_exposure in CENTS (matches the same convention
-        // as our limitPrice). Avg fill price = exposure / contracts.
-        const exposureCents = Math.abs(parseInt(kpos.market_exposure, 10) || 0);
+        const exposureCents = Math.abs(readExposureCents(kpos));
         const avgPriceCents = qty > 0 ? Math.round(exposureCents / qty) : 0;
 
         const meta = metaByTicker[kpos.ticker] || {};
