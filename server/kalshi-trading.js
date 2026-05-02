@@ -62,7 +62,10 @@ async function kalshiFetch(method, path, body = null, timeout = 10000) {
                 retryErr.response = retryData;
                 throw retryErr;
             }
-            const err = new Error(`Kalshi API ${method} ${path} → ${res.status}`);
+            const detail = (data && typeof data === 'object')
+                ? (data.error?.message || data.error?.code || data.message || JSON.stringify(data))
+                : (typeof data === 'string' && data ? data : '');
+            const err = new Error(`Kalshi API ${method} ${path} → ${res.status}${detail ? ` — ${detail}` : ''}`);
             err.status = res.status;
             err.response = data;
             throw err;
@@ -147,18 +150,18 @@ async function placeOrder({ ticker, side, action, count, yesPrice, noPrice, type
     // e.g. 58 cents → "0.58", 5 cents → "0.05"
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
 
+    // Post-March-12 Kalshi API: send ONLY the new fixed-point fields.
+    // Sending both `count` (legacy int) and `count_fp` (string) — or both
+    // `yes_price` and `yes_price_dollars` — returns HTTP 400.
     const body = {
         ticker,
         side,
         action,
-        count: count,                          // legacy integer (still accepted)
-        count_fp: count.toFixed(2),             // new: string like "5.00"
+        count_fp: count.toFixed(2),
         type,
         client_order_id: clientOrderId,
     };
 
-    // Use new dollar-string format (post-March-12 migration)
-    // Only ONE of yes_price/no_price/yes_price_dollars/no_price_dollars allowed
     if (yesPrice !== undefined) {
         body.yes_price_dollars = centsToDollars(yesPrice);
     }
